@@ -2,16 +2,17 @@
 import json
 import time
 import math
+import os
 import can
 import paho.mqtt.client as mqtt
 
 # -----------------------------
 # User config
 # -----------------------------
-MQTT_HOST = "192.168.200.217"
-MQTT_PORT = 1883
-MQTT_USER = "mqtt_explorer2"
-MQTT_PASS = "exploder99"
+MQTT_HOST = os.environ.get("MQTT_HOST", "192.168.200.217")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
+MQTT_USER = os.environ.get("MQTT_USER", "mqtt_explorer2")
+MQTT_PASS = os.environ.get("MQTT_PASS", "exploder99")
 
 STATE_PREFIX = "deye_bms"               # state topics: deye_bms/...
 AVAIL_TOPIC  = f"{STATE_PREFIX}/status" # online/offline
@@ -209,6 +210,16 @@ def main():
     except AttributeError:
         client = mqtt.Client()
 
+    def on_connect(client, userdata, flags, rc):
+        # Re-announce discovery after reconnects (broker restarts etc.)
+        try:
+            client.publish(AVAIL_TOPIC, "online", retain=True)
+            publish_discovery(client)
+        except Exception:
+            pass
+
+    client.on_connect = on_connect
+
     def on_disconnect(client, userdata, rc):
         # rc != 0 means unexpected disconnect
         while True:
@@ -237,6 +248,9 @@ def main():
     bus = can.Bus(interface="socketcan", channel=CAN_IFACE)
 
     print("CAN->MQTT running (MQTT Discovery + state topics under deye_bms/). Ctrl-C to stop.")
+
+    last_heartbeat = 0.0
+    heartbeat_period = 60.0
 
     while True:
         msg = bus.recv()
@@ -310,9 +324,13 @@ def main():
             pub.publish("ext/temp_max", round(tmax, 1), retain=False, min_interval=2.0, hyst=TEMP_HYST_C)
 
         # Periodic availability heartbeat (optional but nice)
-        # (If your broker/HA is stable, the retained "online" plus LWT is usually enough.)
-        if int(time.time()) % 60 == 0:
-            client.publish(AVAIL_TOPIC, "online", retain=True)
+        now = time.time()
+        if now - last_heartbeat >= heartbeat_period:
+            try:
+                client.publish(AVAIL_TOPIC, "online", retain=True)
+            except Exception:
+                pass
+            last_heartbeat = now
 
 if __name__ == "__main__":
     main()
