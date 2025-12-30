@@ -210,7 +210,7 @@ def main():
     except AttributeError:
         client = mqtt.Client()
 
-    def on_connect(client, userdata, flags, rc):
+    def on_connect(client, userdata, flags, rc, properties=None):
         # Re-announce discovery after reconnects (broker restarts etc.)
         try:
             client.publish(AVAIL_TOPIC, "online", retain=True)
