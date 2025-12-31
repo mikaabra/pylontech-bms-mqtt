@@ -3,8 +3,20 @@ import json
 import time
 import math
 import os
+import sys
+import signal
+import logging
 import can
 import paho.mqtt.client as mqtt
+
+# -----------------------------
+# Logging setup
+# -----------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 # -----------------------------
 # User config
@@ -247,7 +259,7 @@ def main():
     pub = Publisher(client)
     bus = can.Bus(interface="socketcan", channel=CAN_IFACE)
 
-    print("CAN->MQTT running (MQTT Discovery + state topics under deye_bms/). Ctrl-C to stop.")
+    logging.info("CAN->MQTT bridge started (topics under %s/)", STATE_PREFIX)
 
     last_heartbeat = 0.0
     heartbeat_period = 60.0
