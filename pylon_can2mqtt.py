@@ -222,6 +222,20 @@ _mqtt_client = None
 _can_bus = None
 _running = True
 
+def connect_can_bus():
+    """Connect to CAN bus with retry logic."""
+    global _can_bus
+    while _running:
+        try:
+            bus = can.Bus(interface="socketcan", channel=CAN_IFACE)
+            _can_bus = bus
+            logging.info("Connected to CAN bus %s", CAN_IFACE)
+            return bus
+        except OSError as e:
+            logging.error("CAN bus %s not available: %s (retrying in 5s)", CAN_IFACE, e)
+            time.sleep(5)
+    return None
+
 def shutdown(signum=None, frame=None):
     """Graceful shutdown: publish offline status and exit."""
     global _running
@@ -287,15 +301,18 @@ def main():
     publish_discovery(client)
 
     pub = Publisher(client)
-    bus = can.Bus(interface="socketcan", channel=CAN_IFACE)
 
-    # Store in globals for signal handler access
+    # Store MQTT client in global for signal handler
     _mqtt_client = client
-    _can_bus = bus
 
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, shutdown)
     signal.signal(signal.SIGINT, shutdown)
+
+    # Connect to CAN bus (with retry)
+    bus = connect_can_bus()
+    if bus is None:
+        return
 
     logging.info("CAN->MQTT bridge started (topics under %s/)", STATE_PREFIX)
 
@@ -303,84 +320,106 @@ def main():
     heartbeat_period = 60.0
 
     while _running:
-        msg = bus.recv(timeout=1.0)  # Timeout allows checking _running flag
-        if msg is None or len(msg.data) != 8:
-            continue
-
-        arb = msg.arbitration_id
-        d = msg.data
-
-        # 0x351: limits
-        if arb == 0x351:
-            v_charge_max = le_u16(d[0], d[1]) / 10.0
-            i_charge_lim = le_u16(d[2], d[3]) / 10.0
-            i_dis_lim    = le_u16(d[4], d[5]) / 10.0
-            v_low_lim    = le_u16(d[6], d[7]) / 10.0
-
-            if not (PACK_V_MIN_V <= v_charge_max <= PACK_V_MAX_V): continue
-            if not (PACK_V_MIN_V <= v_low_lim <= PACK_V_MAX_V): continue
-            if not (0.0 <= i_charge_lim <= I_MAX_ABS_A): continue
-            if not (0.0 <= i_dis_lim <= I_MAX_ABS_A): continue
-
-            pub.publish("limit/v_charge_max", round(v_charge_max, 1), retain=True,
-                        min_interval=MIN_INTERVAL_S_LIMITS)
-            pub.publish("limit/v_low", round(v_low_lim, 1), retain=True,
-                        min_interval=MIN_INTERVAL_S_LIMITS)
-
-            pub.publish("limit/i_charge", round(i_charge_lim, 1), retain=False,
-                        min_interval=MIN_INTERVAL_S_LIMITS)
-            pub.publish("limit/i_discharge", round(i_dis_lim, 1), retain=False,
-                        min_interval=MIN_INTERVAL_S_LIMITS)
-
-        # 0x355: SOC/SOH
-        elif arb == 0x355:
-            soc = le_u16(d[0], d[1])
-            soh = le_u16(d[2], d[3])
-            if not (0 <= soc <= 100): continue
-            if not (0 <= soh <= 100): continue
-
-            pub.publish("soc", soc, retain=False, min_interval=MIN_INTERVAL_S_SOC)
-            pub.publish("soh", soh, retain=True,  min_interval=MIN_INTERVAL_S_SOC)
-
-        # 0x359: flags
-        elif arb == 0x359:
-            flags = int.from_bytes(d, byteorder="little")
-            pub.publish("flags", f"0x{flags:016X}", retain=False, min_interval=1.0)
-
-        # 0x370: extremes
-        elif arb == 0x370:
-            t1 = le_u16(d[0], d[1]) / 10.0
-            t2 = le_u16(d[2], d[3]) / 10.0
-            tmin, tmax = (t1, t2) if t1 <= t2 else (t2, t1)
-
-            if not (TEMP_MIN_C <= tmin <= TEMP_MAX_C and TEMP_MIN_C <= tmax <= TEMP_MAX_C):
+        try:
+            msg = bus.recv(timeout=1.0)  # Timeout allows checking _running flag
+            if msg is None or len(msg.data) != 8:
+                # Periodic heartbeat even when no valid messages
+                now = time.time()
+                if now - last_heartbeat >= heartbeat_period:
+                    try:
+                        client.publish(AVAIL_TOPIC, "online", retain=True)
+                    except Exception:
+                        pass
+                    last_heartbeat = now
                 continue
 
-            v1 = le_u16(d[4], d[5]) / 1000.0
-            v2 = le_u16(d[6], d[7]) / 1000.0
-            v_candidates = [v for v in (v1, v2) if CELL_V_MIN_V <= v <= CELL_V_MAX_V]
-            if not v_candidates:
-                continue
+            arb = msg.arbitration_id
+            d = msg.data
 
-            vmin = min(v_candidates)
-            vmax = max(v_candidates)
-            delta = vmax - vmin
+            # 0x351: limits
+            if arb == 0x351:
+                v_charge_max = le_u16(d[0], d[1]) / 10.0
+                i_charge_lim = le_u16(d[2], d[3]) / 10.0
+                i_dis_lim    = le_u16(d[4], d[5]) / 10.0
+                v_low_lim    = le_u16(d[6], d[7]) / 10.0
 
-            pub.publish("ext/cell_v_min", round(vmin, 3), retain=False, min_interval=1.0, hyst=VOLT_HYST_V)
-            pub.publish("ext/cell_v_max", round(vmax, 3), retain=False, min_interval=1.0, hyst=VOLT_HYST_V)
-            pub.publish("ext/cell_v_delta", round(delta, 3), retain=False, min_interval=2.0, hyst=0.005)
+                if not (PACK_V_MIN_V <= v_charge_max <= PACK_V_MAX_V): continue
+                if not (PACK_V_MIN_V <= v_low_lim <= PACK_V_MAX_V): continue
+                if not (0.0 <= i_charge_lim <= I_MAX_ABS_A): continue
+                if not (0.0 <= i_dis_lim <= I_MAX_ABS_A): continue
 
-            pub.publish("ext/temp_min", round(tmin, 1), retain=False, min_interval=2.0, hyst=TEMP_HYST_C)
-            pub.publish("ext/temp_max", round(tmax, 1), retain=False, min_interval=2.0, hyst=TEMP_HYST_C)
+                pub.publish("limit/v_charge_max", round(v_charge_max, 1), retain=True,
+                            min_interval=MIN_INTERVAL_S_LIMITS)
+                pub.publish("limit/v_low", round(v_low_lim, 1), retain=True,
+                            min_interval=MIN_INTERVAL_S_LIMITS)
 
-        # Periodic availability heartbeat (optional but nice)
-        now = time.time()
-        if now - last_heartbeat >= heartbeat_period:
+                pub.publish("limit/i_charge", round(i_charge_lim, 1), retain=False,
+                            min_interval=MIN_INTERVAL_S_LIMITS)
+                pub.publish("limit/i_discharge", round(i_dis_lim, 1), retain=False,
+                            min_interval=MIN_INTERVAL_S_LIMITS)
+
+            # 0x355: SOC/SOH
+            elif arb == 0x355:
+                soc = le_u16(d[0], d[1])
+                soh = le_u16(d[2], d[3])
+                if not (0 <= soc <= 100): continue
+                if not (0 <= soh <= 100): continue
+
+                pub.publish("soc", soc, retain=False, min_interval=MIN_INTERVAL_S_SOC)
+                pub.publish("soh", soh, retain=True,  min_interval=MIN_INTERVAL_S_SOC)
+
+            # 0x359: flags
+            elif arb == 0x359:
+                flags = int.from_bytes(d, byteorder="little")
+                pub.publish("flags", f"0x{flags:016X}", retain=False, min_interval=1.0)
+
+            # 0x370: extremes
+            elif arb == 0x370:
+                t1 = le_u16(d[0], d[1]) / 10.0
+                t2 = le_u16(d[2], d[3]) / 10.0
+                tmin, tmax = (t1, t2) if t1 <= t2 else (t2, t1)
+
+                if not (TEMP_MIN_C <= tmin <= TEMP_MAX_C and TEMP_MIN_C <= tmax <= TEMP_MAX_C):
+                    continue
+
+                v1 = le_u16(d[4], d[5]) / 1000.0
+                v2 = le_u16(d[6], d[7]) / 1000.0
+                v_candidates = [v for v in (v1, v2) if CELL_V_MIN_V <= v <= CELL_V_MAX_V]
+                if not v_candidates:
+                    continue
+
+                vmin = min(v_candidates)
+                vmax = max(v_candidates)
+                delta = vmax - vmin
+
+                pub.publish("ext/cell_v_min", round(vmin, 3), retain=False, min_interval=1.0, hyst=VOLT_HYST_V)
+                pub.publish("ext/cell_v_max", round(vmax, 3), retain=False, min_interval=1.0, hyst=VOLT_HYST_V)
+                pub.publish("ext/cell_v_delta", round(delta, 3), retain=False, min_interval=2.0, hyst=0.005)
+
+                pub.publish("ext/temp_min", round(tmin, 1), retain=False, min_interval=2.0, hyst=TEMP_HYST_C)
+                pub.publish("ext/temp_max", round(tmax, 1), retain=False, min_interval=2.0, hyst=TEMP_HYST_C)
+
+            # Periodic availability heartbeat
+            now = time.time()
+            if now - last_heartbeat >= heartbeat_period:
+                try:
+                    client.publish(AVAIL_TOPIC, "online", retain=True)
+                except Exception:
+                    pass
+                last_heartbeat = now
+
+        except can.CanError as e:
+            logging.error("CAN bus error: %s", e)
             try:
-                client.publish(AVAIL_TOPIC, "online", retain=True)
+                bus.shutdown()
             except Exception:
                 pass
-            last_heartbeat = now
+            bus = connect_can_bus()
+            if bus is None:
+                return
+
+        except Exception as e:
+            logging.exception("Unexpected error in main loop: %s", e)
 
 if __name__ == "__main__":
     main()
