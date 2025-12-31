@@ -228,6 +228,15 @@ globals:
     type: std::vector<int>
     restore_value: no
     initial_value: 'std::vector<int>(3, 0)'
+  # Balancing status: count of cells balancing per battery
+  - id: batt_balancing_count
+    type: std::vector<int>
+    restore_value: no
+    initial_value: 'std::vector<int>(3, 0)'
+  # Stack-wide balancing count
+  - id: stack_balancing_count
+    type: int
+    initial_value: '0'
 
 # Stale data detection and RS485 polling intervals
 interval:
@@ -468,6 +477,118 @@ interval:
             snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/cell_delta_mv");
             snprintf(payload, sizeof(payload), "%.0f", (stack_max - stack_min) * 1000.0f);
             id(mqtt_client).publish(topic, payload);
+
+            // Publish balancing status
+            snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/balancing_count");
+            snprintf(payload, sizeof(payload), "%d", id(stack_balancing_count));
+            id(mqtt_client).publish(topic, payload);
+
+            snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/balancing_active");
+            snprintf(payload, sizeof(payload), "%d", id(stack_balancing_count) > 0 ? 1 : 0);
+            id(mqtt_client).publish(topic, payload);
+
+            // Per-battery balancing
+            for (int b = 0; b < 3; b++) {
+              snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/battery%d/balancing_count", b);
+              snprintf(payload, sizeof(payload), "%d", id(batt_balancing_count)[b]);
+              id(mqtt_client).publish(topic, payload);
+            }
+          }
+
+  # RS485 alarm/balancing polling - every 30 seconds
+  - interval: 30s
+    then:
+      - lambda: |-
+          // Pylontech RS485 alarm command (CID2=0x44)
+          auto calc_chksum = [](const std::string& frame) -> std::string {
+            uint32_t total = 0;
+            for (char c : frame) total += (uint8_t)c;
+            uint16_t chk = (~total + 1) & 0xFFFF;
+            char buf[5];
+            snprintf(buf, sizeof(buf), "%04X", chk);
+            return std::string(buf);
+          };
+
+          auto make_alarm_cmd = [&calc_chksum](int addr, int batt_num) -> std::string {
+            char frame[32];
+            char info[3];
+            snprintf(info, sizeof(info), "%02X", batt_num);
+            int info_len = 1;
+            int lchksum = (~(0 + 0 + info_len) + 1) & 0xF;
+            char lenid[5];
+            snprintf(lenid, sizeof(lenid), "%X%03X", lchksum, info_len * 2);
+            // CID2 = 0x44 for alarm info
+            snprintf(frame, sizeof(frame), "20%02X4644%s%s", addr, lenid, info);
+            std::string result = "~";
+            result += frame;
+            result += calc_chksum(frame);
+            result += "\r";
+            return result;
+          };
+
+          int total_balancing = 0;
+
+          // Poll all batteries for alarm/balancing status
+          for (int batt = 0; batt < 3; batt++) {
+            std::string cmd = make_alarm_cmd(2, batt);
+
+            // Clear buffer and send
+            while (id(rs485_uart).available()) {
+              uint8_t c;
+              id(rs485_uart).read_byte(&c);
+            }
+
+            for (char c : cmd) {
+              id(rs485_uart).write_byte((uint8_t)c);
+            }
+            id(rs485_uart).flush();
+
+            // Wait for response
+            delay(300);
+
+            // Read response
+            std::string response;
+            while (id(rs485_uart).available()) {
+              uint8_t c;
+              id(rs485_uart).read_byte(&c);
+              response += (char)c;
+            }
+
+            if (response.length() < 18 || response.substr(7, 2) != "00") {
+              ESP_LOGW("rs485", "Alarm response error for battery %d", batt);
+              continue;
+            }
+
+            // Extract INFO data
+            std::string data = response.substr(13, response.length() - 13 - 5);
+            if (data.length() < 40) continue;  // Need at least header + 16 cells + temp count
+
+            // Parse: skip header (4), battery (2), get num_cells (2)
+            int num_cells = strtol(data.substr(4, 2).c_str(), nullptr, 16);
+
+            // Count balancing cells (bytes 6 onwards, 1 byte per cell)
+            int balancing = 0;
+            for (int c = 0; c < num_cells && c < 16; c++) {
+              int pos = 6 + c * 2;
+              if (pos + 2 <= (int)data.length()) {
+                int status = strtol(data.substr(pos, 2).c_str(), nullptr, 16);
+                if (status & 0x80) {  // Balancing bit
+                  balancing++;
+                }
+              }
+            }
+
+            id(batt_balancing_count)[batt] = balancing;
+            total_balancing += balancing;
+
+            if (balancing > 0) {
+              ESP_LOGI("rs485", "Battery %d: %d cells balancing", batt, balancing);
+            }
+          }
+
+          id(stack_balancing_count) = total_balancing;
+          if (total_balancing > 0) {
+            ESP_LOGI("rs485", "Stack total: %d cells balancing", total_balancing);
           }
 
 # Sensors - these publish to MQTT topics matching the Python script
