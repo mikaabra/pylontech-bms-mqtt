@@ -223,6 +223,20 @@ _mqtt_client = None
 _can_bus = None
 _running = True
 
+def validate_startup():
+    """Log configuration and validate startup conditions."""
+    logging.info("Configuration: MQTT=%s:%d CAN=%s", MQTT_HOST, MQTT_PORT, CAN_IFACE)
+
+    # Check if CAN interface exists (warning only, we have retry logic)
+    can_path = f"/sys/class/net/{CAN_IFACE}"
+    if not os.path.exists(can_path):
+        logging.warning("CAN interface %s not found (will retry)", CAN_IFACE)
+
+    # Validate MQTT port
+    if not (1 <= MQTT_PORT <= 65535):
+        logging.error("Invalid MQTT_PORT: %d", MQTT_PORT)
+        sys.exit(1)
+
 def connect_can_bus():
     """Connect to CAN bus with retry logic."""
     global _can_bus
@@ -261,6 +275,9 @@ def shutdown(signum=None, frame=None):
 
 def main():
     global _mqtt_client, _can_bus
+
+    validate_startup()
+
     # paho-mqtt callback API warning fix (compatible with older paho)
     try:
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
