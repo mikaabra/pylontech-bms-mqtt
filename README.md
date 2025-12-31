@@ -12,6 +12,29 @@ Supports both **CAN bus** and **RS485** interfaces for comprehensive battery mon
 - **Robust Operation**: Auto-reconnect, Last Will Testament for availability tracking, rate limiting with hysteresis
 - **Parallel Battery Support**: Tested with 3× 16S LFP batteries in parallel configuration
 
+## Quick Start
+
+```bash
+# 1. Clone and install
+git clone https://github.com/mikaabra/pylontech-bms-mqtt.git
+cd pylontech-bms-mqtt
+pip3 install -r requirements.txt
+
+# 2. Set up CAN interface (one-time)
+sudo ip link set can0 up type can bitrate 500000
+
+# 3. Configure MQTT (add to ~/.bashrc or use systemd env file)
+export MQTT_HOST=192.168.1.100  # Your MQTT broker
+
+# 4. Run the bridges
+./pylon_can2mqtt.py              # CAN bus bridge
+./pylon_rs485_monitor.py --mqtt --loop  # RS485 monitor
+
+# 5. Check Home Assistant - entities appear automatically!
+```
+
+For production use, see [Running as a Service](#running-as-a-service) below.
+
 ## Compatible Hardware
 
 ### Tested Batteries
@@ -189,13 +212,28 @@ deye_bms/rs485/battery0/cycles
 
 ## Running as a Service
 
-Ready-to-use systemd service files are provided in the `systemd/` directory.
+Ready-to-use systemd service files are provided in the `systemd/` directory. The services run as a dedicated `pylon` user for security.
+
+### Initial Setup
 
 ```bash
+# Create dedicated user with access to CAN and serial devices
+sudo useradd -r -s /sbin/nologin pylon
+sudo usermod -a -G dialout,can pylon
+
+# Install to /opt (recommended for services)
+sudo mkdir -p /opt/pylontech-bms-mqtt
+sudo cp pylon_can2mqtt.py pylon_rs485_monitor.py /opt/pylontech-bms-mqtt/
+sudo chown -R pylon:pylon /opt/pylontech-bms-mqtt
+
 # Copy environment config and edit with your settings
 sudo cp systemd/pylon-mqtt.env /etc/default/pylon-mqtt
 sudo nano /etc/default/pylon-mqtt
+```
 
+### Install Services
+
+```bash
 # Install and enable CAN bridge service
 sudo cp systemd/pylon-can2mqtt.service /etc/systemd/system/
 sudo systemctl daemon-reload

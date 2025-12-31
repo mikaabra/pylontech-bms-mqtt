@@ -6,14 +6,21 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=root
-WorkingDirectory=/root/pylontech-bms-mqtt
+User=pylon
+Group=pylon
+WorkingDirectory=/opt/pylontech-bms-mqtt
 EnvironmentFile=-/etc/default/pylon-mqtt
-ExecStart=/usr/bin/python3 /root/pylontech-bms-mqtt/pylon_rs485_monitor.py --mqtt --loop --quiet --interval 30
+ExecStart=/usr/bin/python3 /opt/pylontech-bms-mqtt/pylon_rs485_monitor.py --mqtt --loop --quiet --interval 30
 Restart=always
 RestartSec=10
 StandardOutput=journal
 StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target
