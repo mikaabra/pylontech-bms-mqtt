@@ -9,8 +9,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ## [Unreleased]
 
 ### Planned
-- ESP32 migration using Waveshare ESP32-S3-RS485-CAN board
-- Combined CAN+RS485 in single ESPHome firmware
+- Hardware testing with Waveshare ESP32-S3-RS485-CAN board
+- Validate ESPHome firmware as drop-in replacement for Python scripts
+
+---
+
+## [2025-12-31] - ESPHome Full Implementation
+
+### Changed
+- **ESPHome Configuration** - Complete rewrite to match Python scripts exactly
+  - Full CAN decoding (0x351, 0x355, 0x359, 0x370 frames)
+  - Full RS485 decoding (analog data + alarms)
+  - RS485 temperature reading (6 sensors per battery)
+  - RS485 per-battery current measurement
+  - Stack totals calculation (voltage, current, cell min/max)
+  - Alarm and protection flag decoding
+  - Balancing status monitoring
+  - MQTT topics identical to Python scripts (`deye_bms/` and `deye_bms/rs485/`)
+  - Ready as drop-in replacement when ESP32 hardware arrives
 
 ---
 
@@ -104,6 +120,37 @@ Started with working CAN and RS485 monitoring scripts. Goal was to add Home Assi
 - Added `docs/HLD.md` - High-level design with architecture diagrams
 - Added `docs/LLD.md` - Low-level protocol specifications
 - Added GitHub topics for discoverability
+
+**Session: ESPHome Full Implementation**
+
+Reviewed ESPHome config and identified gaps compared to Python scripts. Complete rewrite to achieve feature parity.
+
+**ESPHome Changes:**
+- Rewrote `esphome/deye-bms-can.yaml` from scratch
+- Added full CAN frame decoding matching `pylon_can2mqtt.py`:
+  - 0x351: Voltage/current limits
+  - 0x355: SOC/SOH
+  - 0x359: Status flags
+  - 0x370: Cell extremes and temperatures
+- Added full RS485 protocol implementation matching `pylon_rs485_monitor.py`:
+  - CID2=0x42 analog data (cells, temps, current, SOC, cycles)
+  - CID2=0x44 alarm data (protection flags, balancing status)
+- Added stack-level calculations:
+  - Stack voltage (average of batteries)
+  - Stack current (sum of batteries)
+  - Stack cell min/max across all batteries
+  - Total balancing cell count
+- MQTT topic structure now identical to Python scripts
+- Uses esp-idf framework for ESP32-S3 compatibility
+
+**Key Implementation Details:**
+- RS485 UART on GPIO43 (TX) / GPIO44 (RX)
+- CAN on GPIO15 (TX) / GPIO16 (RX) at 500kbps
+- 30-second RS485 polling interval
+- Configurable via substitutions (num_batteries, pylontech_addr)
+
+**Next Steps:**
+- Test with actual ESP32-S3-RS485-CAN hardware when it arrives
 
 ---
 
