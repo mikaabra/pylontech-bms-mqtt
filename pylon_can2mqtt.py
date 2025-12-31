@@ -215,7 +215,37 @@ def publish_discovery(client: mqtt.Client):
     # Availability state (retained)
     client.publish(AVAIL_TOPIC, "online", retain=True)
 
+# -----------------------------
+# Global state for signal handlers
+# -----------------------------
+_mqtt_client = None
+_can_bus = None
+_running = True
+
+def shutdown(signum=None, frame=None):
+    """Graceful shutdown: publish offline status and exit."""
+    global _running
+    _running = False
+    sig_name = signal.Signals(signum).name if signum else "unknown"
+    logging.info("Shutdown requested (signal %s)", sig_name)
+
+    if _mqtt_client is not None:
+        try:
+            _mqtt_client.publish(AVAIL_TOPIC, "offline", retain=True)
+            _mqtt_client.disconnect()
+        except Exception:
+            pass
+
+    if _can_bus is not None:
+        try:
+            _can_bus.shutdown()
+        except Exception:
+            pass
+
+    sys.exit(0)
+
 def main():
+    global _mqtt_client, _can_bus
     # paho-mqtt callback API warning fix (compatible with older paho)
     try:
         client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
@@ -259,13 +289,21 @@ def main():
     pub = Publisher(client)
     bus = can.Bus(interface="socketcan", channel=CAN_IFACE)
 
+    # Store in globals for signal handler access
+    _mqtt_client = client
+    _can_bus = bus
+
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT, shutdown)
+
     logging.info("CAN->MQTT bridge started (topics under %s/)", STATE_PREFIX)
 
     last_heartbeat = 0.0
     heartbeat_period = 60.0
 
-    while True:
-        msg = bus.recv()
+    while _running:
+        msg = bus.recv(timeout=1.0)  # Timeout allows checking _running flag
         if msg is None or len(msg.data) != 8:
             continue
 
