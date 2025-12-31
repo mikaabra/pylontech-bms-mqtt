@@ -1,0 +1,19 @@
+[Unit]
+Description=Pylontech RS485 to MQTT Monitor
+Documentation=https://github.com/mikaabra/pylontech-bms-mqtt
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/pylontech-bms-mqtt
+EnvironmentFile=-/etc/default/pylon-mqtt
+ExecStart=/usr/bin/python3 /root/pylontech-bms-mqtt/pylon_rs485_monitor.py --mqtt --loop --quiet --interval 30
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

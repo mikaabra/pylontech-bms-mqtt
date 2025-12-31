@@ -1,0 +1,19 @@
+[Unit]
+Description=Pylontech CAN to MQTT Bridge
+Documentation=https://github.com/mikaabra/pylontech-bms-mqtt
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/root/pylontech-bms-mqtt
+EnvironmentFile=-/etc/default/pylon-mqtt
+ExecStart=/usr/bin/python3 /root/pylontech-bms-mqtt/pylon_can2mqtt.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
