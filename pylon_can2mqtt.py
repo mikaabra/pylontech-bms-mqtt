@@ -284,25 +284,31 @@ def main():
     except AttributeError:
         client = mqtt.Client()
 
+    mqtt_connected = [False]  # Use list to allow modification in nested function
+
     def on_connect(client, userdata, flags, rc, properties=None):
-        # Re-announce discovery after reconnects (broker restarts etc.)
-        try:
-            client.publish(AVAIL_TOPIC, "online", retain=True)
-            publish_discovery(client)
-        except Exception:
-            pass
+        mqtt_connected[0] = True
+        if hasattr(rc, 'value'):  # paho v2 returns ReasonCode object
+            rc_val = rc.value
+        else:
+            rc_val = rc
+        if rc_val == 0:
+            logging.info("Connected to MQTT broker %s:%d", MQTT_HOST, MQTT_PORT)
+            # Re-announce discovery after reconnects (broker restarts etc.)
+            try:
+                client.publish(AVAIL_TOPIC, "online", retain=True)
+                publish_discovery(client)
+            except Exception:
+                pass
+        else:
+            logging.error("MQTT connection failed with code %s", rc)
 
     client.on_connect = on_connect
 
-    def on_disconnect(client, userdata, rc):
-        # rc != 0 means unexpected disconnect
-        while True:
-            try:
-                time.sleep(2)
-                client.reconnect()
-                return
-            except Exception:
-                pass
+    def on_disconnect(client, userdata, rc, properties=None):
+        mqtt_connected[0] = False
+        # paho-mqtt handles reconnection automatically with loop_start()
+        logging.warning("MQTT disconnected (rc=%s), will auto-reconnect", rc)
 
     client.on_disconnect = on_disconnect
     client.reconnect_delay_set(min_delay=1, max_delay=60)
