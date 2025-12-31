@@ -14,6 +14,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2025-12-31] - Security & Usability Improvements
+
+### Added
+- **LICENSE file** - MIT license for open source distribution
+- **Quick Start section** in README - 5-step guide to get running quickly
+
+### Changed
+- **systemd services** now run as dedicated `pylon` user instead of root
+- **Security hardening** added to systemd services:
+  - `NoNewPrivileges=true`
+  - `ProtectSystem=strict`
+  - `ProtectHome=true`
+  - `PrivateTmp=true`
+- Installation path changed to `/opt/pylontech-bms-mqtt` for production deployments
+- README updated with user creation and installation instructions
+
+### Security
+- Services no longer run as root, reducing attack surface
+- Dedicated service user `pylon` with minimal permissions (dialout, can groups only)
+
+---
+
 ## [2025-12-31] - ESPHome Full Implementation
 
 ### Changed
@@ -151,6 +173,25 @@ Reviewed ESPHome config and identified gaps compared to Python scripts. Complete
 
 **Next Steps:**
 - Test with actual ESP32-S3-RS485-CAN hardware when it arrives
+
+**Session: Security & Usability Audit**
+
+Reviewed project for reliability, security, and newcomer experience. Identified several improvements.
+
+**Changes Made:**
+- Added MIT LICENSE file (was mentioned in README but missing)
+- Added Quick Start section - 5 commands to get running
+- Rewrote systemd services for security:
+  - Run as dedicated `pylon` user (not root)
+  - Added systemd hardening options
+  - Changed working directory to /opt for production installs
+- Updated README with user creation and permission setup
+
+**Security Considerations Reviewed:**
+- Credentials already in environment variables (good)
+- MQTT TLS not implemented (low priority - typically internal network)
+- Input validation present on CAN values (sanity ranges)
+- RS485 protocol decoding is defensive
 
 ---
 
