@@ -93,6 +93,18 @@ Started with working CAN and RS485 monitoring scripts. Goal was to add Home Assi
 - 5-second minimum interval for individual cell voltages (reduce HA database load)
 - 2mV hysteresis on cell voltages (reduce noise)
 
+**Documentation & Discoverability Improvements:**
+- Added `requirements.txt` for easy pip install
+- Added ready-to-use systemd service files in `systemd/`
+- Expanded README with:
+  - Hardware compatibility list (tested batteries, interfaces)
+  - Detailed CAN and RS485 setup instructions
+  - Comprehensive troubleshooting guide
+  - Contributing section
+- Added `docs/HLD.md` - High-level design with architecture diagrams
+- Added `docs/LLD.md` - Low-level protocol specifications
+- Added GitHub topics for discoverability
+
 ---
 
 *Template for future entries:*
