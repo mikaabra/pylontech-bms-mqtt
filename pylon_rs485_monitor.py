@@ -327,15 +327,17 @@ def read_all_batteries(port: str = RS485_PORT, baud: int = RS485_BAUD,
 
     ser.close()
 
-    if all_cells:
+    if all_cells and result['batteries']:
+        # Parallel config: voltage is avg of batteries, current is sum
+        avg_voltage = sum(b['voltage'] for b in result['batteries']) / len(result['batteries'])
         result['stack'] = {
             'num_batteries': len(result['batteries']),
             'num_cells': len(all_cells),
             'cell_min': round(min(all_cells), 3),
             'cell_max': round(max(all_cells), 3),
             'cell_delta_mv': round((max(all_cells) - min(all_cells)) * 1000, 1),
-            'voltage': round(sum(all_cells), 2),
-            'current': round(total_current, 2),
+            'voltage': round(avg_voltage, 2),  # Parallel: same voltage
+            'current': round(total_current, 2),  # Parallel: sum of currents
             'temp_min': round(min(all_temps), 1) if all_temps else None,
             'temp_max': round(max(all_temps), 1) if all_temps else None,
             'balancing_count': len(all_balancing),
