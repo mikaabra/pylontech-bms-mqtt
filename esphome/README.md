@@ -1,6 +1,13 @@
 # ESPHome Configuration for Waveshare ESP32-S3-RS485-CAN
 
-This directory contains the ESPHome configuration to replace `pylon_can2mqtt.py` with an ESP32-based solution.
+This directory contains the ESPHome configuration to replace both `pylon_can2mqtt.py` and `pylon_rs485_monitor.py` with a single ESP32-based solution.
+
+## Features
+
+- **CAN Bus**: Full decoding of 0x351, 0x355, 0x359, 0x370 frames
+- **RS485**: Individual cell voltages, temperatures, current, SOC, cycles, alarms, balancing
+- **MQTT Topics**: Identical to Python scripts for seamless migration
+- **Home Assistant**: Works with discovery configs published by Python scripts
 
 ## Hardware
 
