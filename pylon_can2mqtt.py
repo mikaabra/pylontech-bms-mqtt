@@ -21,10 +21,10 @@ logging.basicConfig(
 # -----------------------------
 # User config
 # -----------------------------
-MQTT_HOST = os.environ.get("MQTT_HOST", "192.168.200.217")
+MQTT_HOST = os.environ.get("MQTT_HOST", "localhost")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
-MQTT_USER = os.environ.get("MQTT_USER", "mqtt_explorer2")
-MQTT_PASS = os.environ.get("MQTT_PASS", "exploder99")
+MQTT_USER = os.environ.get("MQTT_USER")
+MQTT_PASS = os.environ.get("MQTT_PASS")
 
 STATE_PREFIX = "deye_bms"               # state topics: deye_bms/...
 AVAIL_TOPIC  = f"{STATE_PREFIX}/status" # online/offline
@@ -313,7 +313,8 @@ def main():
     client.on_disconnect = on_disconnect
     client.reconnect_delay_set(min_delay=1, max_delay=60)
 
-    client.username_pw_set(MQTT_USER, MQTT_PASS)
+    if MQTT_USER and MQTT_PASS:
+        client.username_pw_set(MQTT_USER, MQTT_PASS)
 
     # Last Will so HA sees it offline if the process dies
     client.will_set(AVAIL_TOPIC, payload="offline", qos=0, retain=True)

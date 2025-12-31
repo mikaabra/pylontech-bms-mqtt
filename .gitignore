@@ -1,0 +1,46 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# ESPHome
+esphome/.esphome/
+esphome/secrets.yaml
+
+# Logs
+*.log
+
+# Editor
+*.swp
+*.swo
+*~
+
+# Environment/secrets
+.env
+.envrc
+
+# Working/backup files
+*.old
+*.bak
+*.working
+*.backup
+
+# System files
+.DS_Store
+.bash_history
+.bashrc
+.profile
+.lesshst
+.cache/
+.npm/
+.platformio/
+.ssh/
+.config/
+.codex/
+.claude/
+.claude.json
+.claude.json.backup
+.gitconfig
+pylon_can2mqtt.py-working-*
+pylon_decode.works.py
+*.patch

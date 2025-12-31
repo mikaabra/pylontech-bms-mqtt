@@ -4,13 +4,16 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a CAN-to-MQTT bridge for a Deye/Shoto BMS (Battery Management System) using the Pylontech CAN protocol. It reads battery data from a SocketCAN interface and publishes to MQTT with Home Assistant auto-discovery.
+This is a CAN/RS485-to-MQTT bridge for a Deye/Shoto BMS (Battery Management System) using the Pylontech protocol. It reads battery data from CAN bus and RS485 interfaces and publishes to MQTT with Home Assistant auto-discovery.
 
 ## Running
 
 ```bash
 # Run the CAN-to-MQTT bridge (requires can0 interface up)
 ./pylon_can2mqtt.py
+
+# Run the RS485 monitor with MQTT publishing
+./pylon_rs485_monitor.py --mqtt --loop
 
 # Debug/decode raw CAN frames
 ./pylon_decode.py
@@ -21,15 +24,17 @@ This is a CAN-to-MQTT bridge for a Deye/Shoto BMS (Battery Management System) us
 
 ## Environment Variables
 
-The bridge supports configuration via environment variables:
-- `MQTT_HOST` - MQTT broker address (default: 192.168.200.217)
+The bridges require MQTT configuration via environment variables:
+- `MQTT_HOST` - MQTT broker address (default: localhost)
 - `MQTT_PORT` - MQTT broker port (default: 1883)
-- `MQTT_USER` / `MQTT_PASS` - MQTT credentials
+- `MQTT_USER` - MQTT username (optional)
+- `MQTT_PASS` - MQTT password (optional)
 
 ## Dependencies
 
-- Python 3.x with `python-can` and `paho-mqtt` (v2.x)
+- Python 3.x with `python-can`, `paho-mqtt` (v2.x), `pyserial`
 - Linux SocketCAN (`can0` interface must be configured)
+- RS485 USB adapter (e.g., `/dev/ttyUSB0`)
 
 ## Architecture
 
@@ -39,6 +44,13 @@ The bridge supports configuration via environment variables:
 - Publishes Home Assistant MQTT Discovery configs under `homeassistant/sensor/`
 - Handles MQTT reconnection and republishes discovery on reconnect
 - Uses Last Will Testament for availability tracking
+
+**pylon_rs485_monitor.py** - RS485 battery monitor:
+- Reads individual cell voltages, temperatures, and alarm status via RS485
+- Supports 3 batteries in parallel configuration (configurable)
+- Publishes to MQTT topics under `deye_bms/rs485/` prefix
+- Publishes Home Assistant MQTT Discovery configs
+- Reports balancing status, cycle counts, and per-cell data
 
 **pylon_decode.py** - Development/debug tool:
 - Prints decoded CAN frames with optional repeat suppression

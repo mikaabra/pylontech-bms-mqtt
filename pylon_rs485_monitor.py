@@ -2,6 +2,7 @@
 """
 Pylontech RS485 Battery Monitor
 Reads individual cell voltages and alarm/balancing status from all batteries via RS485.
+Publishes to MQTT with Home Assistant auto-discovery.
 
 Protocol: Pylontech RS485 @ 9600 baud
 Tested with: Shoto/Pylontech-compatible 16S LFP batteries
@@ -10,14 +11,26 @@ Usage:
     ./pylon_rs485_monitor.py                    # Single read
     ./pylon_rs485_monitor.py --loop             # Continuous monitoring
     ./pylon_rs485_monitor.py --json             # JSON output
-    ./pylon_rs485_monitor.py --mqtt             # Publish to MQTT
+    ./pylon_rs485_monitor.py --mqtt             # Publish to MQTT with HA discovery
 """
 
 import sys
+import os
 import time
 import json
 import argparse
+import signal
+import logging
 import serial
+
+# -----------------------------
+# Logging setup
+# -----------------------------
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s %(levelname)s %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
 
 # Configuration
 RS485_PORT = "/dev/ttyUSB0"
@@ -25,12 +38,30 @@ RS485_BAUD = 9600
 PYLONTECH_ADDR = 2  # Battery stack address
 NUM_BATTERIES = 3   # Number of batteries in stack (0, 1, 2)
 
-# MQTT settings (optional)
-MQTT_HOST = "192.168.200.217"
-MQTT_PORT = 1883
-MQTT_USER = "mqtt_explorer2"
-MQTT_PASS = "exploder99"
-MQTT_PREFIX = "deye_bms"
+# MQTT settings (from environment variables)
+MQTT_HOST = os.environ.get("MQTT_HOST", "localhost")
+MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
+MQTT_USER = os.environ.get("MQTT_USER")
+MQTT_PASS = os.environ.get("MQTT_PASS")
+MQTT_PREFIX = "deye_bms/rs485"
+AVAIL_TOPIC = f"{MQTT_PREFIX}/status"
+
+# Home Assistant Discovery
+DISCOVERY_PREFIX = "homeassistant"
+DEVICE_ID = "deye_bms_rs485"
+DEVICE_NAME = "Deye BMS (RS485)"
+DEVICE_MODEL = "Pylontech RS485 Protocol"
+DEVICE_MANUFACTURER = "Shoto"
+
+# Rate limiting
+FORCE_PUBLISH_INTERVAL_S = 60
+MIN_INTERVAL_S_DEFAULT = 1.0
+MIN_INTERVAL_S_CELLS = 5.0
+VOLT_HYST_V = 0.002  # 2mV hysteresis for cell voltages
+
+# Global state for signal handlers
+_mqtt_client = None
+_running = True
 
 
 def calc_chksum(frame_content: str) -> str:
@@ -226,6 +257,216 @@ def decode_alarm_response(data_hex: str) -> dict:
     return result
 
 
+# -----------------------------
+# MQTT Publisher with hysteresis
+# -----------------------------
+class Publisher:
+    """Publishes state topics with hysteresis + rate limiting."""
+
+    def __init__(self, client):
+        self.client = client
+        self.last_value = {}
+        self.last_ts = {}
+
+    def publish(self, topic: str, value, retain=False, min_interval=MIN_INTERVAL_S_DEFAULT, hyst=None):
+        full_topic = f"{MQTT_PREFIX}/{topic}"
+        now = time.time()
+
+        prev_val = self.last_value.get(full_topic)
+        prev_ts = self.last_ts.get(full_topic, 0)
+
+        if (now - prev_ts) < min_interval:
+            return False
+
+        force_due = (now - prev_ts) >= FORCE_PUBLISH_INTERVAL_S
+
+        if isinstance(value, (int, float)):
+            store_val = float(value)
+            payload = str(value)
+        else:
+            store_val = str(value)
+            payload = str(value)
+
+        if hyst is None:
+            should_pub = (prev_val != store_val) or force_due
+        else:
+            if not isinstance(store_val, float):
+                return False
+            prev_num = prev_val if isinstance(prev_val, float) else None
+            should_pub = force_due or (prev_num is None) or (abs(store_val - prev_num) >= hyst)
+
+        if not should_pub:
+            return False
+
+        try:
+            self.client.publish(full_topic, payload, retain=retain)
+        except Exception:
+            return False
+
+        self.last_value[full_topic] = store_val
+        self.last_ts[full_topic] = now
+        return True
+
+
+# -----------------------------
+# Home Assistant Discovery
+# -----------------------------
+def ha_sensor_config(object_id: str, name: str, state_topic: str,
+                     unit=None, device_class=None, state_class=None,
+                     icon=None, entity_category=None, display_precision=None):
+    """Build a HA MQTT Discovery payload for a sensor."""
+    cfg = {
+        "name": name,
+        "state_topic": state_topic,
+        "unique_id": f"{DEVICE_ID}_{object_id}",
+        "availability_topic": AVAIL_TOPIC,
+        "payload_available": "online",
+        "payload_not_available": "offline",
+        "device": {
+            "identifiers": [DEVICE_ID],
+            "name": DEVICE_NAME,
+            "manufacturer": DEVICE_MANUFACTURER,
+            "model": DEVICE_MODEL,
+        },
+    }
+    if unit is not None:
+        cfg["unit_of_measurement"] = unit
+    if device_class is not None:
+        cfg["device_class"] = device_class
+    if state_class is not None:
+        cfg["state_class"] = state_class
+    if icon is not None:
+        cfg["icon"] = icon
+    if entity_category is not None:
+        cfg["entity_category"] = entity_category
+    if display_precision is not None:
+        cfg["suggested_display_precision"] = display_precision
+    return cfg
+
+
+def ha_binary_sensor_config(object_id: str, name: str, state_topic: str,
+                            device_class=None, icon=None, entity_category=None):
+    """Build a HA MQTT Discovery payload for a binary sensor."""
+    cfg = {
+        "name": name,
+        "state_topic": state_topic,
+        "unique_id": f"{DEVICE_ID}_{object_id}",
+        "availability_topic": AVAIL_TOPIC,
+        "payload_available": "online",
+        "payload_not_available": "offline",
+        "payload_on": "1",
+        "payload_off": "0",
+        "device": {
+            "identifiers": [DEVICE_ID],
+            "name": DEVICE_NAME,
+            "manufacturer": DEVICE_MANUFACTURER,
+            "model": DEVICE_MODEL,
+        },
+    }
+    if device_class is not None:
+        cfg["device_class"] = device_class
+    if icon is not None:
+        cfg["icon"] = icon
+    if entity_category is not None:
+        cfg["entity_category"] = entity_category
+    return cfg
+
+
+def publish_discovery(client, num_batteries: int = NUM_BATTERIES, cells_per_battery: int = 16):
+    """Publish retained Home Assistant MQTT Discovery configs."""
+    logging.info("Publishing HA discovery configs...")
+
+    # Stack-level sensors
+    stack_sensors = [
+        ("stack_cell_min", "Stack Cell Min", f"{MQTT_PREFIX}/stack/cell_min", "V", "voltage", "measurement", None, 3),
+        ("stack_cell_max", "Stack Cell Max", f"{MQTT_PREFIX}/stack/cell_max", "V", "voltage", "measurement", None, 3),
+        ("stack_cell_delta", "Stack Cell Delta", f"{MQTT_PREFIX}/stack/cell_delta_mv", "mV", None, "measurement", "mdi:chart-bell-curve-cumulative", 1),
+        ("stack_voltage", "Stack Voltage", f"{MQTT_PREFIX}/stack/voltage", "V", "voltage", "measurement", None, 2),
+        ("stack_current", "Stack Current", f"{MQTT_PREFIX}/stack/current", "A", "current", "measurement", None, 2),
+        ("stack_temp_min", "Stack Temp Min", f"{MQTT_PREFIX}/stack/temp_min", "°C", "temperature", "measurement", None, 1),
+        ("stack_temp_max", "Stack Temp Max", f"{MQTT_PREFIX}/stack/temp_max", "°C", "temperature", "measurement", None, 1),
+        ("stack_balancing_count", "Stack Balancing Cells", f"{MQTT_PREFIX}/stack/balancing_count", None, None, "measurement", "mdi:scale-balance", 0),
+        ("stack_alarms", "Stack Alarms", f"{MQTT_PREFIX}/stack/alarms", None, None, None, "mdi:alert", None),
+    ]
+
+    for object_id, name, st, unit, dclass, sclass, icon, precision in stack_sensors:
+        cfg_topic = f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{object_id}/config"
+        cfg = ha_sensor_config(object_id, name, st, unit, dclass, sclass, icon, None, precision)
+        client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+    # Stack balancing active binary sensor
+    cfg_topic = f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/stack_balancing_active/config"
+    cfg = ha_binary_sensor_config("stack_balancing_active", "Stack Balancing Active",
+                                   f"{MQTT_PREFIX}/stack/balancing_active", None, "mdi:scale-balance")
+    client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+    # Per-battery sensors
+    for batt in range(num_batteries):
+        prefix = f"batt{batt}"
+        state_prefix = f"{MQTT_PREFIX}/battery{batt}"
+
+        batt_sensors = [
+            (f"{prefix}_cell_min", f"Battery {batt} Cell Min", f"{state_prefix}/cell_min", "V", "voltage", "measurement", None, 3),
+            (f"{prefix}_cell_max", f"Battery {batt} Cell Max", f"{state_prefix}/cell_max", "V", "voltage", "measurement", None, 3),
+            (f"{prefix}_cell_delta", f"Battery {batt} Cell Delta", f"{state_prefix}/cell_delta_mv", "mV", None, "measurement", "mdi:chart-bell-curve-cumulative", 1),
+            (f"{prefix}_voltage", f"Battery {batt} Voltage", f"{state_prefix}/voltage", "V", "voltage", "measurement", None, 2),
+            (f"{prefix}_current", f"Battery {batt} Current", f"{state_prefix}/current", "A", "current", "measurement", None, 2),
+            (f"{prefix}_soc", f"Battery {batt} SOC", f"{state_prefix}/soc", "%", None, "measurement", "mdi:battery", 0),
+            (f"{prefix}_cycles", f"Battery {batt} Cycles", f"{state_prefix}/cycles", None, None, "total_increasing", "mdi:counter", 0),
+            (f"{prefix}_balancing_count", f"Battery {batt} Balancing Cells", f"{state_prefix}/balancing_count", None, None, "measurement", "mdi:scale-balance", 0),
+        ]
+
+        for object_id, name, st, unit, dclass, sclass, icon, precision in batt_sensors:
+            cfg_topic = f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{object_id}/config"
+            cfg = ha_sensor_config(object_id, name, st, unit, dclass, sclass, icon, None, precision)
+            client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+        # Battery balancing active binary sensor
+        cfg_topic = f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/{prefix}_balancing_active/config"
+        cfg = ha_binary_sensor_config(f"{prefix}_balancing_active", f"Battery {batt} Balancing Active",
+                                       f"{state_prefix}/balancing_active", None, "mdi:scale-balance")
+        client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+        # Individual cell voltages
+        for cell in range(1, cells_per_battery + 1):
+            object_id = f"{prefix}_cell{cell:02d}"
+            name = f"Battery {batt} Cell {cell}"
+            st = f"{state_prefix}/cell{cell:02d}"
+            cfg_topic = f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{object_id}/config"
+            cfg = ha_sensor_config(object_id, name, st, "V", "voltage", "measurement", None, None, 3)
+            client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+        # Temperature sensors (assume 4 per battery for discovery)
+        for temp in range(1, 5):
+            object_id = f"{prefix}_temp{temp}"
+            name = f"Battery {batt} Temp {temp}"
+            st = f"{state_prefix}/temp{temp}"
+            cfg_topic = f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{object_id}/config"
+            cfg = ha_sensor_config(object_id, name, st, "°C", "temperature", "measurement", None, None, 1)
+            client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+    # Publish availability
+    client.publish(AVAIL_TOPIC, "online", retain=True)
+    logging.info("HA discovery published for %d batteries", num_batteries)
+
+
+def shutdown(signum=None, frame=None):
+    """Graceful shutdown: publish offline status."""
+    global _running
+    _running = False
+    sig_name = signal.Signals(signum).name if signum else "unknown"
+    logging.info("Shutdown requested (signal %s)", sig_name)
+
+    if _mqtt_client is not None:
+        try:
+            _mqtt_client.publish(AVAIL_TOPIC, "offline", retain=True)
+            _mqtt_client.disconnect()
+        except Exception:
+            pass
+
+    sys.exit(0)
+
+
 def send_command(ser: serial.Serial, cmd: bytes, timeout: float = 0.3) -> str:
     """Send command and return response INFO hex string, or None on error."""
     ser.reset_input_buffer()
@@ -407,71 +648,126 @@ def print_report(data: dict):
     print("=" * 70)
 
 
-def publish_mqtt(data: dict):
-    """Publish data to MQTT."""
-    try:
-        import paho.mqtt.client as mqtt
+def publish_mqtt_data(pub: Publisher, data: dict):
+    """Publish battery data using Publisher with hysteresis."""
+    # Publish stack data
+    s = data.get('stack', {})
+    if s:
+        pub.publish("stack/cell_min", round(s['cell_min'], 3), hyst=VOLT_HYST_V)
+        pub.publish("stack/cell_max", round(s['cell_max'], 3), hyst=VOLT_HYST_V)
+        pub.publish("stack/cell_delta_mv", round(s['cell_delta_mv'], 1))
+        pub.publish("stack/voltage", round(s['voltage'], 2))
+        pub.publish("stack/current", round(s['current'], 2))
+        if s.get('temp_min') is not None:
+            pub.publish("stack/temp_min", round(s['temp_min'], 1))
+        if s.get('temp_max') is not None:
+            pub.publish("stack/temp_max", round(s['temp_max'], 1))
+        pub.publish("stack/balancing_count", s.get('balancing_count', 0))
+        pub.publish("stack/balancing_active", 1 if s.get('balancing_count') else 0)
+        pub.publish("stack/alarms", ','.join(s.get('alarms', [])) if s.get('alarms') else '')
 
-        client = mqtt.Client()
-        client.username_pw_set(MQTT_USER, MQTT_PASS)
-        client.connect(MQTT_HOST, MQTT_PORT, 60)
+    # Publish per-battery data
+    for batt in data.get('batteries', []):
+        prefix = f"battery{batt['id']}"
+        pub.publish(f"{prefix}/cell_min", round(batt['cell_min'], 3), hyst=VOLT_HYST_V)
+        pub.publish(f"{prefix}/cell_max", round(batt['cell_max'], 3), hyst=VOLT_HYST_V)
+        pub.publish(f"{prefix}/cell_delta_mv", round(batt['cell_delta_mv'], 1))
+        pub.publish(f"{prefix}/voltage", round(batt.get('voltage', 0), 2))
+        pub.publish(f"{prefix}/current", round(batt.get('current', 0), 2))
+        pub.publish(f"{prefix}/soc", round(batt['soc'], 0))
+        pub.publish(f"{prefix}/cycles", batt['cycles'])
+        pub.publish(f"{prefix}/balancing_count", batt.get('balancing_count', 0))
+        pub.publish(f"{prefix}/balancing_active", 1 if batt.get('balancing_count') else 0)
 
-        # Publish stack data
-        s = data.get('stack', {})
-        if s:
-            client.publish(f"{MQTT_PREFIX}/rs485/cell_min", s['cell_min'])
-            client.publish(f"{MQTT_PREFIX}/rs485/cell_max", s['cell_max'])
-            client.publish(f"{MQTT_PREFIX}/rs485/cell_delta_mv", s['cell_delta_mv'])
-            client.publish(f"{MQTT_PREFIX}/rs485/stack_voltage", s['voltage'])
-            client.publish(f"{MQTT_PREFIX}/rs485/balancing_count", s.get('balancing_count', 0))
-            client.publish(f"{MQTT_PREFIX}/rs485/balancing_active", 1 if s.get('balancing_count') else 0)
-            if s.get('alarms'):
-                client.publish(f"{MQTT_PREFIX}/rs485/alarms", ','.join(s['alarms']))
-            else:
-                client.publish(f"{MQTT_PREFIX}/rs485/alarms", '')
+        # Individual cell voltages
+        for i, v in enumerate(batt['cells'], 1):
+            pub.publish(f"{prefix}/cell{i:02d}", round(v, 3),
+                       min_interval=MIN_INTERVAL_S_CELLS, hyst=VOLT_HYST_V)
 
-        # Publish per-battery data
-        for batt in data['batteries']:
-            prefix = f"{MQTT_PREFIX}/rs485/battery{batt['id']}"
-            client.publish(f"{prefix}/cell_min", batt['cell_min'])
-            client.publish(f"{prefix}/cell_max", batt['cell_max'])
-            client.publish(f"{prefix}/cell_delta_mv", batt['cell_delta_mv'])
-            client.publish(f"{prefix}/soc", batt['soc'])
-            client.publish(f"{prefix}/cycles", batt['cycles'])
-            client.publish(f"{prefix}/balancing_count", batt.get('balancing_count', 0))
-            client.publish(f"{prefix}/balancing_active", 1 if batt.get('balancing_count') else 0)
-
-            # Publish individual cells
-            for i, v in enumerate(batt['cells'], 1):
-                client.publish(f"{prefix}/cell{i:02d}", round(v, 3))
-
-        client.disconnect()
-        print(f"Published to MQTT {MQTT_HOST}")
-
-    except Exception as e:
-        print(f"MQTT error: {e}")
+        # Temperature sensors
+        for i, t in enumerate(batt.get('temps', []), 1):
+            pub.publish(f"{prefix}/temp{i}", round(t, 1))
 
 
 def main():
+    global _mqtt_client, _running
+
     parser = argparse.ArgumentParser(description='Pylontech RS485 Battery Monitor')
     parser.add_argument('--port', default=RS485_PORT, help='Serial port')
     parser.add_argument('--loop', action='store_true', help='Continuous monitoring')
     parser.add_argument('--interval', type=int, default=30, help='Loop interval seconds')
     parser.add_argument('--json', action='store_true', help='JSON output')
-    parser.add_argument('--mqtt', action='store_true', help='Publish to MQTT')
+    parser.add_argument('--mqtt', action='store_true', help='Publish to MQTT with HA discovery')
+    parser.add_argument('--quiet', action='store_true', help='Suppress console output (for daemon mode)')
     args = parser.parse_args()
 
-    while True:
+    pub = None
+
+    if args.mqtt:
+        import paho.mqtt.client as mqtt
+
+        # paho-mqtt v2.x compatibility
+        try:
+            client = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
+        except AttributeError:
+            client = mqtt.Client()
+
+        def on_connect(client, userdata, flags, rc, properties=None):
+            if hasattr(rc, 'value'):
+                rc_val = rc.value
+            else:
+                rc_val = rc
+            if rc_val == 0:
+                logging.info("Connected to MQTT broker %s:%d", MQTT_HOST, MQTT_PORT)
+                # Re-publish discovery after reconnect
+                try:
+                    publish_discovery(client)
+                except Exception:
+                    pass
+            else:
+                logging.error("MQTT connection failed with code %s", rc)
+
+        def on_disconnect(client, userdata, rc, properties=None):
+            logging.warning("MQTT disconnected (rc=%s), will auto-reconnect", rc)
+
+        client.on_connect = on_connect
+        client.on_disconnect = on_disconnect
+        client.reconnect_delay_set(min_delay=1, max_delay=60)
+        if MQTT_USER and MQTT_PASS:
+            client.username_pw_set(MQTT_USER, MQTT_PASS)
+
+        # Last Will Testament
+        client.will_set(AVAIL_TOPIC, payload="offline", qos=0, retain=True)
+
+        try:
+            client.connect(MQTT_HOST, MQTT_PORT, 60)
+        except Exception as e:
+            logging.error("Failed to connect to MQTT: %s", e)
+            sys.exit(1)
+
+        client.loop_start()
+        _mqtt_client = client
+        pub = Publisher(client)
+
+        # Register signal handlers
+        signal.signal(signal.SIGTERM, shutdown)
+        signal.signal(signal.SIGINT, shutdown)
+
+        logging.info("RS485->MQTT bridge started (topics under %s/)", MQTT_PREFIX)
+
+    while _running:
         try:
             data = read_all_batteries(port=args.port)
 
             if args.json:
                 print(json.dumps(data, indent=2))
-            else:
+            elif not args.quiet:
                 print_report(data)
 
-            if args.mqtt:
-                publish_mqtt(data)
+            if args.mqtt and pub:
+                publish_mqtt_data(pub, data)
+                if not args.quiet:
+                    logging.info("Published %d batteries to MQTT", len(data.get('batteries', [])))
 
             if not args.loop:
                 break
@@ -479,13 +775,29 @@ def main():
             time.sleep(args.interval)
 
         except KeyboardInterrupt:
-            print("\nStopped.")
+            logging.info("Stopped by user.")
             break
-        except Exception as e:
-            print(f"Error: {e}")
+        except serial.SerialException as e:
+            logging.error("Serial error: %s", e)
             if not args.loop:
                 break
             time.sleep(5)
+        except Exception as e:
+            logging.exception("Error: %s", e)
+            if not args.loop:
+                break
+            time.sleep(5)
+
+    # Cleanup
+    if args.mqtt and _mqtt_client:
+        try:
+            # Give MQTT time to flush queued messages
+            time.sleep(0.5)
+            _mqtt_client.publish(AVAIL_TOPIC, "offline", retain=True)
+            time.sleep(0.2)
+            _mqtt_client.disconnect()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

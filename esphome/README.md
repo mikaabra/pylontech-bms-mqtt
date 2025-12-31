@@ -20,10 +20,10 @@ This directory contains the ESPHome configuration to replace `pylon_can2mqtt.py`
    ```yaml
    wifi_ssid: "YOUR_WIFI_SSID"
    wifi_password: "YOUR_WIFI_PASSWORD"
-   mqtt_host: "192.168.200.217"
-   mqtt_user: "mqtt_explorer2"
-   mqtt_password: "exploder99"
-   ota_password: "change_this_password"
+   mqtt_host: "YOUR_MQTT_BROKER_IP"
+   mqtt_user: "YOUR_MQTT_USER"
+   mqtt_password: "YOUR_MQTT_PASSWORD"
+   ota_password: "YOUR_OTA_PASSWORD"
    ```
 
 2. Connect the ESP32-S3 to the Raspberry Pi via USB
