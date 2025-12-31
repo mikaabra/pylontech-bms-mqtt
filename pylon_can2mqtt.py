@@ -30,6 +30,7 @@ STATE_PREFIX = "deye_bms"               # state topics: deye_bms/...
 AVAIL_TOPIC  = f"{STATE_PREFIX}/status" # online/offline
 
 CAN_IFACE = "can0"
+CAN_STALE_TIMEOUT_S = 30  # mark offline if no valid CAN data for this long
 
 FORCE_PUBLISH_INTERVAL_S = 60  # publish at least once per minute even if unchanged
 
@@ -318,20 +319,43 @@ def main():
 
     last_heartbeat = 0.0
     heartbeat_period = 60.0
+    last_can_rx = time.time()
+    was_stale = False
 
     while _running:
         try:
             msg = bus.recv(timeout=1.0)  # Timeout allows checking _running flag
+            now = time.time()
+
+            # Check for stale CAN data
+            is_stale = (now - last_can_rx) > CAN_STALE_TIMEOUT_S
+            if is_stale and not was_stale:
+                logging.warning("No CAN data for %ds, marking offline", CAN_STALE_TIMEOUT_S)
+                try:
+                    client.publish(AVAIL_TOPIC, "offline", retain=True)
+                except Exception:
+                    pass
+                was_stale = True
+
             if msg is None or len(msg.data) != 8:
-                # Periodic heartbeat even when no valid messages
-                now = time.time()
-                if now - last_heartbeat >= heartbeat_period:
+                # Periodic heartbeat when not stale
+                if not is_stale and (now - last_heartbeat) >= heartbeat_period:
                     try:
                         client.publish(AVAIL_TOPIC, "online", retain=True)
                     except Exception:
                         pass
                     last_heartbeat = now
                 continue
+
+            # Valid CAN message received
+            last_can_rx = now
+            if was_stale:
+                logging.info("CAN data resumed, marking online")
+                try:
+                    client.publish(AVAIL_TOPIC, "online", retain=True)
+                except Exception:
+                    pass
+                was_stale = False
 
             arb = msg.arbitration_id
             d = msg.data
