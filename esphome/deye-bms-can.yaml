@@ -1,15 +1,18 @@
 # ESPHome configuration for Waveshare ESP32-S3-RS485-CAN
 # Replaces pylon_can2mqtt.py - CAN->MQTT bridge for Deye/Shoto BMS
+# Also reads individual cell voltages via RS485
 #
 # Hardware: Waveshare ESP32-S3-RS485-CAN
-# CAN pins: TX=GPIO15, RX=GPIO16
-# Pylontech CAN protocol at 500kbps
+# CAN pins: TX=GPIO15, RX=GPIO16 (500kbps Pylontech protocol)
+# RS485 pins: TX=GPIO17, RX=GPIO18 (9600 baud Pylontech protocol)
 
 substitutions:
   device_name: deye-bms-can
   friendly_name: "Deye BMS (CAN)"
   # Must match existing MQTT topics for seamless migration
   mqtt_prefix: deye_bms
+  # Number of batteries in stack (0, 1, 2)
+  num_batteries: "3"
 
 esphome:
   name: ${device_name}
@@ -47,6 +50,7 @@ captive_portal:
 
 # MQTT configuration - UPDATE THESE
 mqtt:
+  id: mqtt_client
   broker: !secret mqtt_host
   port: 1883
   username: !secret mqtt_user
@@ -73,6 +77,17 @@ ota:
 # Web server for debugging
 web_server:
   port: 80
+
+# UART for RS485 - Pylontech protocol at 9600 baud
+# Pins may need adjustment based on actual board - check schematic
+uart:
+  id: rs485_uart
+  tx_pin: GPIO17
+  rx_pin: GPIO18
+  baud_rate: 9600
+  data_bits: 8
+  stop_bits: 1
+  parity: NONE
 
 # CAN bus configuration for Waveshare ESP32-S3-RS485-CAN
 canbus:
@@ -185,7 +200,7 @@ canbus:
                 id(sensor_cell_v_delta).publish_state(vmax - vmin);
               }
 
-# Global variables for stale detection
+# Global variables for stale detection and RS485 data
 globals:
   - id: last_can_rx
     type: uint32_t
@@ -193,8 +208,28 @@ globals:
   - id: can_stale
     type: bool
     initial_value: 'false'
+  # RS485 polling state
+  - id: rs485_poll_battery
+    type: int
+    initial_value: '0'
+  - id: rs485_rx_buffer
+    type: std::string
+  # Cell voltages: 3 batteries x 16 cells = 48 cells
+  - id: cell_voltages
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(48, 0.0f)'
+  # Battery stats
+  - id: batt_soc
+    type: std::vector<float>
+    restore_value: no
+    initial_value: 'std::vector<float>(3, 0.0f)'
+  - id: batt_cycles
+    type: std::vector<int>
+    restore_value: no
+    initial_value: 'std::vector<int>(3, 0)'
 
-# Stale data detection interval
+# Stale data detection and RS485 polling intervals
 interval:
   - interval: 5s
     then:
@@ -205,6 +240,234 @@ interval:
           if (elapsed > 30000 && !id(can_stale) && id(last_can_rx) > 0) {
             id(can_stale) = true;
             ESP_LOGW("can", "No CAN data for 30s, marking stale");
+          }
+
+  # RS485 polling - cycle through batteries every 10 seconds
+  - interval: 10s
+    then:
+      - lambda: |-
+          // Pylontech RS485 protocol functions
+          auto calc_chksum = [](const std::string& frame) -> std::string {
+            uint32_t total = 0;
+            for (char c : frame) total += (uint8_t)c;
+            uint16_t chk = (~total + 1) & 0xFFFF;
+            char buf[5];
+            snprintf(buf, sizeof(buf), "%04X", chk);
+            return std::string(buf);
+          };
+
+          auto make_cmd = [&calc_chksum](int addr, int batt_num) -> std::string {
+            char frame[32];
+            // Build INFO field (battery number)
+            char info[3];
+            snprintf(info, sizeof(info), "%02X", batt_num);
+
+            // Calculate LENID with LCHKSUM
+            int info_len = 1;  // 1 byte = 2 hex chars / 2
+            int lchksum = (~(0 + 0 + info_len) + 1) & 0xF;
+            char lenid[5];
+            snprintf(lenid, sizeof(lenid), "%X%03X", lchksum, info_len * 2);  // *2 for hex chars
+
+            // Build frame content
+            snprintf(frame, sizeof(frame), "20%02X4642%s%s", addr, lenid, info);
+
+            std::string result = "~";
+            result += frame;
+            result += calc_chksum(frame);
+            result += "\r";
+            return result;
+          };
+
+          // Get current battery to poll
+          int batt = id(rs485_poll_battery);
+          int addr = 2;  // Pylontech master address
+
+          // Build and send command
+          std::string cmd = make_cmd(addr, batt);
+          ESP_LOGD("rs485", "TX battery %d: %s", batt, cmd.c_str());
+
+          // Send via UART
+          for (char c : cmd) {
+            id(rs485_uart).write_byte((uint8_t)c);
+          }
+          id(rs485_uart).flush();
+
+          // Move to next battery
+          id(rs485_poll_battery) = (batt + 1) % 3;
+
+      # Wait for response
+      - delay: 300ms
+      - lambda: |-
+          // Read response
+          std::string response;
+          while (id(rs485_uart).available()) {
+            uint8_t c;
+            id(rs485_uart).read_byte(&c);
+            response += (char)c;
+          }
+
+          if (response.empty()) {
+            ESP_LOGW("rs485", "No RS485 response");
+            return;
+          }
+
+          ESP_LOGD("rs485", "RX: %s", response.c_str());
+
+          // Parse response: ~VERADRCID1RTN LENID INFO CHKSUM\r
+          // Minimum length check
+          if (response.length() < 18) {
+            ESP_LOGW("rs485", "Response too short");
+            return;
+          }
+
+          // Check RTN code (bytes 7-8 after ~)
+          if (response.length() > 9 && response.substr(7, 2) != "00") {
+            ESP_LOGW("rs485", "RTN error: %s", response.substr(7, 2).c_str());
+            return;
+          }
+
+          // Extract INFO data (after LENID at position 13, before checksum at -4)
+          if (response.length() < 18) return;
+          std::string data = response.substr(13, response.length() - 13 - 5);
+
+          // Decode battery number from context (poll_battery was incremented, so subtract 1)
+          int batt = (id(rs485_poll_battery) + 2) % 3;  // Previous battery
+
+          // Parse analog data
+          size_t i = 0;
+
+          // Skip header (4 chars)
+          if (data.length() < i + 4) return;
+          i += 4;
+
+          // Number of cells
+          if (data.length() < i + 2) return;
+          int num_cells = strtol(data.substr(i, 2).c_str(), nullptr, 16);
+          i += 2;
+
+          // Cell voltages
+          for (int cell = 0; cell < num_cells && cell < 16; cell++) {
+            if (data.length() < i + 4) break;
+            int mv = strtol(data.substr(i, 4).c_str(), nullptr, 16);
+            float v = mv / 1000.0f;
+            id(cell_voltages)[batt * 16 + cell] = v;
+            i += 4;
+          }
+
+          // Skip temperatures
+          if (data.length() >= i + 2) {
+            int num_temps = strtol(data.substr(i, 2).c_str(), nullptr, 16);
+            i += 2 + num_temps * 4;
+          }
+
+          // Skip current (4 chars)
+          i += 4;
+
+          // Skip voltage (4 chars)
+          i += 4;
+
+          // Remaining capacity (10mAh units)
+          float remain_ah = 0;
+          if (data.length() >= i + 4) {
+            remain_ah = strtol(data.substr(i, 4).c_str(), nullptr, 16) / 100.0f;
+            i += 4;
+          }
+
+          // Skip custom byte
+          i += 2;
+
+          // Total capacity
+          float total_ah = 0;
+          if (data.length() >= i + 4) {
+            total_ah = strtol(data.substr(i, 4).c_str(), nullptr, 16) / 100.0f;
+            i += 4;
+          }
+
+          // Cycles
+          if (data.length() >= i + 4) {
+            id(batt_cycles)[batt] = strtol(data.substr(i, 4).c_str(), nullptr, 16);
+          }
+
+          // Calculate SOC
+          if (total_ah > 0) {
+            id(batt_soc)[batt] = (remain_ah / total_ah) * 100.0f;
+          }
+
+          ESP_LOGI("rs485", "Battery %d: %d cells, SOC=%.0f%%, cycles=%d",
+                   batt, num_cells, id(batt_soc)[batt], id(batt_cycles)[batt]);
+
+  # Publish RS485 cell data to MQTT every 30 seconds
+  - interval: 30s
+    then:
+      - lambda: |-
+          // Find stack min/max cell voltages
+          float stack_min = 99.0f, stack_max = 0.0f;
+
+          for (int batt = 0; batt < 3; batt++) {
+            float batt_min = 99.0f, batt_max = 0.0f;
+
+            for (int cell = 0; cell < 16; cell++) {
+              float v = id(cell_voltages)[batt * 16 + cell];
+              if (v > 0.1f) {  // Valid reading
+                if (v < batt_min) batt_min = v;
+                if (v > batt_max) batt_max = v;
+                if (v < stack_min) stack_min = v;
+                if (v > stack_max) stack_max = v;
+              }
+            }
+
+            // Publish per-battery data
+            if (batt_min < 99.0f) {
+              float delta = (batt_max - batt_min) * 1000.0f;
+              char topic[64], payload[16];
+
+              snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/battery%d/cell_min", batt);
+              snprintf(payload, sizeof(payload), "%.3f", batt_min);
+              id(mqtt_client).publish(topic, payload);
+
+              snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/battery%d/cell_max", batt);
+              snprintf(payload, sizeof(payload), "%.3f", batt_max);
+              id(mqtt_client).publish(topic, payload);
+
+              snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/battery%d/cell_delta_mv", batt);
+              snprintf(payload, sizeof(payload), "%.0f", delta);
+              id(mqtt_client).publish(topic, payload);
+
+              snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/battery%d/soc", batt);
+              snprintf(payload, sizeof(payload), "%.0f", id(batt_soc)[batt]);
+              id(mqtt_client).publish(topic, payload);
+
+              snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/battery%d/cycles", batt);
+              snprintf(payload, sizeof(payload), "%d", id(batt_cycles)[batt]);
+              id(mqtt_client).publish(topic, payload);
+
+              // Publish individual cell voltages
+              for (int cell = 0; cell < 16; cell++) {
+                float v = id(cell_voltages)[batt * 16 + cell];
+                if (v > 0.1f) {
+                  snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/battery%d/cell%02d", batt, cell + 1);
+                  snprintf(payload, sizeof(payload), "%.3f", v);
+                  id(mqtt_client).publish(topic, payload);
+                }
+              }
+            }
+          }
+
+          // Publish stack totals
+          if (stack_min < 99.0f) {
+            char topic[64], payload[16];
+
+            snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/cell_min");
+            snprintf(payload, sizeof(payload), "%.3f", stack_min);
+            id(mqtt_client).publish(topic, payload);
+
+            snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/cell_max");
+            snprintf(payload, sizeof(payload), "%.3f", stack_max);
+            id(mqtt_client).publish(topic, payload);
+
+            snprintf(topic, sizeof(topic), "${mqtt_prefix}/rs485/cell_delta_mv");
+            snprintf(payload, sizeof(payload), "%.0f", (stack_max - stack_min) * 1000.0f);
+            id(mqtt_client).publish(topic, payload);
           }
 
 # Sensors - these publish to MQTT topics matching the Python script
