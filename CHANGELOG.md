@@ -14,6 +14,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2026-01-01] - RS485 Alarm Decoder Fix
+
+### Fixed
+- **False alarm reports at 100% SOC** - The alarm decoder was incorrectly reporting
+  `module_overvolt` and `module_undervolt` when batteries were fully charged
+- Cell overvoltage at 100% SOC is now correctly treated as a warning (informational),
+  not an alarm (problem)
+
+### Changed
+- Rewrote `decode_alarm_response()` with correct byte/bit positions from BMS XML
+- Separated `warnings` (informational) from `protections` (actual problems)
+- Only undervolt protections and pack-level issues are now reported as alarms
+- Added documentation of the status byte layout from BMS protocol
+
+---
+
 ## [2025-12-31] - Security & Usability Improvements
 
 ### Added
@@ -173,6 +189,34 @@ Reviewed ESPHome config and identified gaps compared to Python scripts. Complete
 
 **Next Steps:**
 - Test with actual ESP32-S3-RS485-CAN hardware when it arrives
+
+**Session: RS485 Alarm Decoder Bug Fix**
+
+User reported false alarms ("overvolt" and "undervolt") at 100% SOC. Investigation revealed:
+
+**Root Cause:**
+- Status byte bit interpretation was completely wrong
+- Code was treating byte 3 bits as `module_overvolt` (bit 0) and `module_undervolt` (bit 1)
+- Actually, bit 0 = Cell OV Alarm, bit 1 = Cell OV Protect (both normal at 100%)
+- When status_byte = 0x03, both flags were set, causing false reports
+
+**Investigation Process:**
+1. Read BMS XML file (`BMS073-H17-BL08-16S-en-US.xml`) for protocol documentation
+2. Found status byte layout: ByteIndex 1 has voltage flags, ByteIndex 2 has temp flags
+3. Captured raw RS485 responses to verify byte positions
+4. Correlated with display values (OV=Y, OVP=Y = bits 0+1 for Cell OV Alarm+Protect)
+
+**Fix:**
+- Rewrote decoder with correct bit meanings from XML
+- Separated `warnings` (informational) from `protections` (problems)
+- Cell OV at 100% SOC is now a warning, not an alarm
+- Only undervolt and pack-level protections are real alarms
+
+**Lesson Learned:**
+- Protocol reverse-engineering needs verification against actual device behavior
+- BMS XML files contain valuable protocol documentation
+
+---
 
 **Session: Security & Usability Audit**
 
