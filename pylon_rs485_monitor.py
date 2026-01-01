@@ -135,9 +135,9 @@ def decode_analog_response(data_hex: str) -> dict:
         result['current'] = raw / 100.0
         i += 4
 
-    # Voltage (mV)
+    # Voltage (10mV units = centivolts)
     if i + 4 <= len(data_hex):
-        result['voltage'] = int(data_hex[i:i+4], 16) / 1000.0
+        result['voltage'] = int(data_hex[i:i+4], 16) / 100.0
         i += 4
 
     # Remaining capacity (10mAh)
@@ -441,6 +441,8 @@ def publish_discovery(client, num_batteries: int = NUM_BATTERIES, cells_per_batt
             (f"{prefix}_soc", f"Battery {batt} SOC", f"{state_prefix}/soc", "%", None, "measurement", "mdi:battery", 0),
             (f"{prefix}_cycles", f"Battery {batt} Cycles", f"{state_prefix}/cycles", None, None, "total_increasing", "mdi:counter", 0),
             (f"{prefix}_balancing_count", f"Battery {batt} Balancing Cells", f"{state_prefix}/balancing_count", None, None, "measurement", "mdi:scale-balance", 0),
+            (f"{prefix}_warnings", f"Battery {batt} Warnings", f"{state_prefix}/warnings", None, None, None, "mdi:alert-circle-outline", None),
+            (f"{prefix}_alarms", f"Battery {batt} Alarms", f"{state_prefix}/alarms", None, None, None, "mdi:alert", None),
         ]
 
         for object_id, name, st, unit, dclass, sclass, icon, precision in batt_sensors:
@@ -562,14 +564,16 @@ def read_all_batteries(port: str = RS485_PORT, baud: int = RS485_BAUD,
                 'cell_delta_mv': round((max(data['cells']) - min(data['cells'])) * 1000, 1),
                 'temps': data.get('temps', []),
                 'current': data.get('current', 0),
-                'voltage': sum(data['cells']),  # Calculate from cells
+                'voltage': data.get('voltage', sum(data['cells'])),  # BMS-reported voltage
+                'voltage_calculated': sum(data['cells']),  # Sum of cells for comparison
                 'remain_ah': data.get('remain_ah', 0),
                 'total_ah': data.get('total_ah', 0),
                 'soc': round(data.get('remain_ah', 0) / data.get('total_ah', 1) * 100, 1) if data.get('total_ah') else 0,
                 'cycles': data.get('cycles', 0),
-                # Alarm/balancing defaults
+                # Alarm/balancing/warning defaults
                 'balancing_cells': [],
                 'balancing_count': 0,
+                'warnings': [],
                 'alarms': [],
             }
 
@@ -580,6 +584,7 @@ def read_all_batteries(port: str = RS485_PORT, baud: int = RS485_BAUD,
                 batt_data['balancing_count'] = len(batt_data['balancing_cells'])
                 batt_data['overvolt_cells'] = alarm_data.get('overvolt_cells', [])
                 batt_data['undervolt_cells'] = alarm_data.get('undervolt_cells', [])
+                batt_data['warnings'] = alarm_data.get('warnings', [])
                 batt_data['alarms'] = alarm_data.get('alarms', [])
                 batt_data['status'] = alarm_data.get('status', {})
 
@@ -644,11 +649,16 @@ def print_report(data: dict):
             print(f"    Cell {i:2d}: {v:.3f}V{flag_str}")
 
         print(f"    Range: {batt['cell_min']:.3f}V - {batt['cell_max']:.3f}V (Δ {batt['cell_delta_mv']:.0f}mV)")
+        print(f"    Voltage: {batt['voltage']:.2f}V  Current: {batt['current']:.2f}A")
         if batt['temps']:
             print(f"    Temps: {[f'{t:.1f}°C' for t in batt['temps']]}")
         print(f"    SOC: {batt['soc']:.0f}% ({batt['remain_ah']:.0f}/{batt['total_ah']:.0f} Ah)")
 
-        # Show alarms if any
+        # Show warnings (OV/OVP flags etc)
+        if batt.get('warnings'):
+            print(f"    Warnings: {', '.join(batt['warnings'])}")
+
+        # Show alarms if any (actual problems)
         if batt.get('alarms'):
             print(f"    ⚠️  ALARMS: {', '.join(batt['alarms'])}")
 
@@ -705,6 +715,10 @@ def publish_mqtt_data(pub: Publisher, data: dict):
         pub.publish(f"{prefix}/cycles", batt['cycles'])
         pub.publish(f"{prefix}/balancing_count", batt.get('balancing_count', 0))
         pub.publish(f"{prefix}/balancing_active", 1 if batt.get('balancing_count') else 0)
+
+        # Warnings (OV/OVP flags) and alarms
+        pub.publish(f"{prefix}/warnings", ','.join(batt.get('warnings', [])) if batt.get('warnings') else '')
+        pub.publish(f"{prefix}/alarms", ','.join(batt.get('alarms', [])) if batt.get('alarms') else '')
 
         # Individual cell voltages
         for i, v in enumerate(batt['cells'], 1):
