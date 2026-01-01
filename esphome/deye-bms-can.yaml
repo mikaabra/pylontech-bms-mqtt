@@ -630,6 +630,14 @@ interval:
               snprintf(payload, sizeof(payload), "%.0f", id(batt_soc)[batt]);
               id(mqtt_client).publish(topic, payload);
 
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/remain_ah", batt);
+              snprintf(payload, sizeof(payload), "%.1f", id(batt_remain_ah)[batt]);
+              id(mqtt_client).publish(topic, payload);
+
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/total_ah", batt);
+              snprintf(payload, sizeof(payload), "%.1f", id(batt_total_ah)[batt]);
+              id(mqtt_client).publish(topic, payload);
+
               snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cycles", batt);
               snprintf(payload, sizeof(payload), "%d", id(batt_cycles)[batt]);
               id(mqtt_client).publish(topic, payload);
