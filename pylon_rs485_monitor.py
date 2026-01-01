@@ -246,9 +246,11 @@ def decode_alarm_response(data_hex: str) -> dict:
             elif module_voltage == 0x02:
                 result['protections'].append('pack_overvolt')
 
-        # Byte 3 is voltage status bitfield (only set during Float charge)
-        if status_pos + 8 <= len(data_hex):
-            voltage_status = int(data_hex[status_pos+6:status_pos+8], 16)
+        # Byte 4 is voltage status bitfield
+        # Layout: bit0=CellOV_Alarm, bit1=CellOV_Protect, bit2=CellUV_Alarm, bit3=CellUV_Protect,
+        #         bit4=PackOV_Alarm, bit5=PackOV_Protect, bit6=PackUV_Alarm, bit7=PackUV_Protect
+        if status_pos + 10 <= len(data_hex):
+            voltage_status = int(data_hex[status_pos+8:status_pos+10], 16)
             result['status']['voltage_raw'] = voltage_status
 
             # These are informational - normal during charging
@@ -270,12 +272,6 @@ def decode_alarm_response(data_hex: str) -> dict:
                 result['protections'].append('cell_undervolt_protect')
             if voltage_status & 0x80:
                 result['protections'].append('pack_undervolt_protect')
-
-        # Byte 4 appears to be charge-state related, not temp alarms
-        # Skip interpreting it as temp alarms to avoid false positives
-        if status_pos + 10 <= len(data_hex):
-            status4 = int(data_hex[status_pos+8:status_pos+10], 16)
-            result['status']['status4_raw'] = status4
 
         # Only actual protection events that indicate problems go to alarms
         # Overvolt at 100% SOC is normal (BMS limiting charge), not an alarm
