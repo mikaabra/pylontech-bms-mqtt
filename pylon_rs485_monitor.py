@@ -628,19 +628,15 @@ def print_report(data: dict):
         bal_indicator = f" ⚡ BALANCING {batt.get('balancing_count', 0)} cells" if batt.get('balancing_count') else ""
         print(f"\n▸ BATTERY {batt['id']} ({len(batt['cells'])} cells, {batt['cycles']} cycles){bal_indicator}")
 
-        # Cell voltages with flags
+        # Cell voltages with flags (from BMS, not hardcoded thresholds)
         for i, v in enumerate(batt['cells'], 1):
             flags = []
-            if v < 3.4:
-                flags.append("LOW")
-            elif v > 3.55:
-                flags.append("HIGH")
             if i in batt.get('balancing_cells', []):
                 flags.append("BAL")
             if i in batt.get('overvolt_cells', []):
-                flags.append("OV!")
+                flags.append("OV")
             if i in batt.get('undervolt_cells', []):
-                flags.append("UV!")
+                flags.append("UV")
             flag_str = f" ◄ {', '.join(flags)}" if flags else ""
             print(f"    Cell {i:2d}: {v:.3f}V{flag_str}")
 
