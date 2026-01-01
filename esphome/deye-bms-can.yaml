@@ -38,6 +38,11 @@ esphome:
           id(batt_cycles).resize(3, 0);
           id(batt_balancing_count).resize(3, 0);
           id(batt_alarms).resize(3, std::string(""));
+          id(batt_warnings).resize(3, std::string(""));
+          id(batt_state).resize(3, std::string(""));
+          id(batt_charge_mosfet).resize(3, false);
+          id(batt_discharge_mosfet).resize(3, false);
+          id(batt_lmcharge_mosfet).resize(3, false);
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -261,6 +266,21 @@ globals:
     restore_value: no
   - id: batt_alarms
     type: std::vector<std::string>
+    restore_value: no
+  - id: batt_warnings
+    type: std::vector<std::string>
+    restore_value: no
+  - id: batt_state
+    type: std::vector<std::string>
+    restore_value: no
+  - id: batt_charge_mosfet
+    type: std::vector<bool>
+    restore_value: no
+  - id: batt_discharge_mosfet
+    type: std::vector<bool>
+    restore_value: no
+  - id: batt_lmcharge_mosfet
+    type: std::vector<bool>
     restore_value: no
 
   # Stack totals
@@ -496,24 +516,22 @@ interval:
             // Parse: skip info_flag(2), battery(2), get num_cells(2)
             int num_cells = strtol(data.substr(4, 2).c_str(), nullptr, 16);
 
-            // Cell status bytes
-            int balancing = 0;
-            std::string batt_alarm_str;
+            // Cell status bytes (0x00=normal, 0x01=undervolt, 0x02=overvolt)
+            // Note: Balance flags are NOT in per-cell bytes - they're in status bytes 9-10
+            std::set<std::string> batt_warnings_set;
+            std::set<std::string> batt_alarms_set;
 
             for (int c = 0; c < num_cells && c < 16; c++) {
               int pos = 6 + c * 2;
               if (pos + 2 <= (int)data.length()) {
                 int status = strtol(data.substr(pos, 2).c_str(), nullptr, 16);
-                if (status & 0x80) balancing++;
-                if (status == 0x01) { all_alarms.insert("cell_undervolt"); }
-                if (status == 0x02) { all_alarms.insert("cell_overvolt"); }
+                // Cell undervolt is an alarm, overvolt at 100% SOC is just a warning
+                if (status == 0x01) { batt_alarms_set.insert("cell_undervolt"); all_alarms.insert("cell_undervolt"); }
+                if (status == 0x02) { batt_warnings_set.insert("cell_overvolt"); }
               }
             }
 
-            id(batt_balancing_count)[batt] = balancing;
-            total_balancing += balancing;
-
-            // Temperature alarms
+            // Temperature status
             int temp_pos = 6 + num_cells * 2;
             if (temp_pos + 2 <= (int)data.length()) {
               int num_temps = strtol(data.substr(temp_pos, 2).c_str(), nullptr, 16);
@@ -522,24 +540,93 @@ interval:
                 int pos = t_start + t * 2;
                 if (pos + 2 <= (int)data.length()) {
                   int status = strtol(data.substr(pos, 2).c_str(), nullptr, 16);
-                  if (status == 0x01) { all_alarms.insert("undertemp"); }
-                  if (status == 0x02) { all_alarms.insert("overtemp"); }
+                  if (status == 0x01) { batt_alarms_set.insert("undertemp"); all_alarms.insert("undertemp"); }
+                  if (status == 0x02) { batt_alarms_set.insert("overtemp"); all_alarms.insert("overtemp"); }
                 }
               }
 
-              // Current/voltage alarms (after temps)
-              int alarm_pos = t_start + num_temps * 2;
-              if (alarm_pos + 6 <= (int)data.length()) {
-                int charge_alarm = strtol(data.substr(alarm_pos, 2).c_str(), nullptr, 16);
-                int voltage_alarm = strtol(data.substr(alarm_pos + 2, 2).c_str(), nullptr, 16);
-                int discharge_alarm = strtol(data.substr(alarm_pos + 4, 2).c_str(), nullptr, 16);
+              // Status bytes start after temp status bytes
+              int status_pos = t_start + num_temps * 2;
 
-                if (charge_alarm == 0x01 || charge_alarm == 0x02) { all_alarms.insert("charge_overcurrent"); }
-                if (voltage_alarm == 0x01) { all_alarms.insert("pack_undervolt"); }
-                if (voltage_alarm == 0x02) { all_alarms.insert("pack_overvolt"); }
-                if (discharge_alarm == 0x01 || discharge_alarm == 0x02) { all_alarms.insert("discharge_overcurrent"); }
+              // Byte 0-1: Current/voltage status
+              if (status_pos + 2 <= (int)data.length()) {
+                int charge_current = strtol(data.substr(status_pos, 2).c_str(), nullptr, 16);
+                if (charge_current == 0x02) { batt_alarms_set.insert("charge_overcurrent"); all_alarms.insert("charge_overcurrent"); }
+              }
+              if (status_pos + 4 <= (int)data.length()) {
+                int module_voltage = strtol(data.substr(status_pos + 2, 2).c_str(), nullptr, 16);
+                if (module_voltage == 0x01) { batt_alarms_set.insert("pack_undervolt"); all_alarms.insert("pack_undervolt"); }
+                if (module_voltage == 0x02) { batt_alarms_set.insert("pack_overvolt"); all_alarms.insert("pack_overvolt"); }
+              }
+
+              // Byte 4 (status_pos+8): Voltage status bitfield
+              // bit0=CellOV_Alarm, bit1=CellOV_Protect, bit2=CellUV_Alarm, bit3=CellUV_Protect
+              // bit4=PackOV_Alarm, bit5=PackOV_Protect, bit6=PackUV_Alarm, bit7=PackUV_Protect
+              if (status_pos + 10 <= (int)data.length()) {
+                int voltage_status = strtol(data.substr(status_pos + 8, 2).c_str(), nullptr, 16);
+                // Warnings (informational - normal at 100% SOC)
+                if (voltage_status & 0x01) batt_warnings_set.insert("cell_overvolt_alarm");
+                if (voltage_status & 0x02) batt_warnings_set.insert("cell_overvolt_protect");
+                if (voltage_status & 0x04) batt_warnings_set.insert("cell_undervolt_alarm");
+                if (voltage_status & 0x10) batt_warnings_set.insert("pack_overvolt_alarm");
+                if (voltage_status & 0x20) batt_warnings_set.insert("pack_overvolt_protect");
+                if (voltage_status & 0x40) batt_warnings_set.insert("pack_undervolt_alarm");
+                // Protections (actual problems)
+                if (voltage_status & 0x08) { batt_alarms_set.insert("cell_undervolt_protect"); all_alarms.insert("cell_undervolt_protect"); }
+                if (voltage_status & 0x80) { batt_alarms_set.insert("pack_undervolt_protect"); all_alarms.insert("pack_undervolt_protect"); }
+              }
+
+              // ByteIndex 9-10 (status_pos+18): Individual cell balance flags
+              // ByteIndex 9: Balance1-8 (bit0=cell1...bit7=cell8)
+              // ByteIndex 10: Balance9-16 (bit0=cell9...bit7=cell16)
+              int balancing = 0;
+              if (status_pos + 22 <= (int)data.length()) {
+                int balance1_8 = strtol(data.substr(status_pos + 18, 2).c_str(), nullptr, 16);
+                int balance9_16 = strtol(data.substr(status_pos + 20, 2).c_str(), nullptr, 16);
+                for (int bit = 0; bit < 8; bit++) {
+                  if (balance1_8 & (1 << bit)) balancing++;
+                  if (balance9_16 & (1 << bit)) balancing++;
+                }
+              }
+              id(batt_balancing_count)[batt] = balancing;
+              total_balancing += balancing;
+
+              // ByteIndex 11 (status_pos+22): MOSFET status
+              // bit0=DISCHG_MOSFET, bit1=CHG_MOSFET, bit2=LMCHG_MOSFET
+              if (status_pos + 24 <= (int)data.length()) {
+                int mosfet_status = strtol(data.substr(status_pos + 22, 2).c_str(), nullptr, 16);
+                id(batt_discharge_mosfet)[batt] = (mosfet_status & 0x01) != 0;
+                id(batt_charge_mosfet)[batt] = (mosfet_status & 0x02) != 0;
+                id(batt_lmcharge_mosfet)[batt] = (mosfet_status & 0x04) != 0;
+              }
+
+              // Operating state from last byte
+              // 0x01=Discharge, 0x02=Charge, 0x04=Float, 0x08=Full, 0x10=Standby, 0x20=Shutdown
+              if (data.length() >= 2) {
+                int last_byte = strtol(data.substr(data.length() - 2, 2).c_str(), nullptr, 16);
+                std::string state_str;
+                if (last_byte & 0x01) { if (!state_str.empty()) state_str += ", "; state_str += "Discharge"; }
+                if (last_byte & 0x02) { if (!state_str.empty()) state_str += ", "; state_str += "Charge"; }
+                if (last_byte & 0x04) { if (!state_str.empty()) state_str += ", "; state_str += "Float"; }
+                if (last_byte & 0x08) { if (!state_str.empty()) state_str += ", "; state_str += "Full"; }
+                if (last_byte & 0x10) { if (!state_str.empty()) state_str += ", "; state_str += "Standby"; }
+                if (last_byte & 0x20) { if (!state_str.empty()) state_str += ", "; state_str += "Shutdown"; }
+                id(batt_state)[batt] = state_str.empty() ? "Idle" : state_str;
               }
             }
+
+            // Build per-battery warning/alarm strings
+            std::string warn_str, alarm_str;
+            for (const auto& w : batt_warnings_set) {
+              if (!warn_str.empty()) warn_str += ",";
+              warn_str += w;
+            }
+            for (const auto& a : batt_alarms_set) {
+              if (!alarm_str.empty()) alarm_str += ",";
+              alarm_str += a;
+            }
+            id(batt_warnings)[batt] = warn_str;
+            id(batt_alarms)[batt] = alarm_str;
           }
 
           id(stack_balancing_count) = total_balancing;
@@ -650,6 +737,26 @@ interval:
               snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/balancing_active", batt);
               snprintf(payload, sizeof(payload), "%d", id(batt_balancing_count)[batt] > 0 ? 1 : 0);
               id(mqtt_client).publish(topic, payload);
+
+              // State, warnings, alarms
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/state", batt);
+              id(mqtt_client).publish(topic, id(batt_state)[batt].c_str());
+
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/warnings", batt);
+              id(mqtt_client).publish(topic, id(batt_warnings)[batt].c_str());
+
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/alarms", batt);
+              id(mqtt_client).publish(topic, id(batt_alarms)[batt].c_str());
+
+              // MOSFET status
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/charge_mosfet", batt);
+              id(mqtt_client).publish(topic, id(batt_charge_mosfet)[batt] ? "1" : "0");
+
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/discharge_mosfet", batt);
+              id(mqtt_client).publish(topic, id(batt_discharge_mosfet)[batt] ? "1" : "0");
+
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/lmcharge_mosfet", batt);
+              id(mqtt_client).publish(topic, id(batt_lmcharge_mosfet)[batt] ? "1" : "0");
 
               // Individual cell voltages
               for (int cell = 0; cell < 16; cell++) {

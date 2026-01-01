@@ -47,6 +47,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Terminal output now shows state in battery header (e.g., `[Charge]`, `[Float]`)
 - Terminal output shows MOSFET status (e.g., `[FETs: DCHG+CHG+LMCHG]` or `[FETs: OFF - ISOLATED]`)
 
+### ESPHome
+- **Full feature parity** - ESPHome config now matches all Python script fixes:
+  - Fixed balancing detection (reads ByteIndex 9-10, not per-cell 0x80 bit)
+  - Added MOSFET status (charge, discharge, lmcharge)
+  - Added BMS state (Charge, Discharge, Float, Full, Standby, Shutdown)
+  - Added warnings sensor (separate from alarms)
+  - Added capacity sensors (remain_ah, total_ah)
+  - Separated warnings from alarms (cell_overvolt at 100% SOC is warning, not alarm)
+
 ---
 
 ## [2025-12-31] - Security & Usability Improvements
