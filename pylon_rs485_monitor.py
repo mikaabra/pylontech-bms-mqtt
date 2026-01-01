@@ -164,7 +164,14 @@ def decode_analog_response(data_hex: str) -> dict:
 def decode_alarm_response(data_hex: str) -> dict:
     """Decode alarm info response (CID2=0x44).
 
-    Returns balancing status, cell/temp alarms, and protection flags.
+    Returns balancing status, cell/temp status, and protection flags.
+
+    Status byte layout (from BMS XML):
+    Byte 0: Current/misc status
+    Byte 1 (voltage): bit0=CellOV_Alarm, bit1=CellOV_Protect, bit2=CellUV_Alarm, bit3=CellUV_Protect,
+                      bit4=PackOV_Alarm, bit5=PackOV_Protect, bit6=PackUV_Alarm, bit7=PackUV_Protect
+    Byte 2 (temp):    bit0=ChargeOT_Alarm, bit1=ChargeOT_Protect, bit2=ChargeUT_Alarm, bit3=ChargeUT_Protect,
+                      bit4=DischargeOT_Alarm, bit5=DischargeOT_Protect, bit6=DischargeUT_Alarm, bit7=DischargeUT_Protect
     """
     result = {
         'balancing_cells': [],
@@ -172,7 +179,9 @@ def decode_alarm_response(data_hex: str) -> dict:
         'undervolt_cells': [],
         'overtemp_sensors': [],
         'undertemp_sensors': [],
-        'alarms': [],
+        'warnings': [],      # Informational (normal at 100% SOC)
+        'protections': [],   # Active protection events
+        'alarms': [],        # Only real problems (protections)
         'status': {}
     }
 
@@ -196,9 +205,10 @@ def decode_alarm_response(data_hex: str) -> dict:
         status = int(data_hex[pos:pos+2], 16)
         if status & 0x80:
             result['balancing_cells'].append(c + 1)
-        if status == 0x01:
+        # Note: 0x02 at 100% SOC is normal - cells at charge voltage threshold
+        if (status & 0x7F) == 0x01:
             result['undervolt_cells'].append(c + 1)
-        elif status == 0x02:
+        elif (status & 0x7F) == 0x02:
             result['overvolt_cells'].append(c + 1)
 
     # Temperature alarms
@@ -217,42 +227,59 @@ def decode_alarm_response(data_hex: str) -> dict:
             elif status == 0x02:
                 result['overtemp_sensors'].append(t + 1)
 
-        # Current/voltage alarms (3 bytes after temps)
-        # Values: 0x00=normal, 0x01=below limit, 0x02=above limit
-        alarm_pos = temp_start + num_temps * 2
-        if alarm_pos + 6 <= len(data_hex):
-            charge_alarm = int(data_hex[alarm_pos:alarm_pos+2], 16)
-            voltage_alarm = int(data_hex[alarm_pos+2:alarm_pos+4], 16)
-            discharge_alarm = int(data_hex[alarm_pos+4:alarm_pos+6], 16)
+        # Status bytes after temps
+        # Layout: [0]=charge_current, [1]=module_voltage, [2]=unknown,
+        #         [3]=voltage_flags, [4]=charge_state_flags, ...
+        # Last byte = operating state (1=Discharge, 2=Charge, 4=Float, 8=Full)
+        status_pos = temp_start + num_temps * 2
 
-            # Only treat 0x01/0x02 as actual alarms (not status bytes)
-            if charge_alarm in (0x01, 0x02):
-                result['alarms'].append('charge_overcurrent')
-            if voltage_alarm == 0x01:
-                result['alarms'].append('pack_undervolt')
-            elif voltage_alarm == 0x02:
-                result['alarms'].append('pack_overvolt')
-            if discharge_alarm in (0x01, 0x02):
-                result['alarms'].append('discharge_overcurrent')
-
-        # Status byte (at alarm_pos + 6)
-        # This contains protection/operational flags
-        status_pos = alarm_pos + 6
+        # Bytes 0-1: Current/voltage status (0=normal, 1=below, 2=above)
         if status_pos + 2 <= len(data_hex):
-            status_byte = int(data_hex[status_pos:status_pos+2], 16)
-            result['status_raw'] = status_byte
-            result['status'] = {
-                'module_overvolt': bool(status_byte & 0x01),
-                'module_undervolt': bool(status_byte & 0x02),
-                'charge_overcurrent': bool(status_byte & 0x04),
-                'discharge_overcurrent': bool(status_byte & 0x08),
-                'overtemp': bool(status_byte & 0x10),
-                'undertemp': bool(status_byte & 0x20),
-            }
-            # Add active protection flags to alarms
-            for flag, active in result['status'].items():
-                if active and flag not in result['alarms']:
-                    result['alarms'].append(flag)
+            charge_current = int(data_hex[status_pos:status_pos+2], 16)
+            if charge_current == 0x02:
+                result['protections'].append('charge_overcurrent')
+
+        if status_pos + 4 <= len(data_hex):
+            module_voltage = int(data_hex[status_pos+2:status_pos+4], 16)
+            if module_voltage == 0x01:
+                result['protections'].append('pack_undervolt')
+            elif module_voltage == 0x02:
+                result['protections'].append('pack_overvolt')
+
+        # Byte 3 is voltage status bitfield (only set during Float charge)
+        if status_pos + 8 <= len(data_hex):
+            voltage_status = int(data_hex[status_pos+6:status_pos+8], 16)
+            result['status']['voltage_raw'] = voltage_status
+
+            # These are informational - normal during charging
+            if voltage_status & 0x01:
+                result['warnings'].append('cell_overvolt_alarm')
+            if voltage_status & 0x02:
+                result['warnings'].append('cell_overvolt_protect')
+            if voltage_status & 0x04:
+                result['warnings'].append('cell_undervolt_alarm')
+            if voltage_status & 0x10:
+                result['warnings'].append('pack_overvolt_alarm')
+            if voltage_status & 0x20:
+                result['warnings'].append('pack_overvolt_protect')
+            if voltage_status & 0x40:
+                result['warnings'].append('pack_undervolt_alarm')
+
+            # Only these are actual problems worth alerting
+            if voltage_status & 0x08:
+                result['protections'].append('cell_undervolt_protect')
+            if voltage_status & 0x80:
+                result['protections'].append('pack_undervolt_protect')
+
+        # Byte 4 appears to be charge-state related, not temp alarms
+        # Skip interpreting it as temp alarms to avoid false positives
+        if status_pos + 10 <= len(data_hex):
+            status4 = int(data_hex[status_pos+8:status_pos+10], 16)
+            result['status']['status4_raw'] = status4
+
+        # Only actual protection events that indicate problems go to alarms
+        # Overvolt at 100% SOC is normal (BMS limiting charge), not an alarm
+        result['alarms'] = list(result['protections'])
 
     return result
 
