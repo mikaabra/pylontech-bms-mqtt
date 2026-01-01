@@ -523,6 +523,11 @@ def publish_discovery(client, num_batteries: int = NUM_BATTERIES, cells_per_batt
                                        f"{state_prefix}/discharge_mosfet", None, "mdi:electric-switch")
         client.publish(cfg_topic, json.dumps(cfg), retain=True)
 
+        cfg_topic = f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/{prefix}_lmcharge_mosfet/config"
+        cfg = ha_binary_sensor_config(f"{prefix}_lmcharge_mosfet", f"Battery {batt} LM Charge MOSFET",
+                                       f"{state_prefix}/lmcharge_mosfet", None, "mdi:electric-switch")
+        client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
         # Individual cell voltages
         for cell in range(1, cells_per_battery + 1):
             object_id = f"{prefix}_cell{cell:02d}"
@@ -811,6 +816,7 @@ def publish_mqtt_data(pub: Publisher, data: dict):
         pub.publish(f"{prefix}/state", status.get('state', ''))
         pub.publish(f"{prefix}/charge_mosfet", 1 if status.get('charge_mosfet_on') else 0)
         pub.publish(f"{prefix}/discharge_mosfet", 1 if status.get('discharge_mosfet_on') else 0)
+        pub.publish(f"{prefix}/lmcharge_mosfet", 1 if status.get('lmcharge_mosfet_on') else 0)
 
         # Individual cell voltages
         for i, v in enumerate(batt['cells'], 1):
