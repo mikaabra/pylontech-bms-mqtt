@@ -166,12 +166,16 @@ def decode_alarm_response(data_hex: str) -> dict:
 
     Returns balancing status, cell/temp status, and protection flags.
 
-    Status byte layout (from BMS XML):
-    Byte 0: Current/misc status
-    Byte 1 (voltage): bit0=CellOV_Alarm, bit1=CellOV_Protect, bit2=CellUV_Alarm, bit3=CellUV_Protect,
-                      bit4=PackOV_Alarm, bit5=PackOV_Protect, bit6=PackUV_Alarm, bit7=PackUV_Protect
-    Byte 2 (temp):    bit0=ChargeOT_Alarm, bit1=ChargeOT_Protect, bit2=ChargeUT_Alarm, bit3=ChargeUT_Protect,
-                      bit4=DischargeOT_Alarm, bit5=DischargeOT_Protect, bit6=DischargeUT_Alarm, bit7=DischargeUT_Protect
+    Response structure:
+    - [0:2] info_flag, [2:4] battery, [4:6] num_cells
+    - [6:6+num_cells*2] cell status bytes (0x00=normal, 0x01=under, 0x02=over)
+    - [next 2] num_temps
+    - [next num_temps*2] temp status bytes
+    - [remaining] status bytes:
+      - ByteIndex 0: bit0=Balance On, bit1=Static Balance, bit2=Static Balance Timeout
+      - ByteIndex 4: voltage flags (bit0=CellOV_Alarm, bit1=CellOV_Protect, etc.)
+      - ByteIndex 9: Balance1-8 (bit0=cell1, bit1=cell2, ... bit7=cell8)
+      - ByteIndex 10: Balance9-16 (bit0=cell9, ... bit7=cell16)
     """
     result = {
         'balancing_cells': [],
@@ -195,20 +199,19 @@ def decode_alarm_response(data_hex: str) -> dict:
     num_cells = int(data_hex[4:6], 16)
     result['num_cells'] = num_cells
 
-    # Cell alarm bytes (1 byte per cell)
-    # 0x00=normal, 0x01=below limit, 0x02=above limit, 0x80=balancing
+    # Cell status bytes (1 byte per cell)
+    # 0x00=normal, 0x01=below limit (undervolt), 0x02=above limit (overvolt)
+    # Note: Balance flags are NOT here - they're in status bytes 9-10
     cell_start = 6
     for c in range(num_cells):
         pos = cell_start + c * 2
         if pos + 2 > len(data_hex):
             break
         status = int(data_hex[pos:pos+2], 16)
-        if status & 0x80:
-            result['balancing_cells'].append(c + 1)
         # Note: 0x02 at 100% SOC is normal - cells at charge voltage threshold
-        if (status & 0x7F) == 0x01:
+        if status == 0x01:
             result['undervolt_cells'].append(c + 1)
-        elif (status & 0x7F) == 0x02:
+        elif status == 0x02:
             result['overvolt_cells'].append(c + 1)
 
     # Temperature alarms
@@ -246,6 +249,16 @@ def decode_alarm_response(data_hex: str) -> dict:
             elif module_voltage == 0x02:
                 result['protections'].append('pack_overvolt')
 
+        # ByteIndex 0: Balance status flags
+        # bit0=Balance On, bit1=Static Balance, bit2=Static Balance Timeout
+        if status_pos + 2 <= len(data_hex):
+            balance_status = int(data_hex[status_pos:status_pos+2], 16)
+            result['status']['balance_status'] = balance_status
+            if balance_status & 0x01:
+                result['status']['balance_on'] = True
+            if balance_status & 0x02:
+                result['status']['static_balance'] = True
+
         # Byte 4 is voltage status bitfield
         # Layout: bit0=CellOV_Alarm, bit1=CellOV_Protect, bit2=CellUV_Alarm, bit3=CellUV_Protect,
         #         bit4=PackOV_Alarm, bit5=PackOV_Protect, bit6=PackUV_Alarm, bit7=PackUV_Protect
@@ -272,6 +285,52 @@ def decode_alarm_response(data_hex: str) -> dict:
                 result['protections'].append('cell_undervolt_protect')
             if voltage_status & 0x80:
                 result['protections'].append('pack_undervolt_protect')
+
+        # MOSFET status appears to be at offset 11 in status bytes (not ByteIndex 8 as in XML)
+        # bit0=DISCHG_MOSFET On, bit1=CHG_MOSFET On, bit2=LMCHG_MOSFET On, bit3=Heat_MOSFET On
+        if status_pos + 24 <= len(data_hex):
+            mosfet_status = int(data_hex[status_pos+22:status_pos+24], 16)
+            result['status']['mosfet_raw'] = mosfet_status
+            result['status']['discharge_mosfet_on'] = bool(mosfet_status & 0x01)
+            result['status']['charge_mosfet_on'] = bool(mosfet_status & 0x02)
+            result['status']['lmcharge_mosfet_on'] = bool(mosfet_status & 0x04)
+            # If both charge and discharge MOSFETs are off, battery is isolated from bus
+            result['status']['isolated'] = (mosfet_status & 0x03) == 0
+
+        # ByteIndex 9-10: Individual cell balance flags
+        # ByteIndex 9: Balance1-8 (bit0=cell1, bit7=cell8)
+        # ByteIndex 10: Balance9-16 (bit0=cell9, bit7=cell16)
+        if status_pos + 22 <= len(data_hex):  # Need to reach ByteIndex 10
+            balance1_8 = int(data_hex[status_pos+18:status_pos+20], 16)
+            balance9_16 = int(data_hex[status_pos+20:status_pos+22], 16)
+            result['status']['balance1_8_raw'] = balance1_8
+            result['status']['balance9_16_raw'] = balance9_16
+
+            for bit in range(8):
+                if balance1_8 & (1 << bit):
+                    result['balancing_cells'].append(bit + 1)
+                if balance9_16 & (1 << bit):
+                    result['balancing_cells'].append(bit + 9)
+
+        # Operating state from last byte (from XML modeText)
+        # 0x01=Discharge, 0x02=Charge, 0x04=Float, 0x08=Full, 0x10=Standby, 0x20=Shutdown
+        if len(data_hex) >= 2:
+            last_byte = int(data_hex[-2:], 16)
+            result['status']['state_raw'] = last_byte
+            states = []
+            if last_byte & 0x01:
+                states.append('Discharge')
+            if last_byte & 0x02:
+                states.append('Charge')
+            if last_byte & 0x04:
+                states.append('Float')
+            if last_byte & 0x08:
+                states.append('Full')
+            if last_byte & 0x10:
+                states.append('Standby')
+            if last_byte & 0x20:
+                states.append('Shutdown')
+            result['status']['state'] = ', '.join(states) if states else 'Idle'
 
         # Only actual protection events that indicate problems go to alarms
         # Overvolt at 100% SOC is normal (BMS limiting charge), not an alarm
@@ -437,6 +496,7 @@ def publish_discovery(client, num_batteries: int = NUM_BATTERIES, cells_per_batt
             (f"{prefix}_soc", f"Battery {batt} SOC", f"{state_prefix}/soc", "%", None, "measurement", "mdi:battery", 0),
             (f"{prefix}_cycles", f"Battery {batt} Cycles", f"{state_prefix}/cycles", None, None, "total_increasing", "mdi:counter", 0),
             (f"{prefix}_balancing_count", f"Battery {batt} Balancing Cells", f"{state_prefix}/balancing_count", None, None, "measurement", "mdi:scale-balance", 0),
+            (f"{prefix}_state", f"Battery {batt} State", f"{state_prefix}/state", None, None, None, "mdi:battery-charging", None),
             (f"{prefix}_warnings", f"Battery {batt} Warnings", f"{state_prefix}/warnings", None, None, None, "mdi:alert-circle-outline", None),
             (f"{prefix}_alarms", f"Battery {batt} Alarms", f"{state_prefix}/alarms", None, None, None, "mdi:alert", None),
         ]
@@ -450,6 +510,17 @@ def publish_discovery(client, num_batteries: int = NUM_BATTERIES, cells_per_batt
         cfg_topic = f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/{prefix}_balancing_active/config"
         cfg = ha_binary_sensor_config(f"{prefix}_balancing_active", f"Battery {batt} Balancing Active",
                                        f"{state_prefix}/balancing_active", None, "mdi:scale-balance")
+        client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+        # MOSFET status binary sensors
+        cfg_topic = f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/{prefix}_charge_mosfet/config"
+        cfg = ha_binary_sensor_config(f"{prefix}_charge_mosfet", f"Battery {batt} Charge MOSFET",
+                                       f"{state_prefix}/charge_mosfet", None, "mdi:electric-switch")
+        client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+        cfg_topic = f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/{prefix}_discharge_mosfet/config"
+        cfg = ha_binary_sensor_config(f"{prefix}_discharge_mosfet", f"Battery {batt} Discharge MOSFET",
+                                       f"{state_prefix}/discharge_mosfet", None, "mdi:electric-switch")
         client.publish(cfg_topic, json.dumps(cfg), retain=True)
 
         # Individual cell voltages
@@ -624,9 +695,11 @@ def print_report(data: dict):
     print("=" * 70)
 
     for batt in data['batteries']:
-        # Header with balancing indicator
+        # Header with state and balancing indicator
+        status = batt.get('status', {})
+        state_str = status.get('state', '')
         bal_indicator = f" ⚡ BALANCING {batt.get('balancing_count', 0)} cells" if batt.get('balancing_count') else ""
-        print(f"\n▸ BATTERY {batt['id']} ({len(batt['cells'])} cells, {batt['cycles']} cycles){bal_indicator}")
+        print(f"\n▸ BATTERY {batt['id']} [{state_str}] ({len(batt['cells'])} cells, {batt['cycles']} cycles){bal_indicator}")
 
         # Cell voltages with flags (from BMS, not hardcoded thresholds)
         for i, v in enumerate(batt['cells'], 1):
@@ -641,7 +714,18 @@ def print_report(data: dict):
             print(f"    Cell {i:2d}: {v:.3f}V{flag_str}")
 
         print(f"    Range: {batt['cell_min']:.3f}V - {batt['cell_max']:.3f}V (Δ {batt['cell_delta_mv']:.0f}mV)")
-        print(f"    Voltage: {batt['voltage']:.2f}V  Current: {batt['current']:.2f}A")
+
+        # Voltage with MOSFET status
+        mosfet_info = []
+        if status.get('discharge_mosfet_on'):
+            mosfet_info.append("DCHG")
+        if status.get('charge_mosfet_on'):
+            mosfet_info.append("CHG")
+        if status.get('lmcharge_mosfet_on'):
+            mosfet_info.append("LMCHG")
+        mosfet_str = f" [FETs: {'+'.join(mosfet_info)}]" if mosfet_info else " [FETs: OFF - ISOLATED]"
+        print(f"    Voltage: {batt['voltage']:.2f}V  Current: {batt['current']:.2f}A{mosfet_str}")
+
         if batt['temps']:
             print(f"    Temps: {[f'{t:.1f}°C' for t in batt['temps']]}")
         print(f"    SOC: {batt['soc']:.0f}% ({batt['remain_ah']:.0f}/{batt['total_ah']:.0f} Ah)")
@@ -649,6 +733,16 @@ def print_report(data: dict):
         # Show warnings (OV/OVP flags etc)
         if batt.get('warnings'):
             print(f"    Warnings: {', '.join(batt['warnings'])}")
+
+        # Show balance status from raw bytes (for debugging)
+        status = batt.get('status', {})
+        if status.get('balance_on') or status.get('static_balance'):
+            flags = []
+            if status.get('balance_on'):
+                flags.append('BalanceOn')
+            if status.get('static_balance'):
+                flags.append('StaticBalance')
+            print(f"    Balance: {', '.join(flags)}")
 
         # Show alarms if any (actual problems)
         if batt.get('alarms'):
@@ -711,6 +805,12 @@ def publish_mqtt_data(pub: Publisher, data: dict):
         # Warnings (OV/OVP flags) and alarms
         pub.publish(f"{prefix}/warnings", ','.join(batt.get('warnings', [])) if batt.get('warnings') else '')
         pub.publish(f"{prefix}/alarms", ','.join(batt.get('alarms', [])) if batt.get('alarms') else '')
+
+        # State and MOSFET status
+        status = batt.get('status', {})
+        pub.publish(f"{prefix}/state", status.get('state', ''))
+        pub.publish(f"{prefix}/charge_mosfet", 1 if status.get('charge_mosfet_on') else 0)
+        pub.publish(f"{prefix}/discharge_mosfet", 1 if status.get('discharge_mosfet_on') else 0)
 
         # Individual cell voltages
         for i, v in enumerate(batt['cells'], 1):

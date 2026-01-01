@@ -21,12 +21,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   `module_overvolt` and `module_undervolt` when batteries were fully charged
 - Cell overvoltage at 100% SOC is now correctly treated as a warning (informational),
   not an alarm (problem)
+- **Balancing detection** - Was incorrectly looking for 0x80 bit in per-cell status bytes.
+  Now correctly reads Balance1-16 flags from ByteIndex 9-10 of status section per BMS XML spec
+
+### Added
+- **BMS State monitoring** - Shows operating state per battery (Charge, Discharge, Float, Full, Standby, Shutdown)
+- **MOSFET status monitoring** - Shows which MOSFETs are on (DCHG, CHG, LMCHG)
+  - When MOSFETs are off, battery is isolated from bus and reports open-circuit voltage
+  - Explains voltage discrepancies between parallel batteries at different charge states
+- New MQTT topics: `battery{N}/state`, `battery{N}/charge_mosfet`, `battery{N}/discharge_mosfet`
+- Home Assistant discovery for state sensor and MOSFET binary sensors
 
 ### Changed
 - Rewrote `decode_alarm_response()` with correct byte/bit positions from BMS XML
 - Separated `warnings` (informational) from `protections` (actual problems)
 - Only undervolt protections and pack-level issues are now reported as alarms
 - Added documentation of the status byte layout from BMS protocol
+- Added "Balance On" and "Static Balance" flag reading from ByteIndex 0
+- Terminal output now shows state in battery header (e.g., `[Charge]`, `[Float]`)
+- Terminal output shows MOSFET status (e.g., `[FETs: DCHG+CHG+LMCHG]` or `[FETs: OFF - ISOLATED]`)
 
 ---
 
