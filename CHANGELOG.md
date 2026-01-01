@@ -14,7 +14,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
-## [2026-01-01] - RS485 Alarm Decoder Fix
+## [2026-01-01] - RS485 Alarm Decoder Fix & Capacity Monitoring
+
+### Added
+- **Battery capacity monitoring** - Added `remain_ah` and `total_ah` sensors to MQTT/Home Assistant
+  - These are BMS-reported values (not calculated), same as shown in terminal output
+  - New MQTT topics: `battery{N}/remain_ah`, `battery{N}/total_ah`
+  - Home Assistant discovery for "Battery N Remaining Capacity" and "Battery N Total Capacity"
 
 ### Fixed
 - **False alarm reports at 100% SOC** - The alarm decoder was incorrectly reporting

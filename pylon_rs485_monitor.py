@@ -494,6 +494,8 @@ def publish_discovery(client, num_batteries: int = NUM_BATTERIES, cells_per_batt
             (f"{prefix}_voltage", f"Battery {batt} Voltage", f"{state_prefix}/voltage", "V", "voltage", "measurement", None, 2),
             (f"{prefix}_current", f"Battery {batt} Current", f"{state_prefix}/current", "A", "current", "measurement", None, 2),
             (f"{prefix}_soc", f"Battery {batt} SOC", f"{state_prefix}/soc", "%", None, "measurement", "mdi:battery", 0),
+            (f"{prefix}_remain_ah", f"Battery {batt} Remaining Capacity", f"{state_prefix}/remain_ah", "Ah", None, "measurement", "mdi:battery-50", 1),
+            (f"{prefix}_total_ah", f"Battery {batt} Total Capacity", f"{state_prefix}/total_ah", "Ah", None, "measurement", "mdi:battery-100", 1),
             (f"{prefix}_cycles", f"Battery {batt} Cycles", f"{state_prefix}/cycles", None, None, "total_increasing", "mdi:counter", 0),
             (f"{prefix}_balancing_count", f"Battery {batt} Balancing Cells", f"{state_prefix}/balancing_count", None, None, "measurement", "mdi:scale-balance", 0),
             (f"{prefix}_state", f"Battery {batt} State", f"{state_prefix}/state", None, None, None, "mdi:battery-charging", None),
@@ -803,6 +805,8 @@ def publish_mqtt_data(pub: Publisher, data: dict):
         pub.publish(f"{prefix}/voltage", round(batt.get('voltage', 0), 2))
         pub.publish(f"{prefix}/current", round(batt.get('current', 0), 2))
         pub.publish(f"{prefix}/soc", round(batt['soc'], 0))
+        pub.publish(f"{prefix}/remain_ah", round(batt.get('remain_ah', 0), 1))
+        pub.publish(f"{prefix}/total_ah", round(batt.get('total_ah', 0), 1))
         pub.publish(f"{prefix}/cycles", batt['cycles'])
         pub.publish(f"{prefix}/balancing_count", batt.get('balancing_count', 0))
         pub.publish(f"{prefix}/balancing_active", 1 if batt.get('balancing_count') else 0)
