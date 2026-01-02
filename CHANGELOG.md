@@ -14,6 +14,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2026-01-02] - Deye Inverter Modbus Support
+
+### Added
+- **Deye Inverter Modbus-TCP bridge** (`deye_modbus2mqtt.py`)
+  - Polls Deye SG04LP3 (and compatible) inverters via Modbus-TCP gateway
+  - 60+ sensors: PV, battery, grid, load, temperatures, energy totals
+  - Three scan groups (fast/normal/slow) for efficient polling
+  - Can preserve existing HA entity history by using same unique_ids
+  - New systemd service: `deye-modbus2mqtt.service`
+- Added `pymodbus` to requirements.txt
+
+### Technical Details
+- Tested with Deye SUN-12K-SG04LP3-EU via Waveshare Modbus-TCP gateway
+- Uses pymodbus 3.x API with keyword arguments
+- Temperature registers use offset -100 for Celsius conversion
+- 32-bit registers use little-endian word order
+
+---
+
 ## [2026-01-01] - RS485 Alarm Decoder Fix & Capacity Monitoring
 
 ### Added

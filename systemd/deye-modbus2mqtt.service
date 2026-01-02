@@ -1,0 +1,26 @@
+[Unit]
+Description=Deye Inverter Modbus-TCP to MQTT Bridge
+Documentation=https://github.com/mikaabra/pylontech-bms-mqtt
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pylon
+Group=pylon
+WorkingDirectory=/opt/pylontech-bms-mqtt
+EnvironmentFile=-/etc/default/pylon-mqtt
+ExecStart=/usr/bin/python3 /opt/pylontech-bms-mqtt/deye_modbus2mqtt.py --mqtt --loop --quiet --interval 10
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Security hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

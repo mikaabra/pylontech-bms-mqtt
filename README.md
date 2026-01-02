@@ -1,13 +1,14 @@
-# Pylontech BMS to MQTT Bridge
+# Pylontech BMS & Deye Inverter MQTT Bridge
 
-A Python-based bridge that reads battery data from Deye/Shoto BMS systems using the Pylontech protocol and publishes to MQTT with Home Assistant auto-discovery.
+A Python-based bridge that reads battery and inverter data and publishes to MQTT with Home Assistant auto-discovery.
 
-Supports both **CAN bus** and **RS485** interfaces for comprehensive battery monitoring.
+Supports **CAN bus**, **RS485**, and **Modbus-TCP** interfaces for comprehensive system monitoring.
 
 ## Features
 
-- **CAN Bus Monitoring**: Real-time SOC, SOH, voltage/current limits, cell min/max, temperatures
+- **CAN Bus Monitoring**: Real-time SOC, SOH, voltage/current limits, cell min/max, temperatures (Pylontech protocol)
 - **RS485 Monitoring**: Individual cell voltages (48 cells), temperatures, balancing status, alarms, cycle counts
+- **Modbus-TCP Monitoring**: Deye inverter data - PV power, grid/load power, temperatures, energy totals
 - **Home Assistant Integration**: Auto-discovery for all sensors - entities appear automatically
 - **Robust Operation**: Auto-reconnect, Last Will Testament for availability tracking, rate limiting with hysteresis
 - **Parallel Battery Support**: Tested with 3× 16S LFP batteries in parallel configuration
@@ -27,8 +28,9 @@ sudo ip link set can0 up type can bitrate 500000
 export MQTT_HOST=192.168.1.100  # Your MQTT broker
 
 # 4. Run the bridges
-./pylon_can2mqtt.py              # CAN bus bridge
-./pylon_rs485_monitor.py --mqtt --loop  # RS485 monitor
+./pylon_can2mqtt.py              # CAN bus bridge (BMS)
+./pylon_rs485_monitor.py --mqtt --loop  # RS485 monitor (BMS cells)
+./deye_modbus2mqtt.py --mqtt --loop     # Modbus-TCP bridge (Inverter)
 
 # 5. Check Home Assistant - entities appear automatically!
 ```
@@ -154,6 +156,35 @@ Options:
 - `--quiet` - Suppress console output
 - `--port /dev/ttyUSB0` - RS485 serial port
 
+### Modbus-TCP Bridge (Inverter)
+
+Reads Deye inverter data via Modbus-TCP gateway:
+
+```bash
+# Single read with console output
+./deye_modbus2mqtt.py --host 192.168.200.111
+
+# Continuous monitoring with MQTT publishing
+./deye_modbus2mqtt.py --mqtt --loop
+
+# Daemon mode with 10-second polling
+./deye_modbus2mqtt.py --mqtt --loop --quiet --interval 10
+```
+
+Options:
+- `--host` - Modbus-TCP gateway address (default: from MODBUS_HOST env)
+- `--port` - Modbus-TCP port (default: 502)
+- `--slave` - Modbus device ID (default: 1)
+- `--mqtt` - Enable MQTT publishing with Home Assistant discovery
+- `--loop` - Continuous monitoring mode
+- `--interval N` - Fast poll interval in seconds (default: 10)
+- `--quiet` - Suppress console output
+
+Environment variables:
+- `MODBUS_HOST` - Modbus gateway address
+- `MODBUS_PORT` - Modbus port (default: 502)
+- `MODBUS_SLAVE` - Device ID (default: 1)
+
 ### Debug Tool
 
 Decode raw CAN frames for protocol analysis:
@@ -164,12 +195,13 @@ Decode raw CAN frames for protocol analysis:
 
 ## Home Assistant
 
-Entities appear automatically under two devices:
+Entities appear automatically under three devices:
 
 | Device | Sensors |
 |--------|---------|
 | **Deye BMS (CAN)** | SOC, SOH, charge/discharge limits, cell min/max, temperatures, flags |
 | **Deye BMS (RS485)** | Per-battery: 16 cell voltages, 6 temps, SOC, cycles, balancing status. Stack: totals and alarms |
+| **Deye Inverter** | PV power/voltage/current, battery power/SOC/temp, grid power/voltage, load power, temperatures, energy totals |
 
 ### Example Entities
 
