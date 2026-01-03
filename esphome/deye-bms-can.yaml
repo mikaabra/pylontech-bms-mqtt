@@ -22,6 +22,8 @@ substitutions:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
+  includes:
+    - includes/set_include.h
   on_boot:
     priority: -100
     then:
@@ -37,6 +39,7 @@ esphome:
           id(batt_total_ah).resize(3, 0.0f);
           id(batt_cycles).resize(3, 0);
           id(batt_balancing_count).resize(3, 0);
+          id(batt_balancing_cells).resize(3, std::string(""));
           id(batt_alarms).resize(3, std::string(""));
           id(batt_warnings).resize(3, std::string(""));
           id(batt_state).resize(3, std::string(""));
@@ -87,7 +90,7 @@ mqtt:
   on_connect:
     - lambda: |-
         // Publish RS485 availability
-        id(mqtt_client).publish("${rs485_prefix}/status", "online", 0, true);
+        id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
         ESP_LOGI("mqtt", "Connected, published availability");
 
 ota:
@@ -266,6 +269,9 @@ globals:
   - id: batt_balancing_count
     type: std::vector<int>
     restore_value: no
+  - id: batt_balancing_cells
+    type: std::vector<std::string>
+    restore_value: no
   - id: batt_alarms
     type: std::vector<std::string>
     restore_value: no
@@ -297,6 +303,9 @@ globals:
   - id: stack_balancing_count
     type: int
     initial_value: '0'
+  - id: stack_balancing_cells
+    type: std::string
+    restore_value: no
   - id: stack_alarms
     type: std::string
     restore_value: no
@@ -312,7 +321,7 @@ interval:
           if (elapsed > 30000 && !id(can_stale) && id(last_can_rx) > 0) {
             id(can_stale) = true;
             ESP_LOGW("can", "No CAN data for 30s, marking stale");
-            id(mqtt_client).publish("${can_prefix}/status", "offline", 0, true);
+            id(mqtt_client).publish(std::string("${can_prefix}/status"), std::string("offline"), (uint8_t)0, true);
           }
 
   # RS485 analog data polling - cycle through batteries
@@ -600,15 +609,25 @@ interval:
               // ByteIndex 10: Balance9-16 (bit0=cell9...bit7=cell16)
               // Only count balancing cells if Balance On flag is set
               int balancing = 0;
+              std::string bal_cells_str;
               if (balance_on && ext_bit_start + 22 <= (int)data.length()) {
                 int balance1_8 = strtol(data.substr(ext_bit_start + 18, 2).c_str(), nullptr, 16);
                 int balance9_16 = strtol(data.substr(ext_bit_start + 20, 2).c_str(), nullptr, 16);
                 for (int bit = 0; bit < 8; bit++) {
-                  if (balance1_8 & (1 << bit)) balancing++;
-                  if (balance9_16 & (1 << bit)) balancing++;
+                  if (balance1_8 & (1 << bit)) {
+                    balancing++;
+                    if (!bal_cells_str.empty()) bal_cells_str += ",";
+                    bal_cells_str += std::to_string(bit + 1);
+                  }
+                  if (balance9_16 & (1 << bit)) {
+                    balancing++;
+                    if (!bal_cells_str.empty()) bal_cells_str += ",";
+                    bal_cells_str += std::to_string(bit + 9);
+                  }
                 }
               }
               id(batt_balancing_count)[batt] = balancing;
+              id(batt_balancing_cells)[batt] = bal_cells_str;
               total_balancing += balancing;
 
               // ByteIndex 8 (ext_bit_start+16): MOSFET status
@@ -671,6 +690,31 @@ interval:
           }
 
           id(stack_balancing_count) = total_balancing;
+
+          // Build stack balancing cells string (e.g., "B0C3,B1C7")
+          std::string stack_bal_str;
+          for (int b = 0; b < ${num_batteries}; b++) {
+            const std::string& cells = id(batt_balancing_cells)[b];
+            if (!cells.empty()) {
+              // Split cells and add battery prefix
+              size_t pos = 0;
+              size_t comma_pos;
+              std::string cell_list = cells;
+              while ((comma_pos = cell_list.find(',', pos)) != std::string::npos) {
+                std::string cell = cell_list.substr(pos, comma_pos - pos);
+                if (!stack_bal_str.empty()) stack_bal_str += ",";
+                stack_bal_str += "B" + std::to_string(b) + "C" + cell;
+                pos = comma_pos + 1;
+              }
+              // Last cell (or only cell if no commas)
+              std::string cell = cell_list.substr(pos);
+              if (!cell.empty()) {
+                if (!stack_bal_str.empty()) stack_bal_str += ",";
+                stack_bal_str += "B" + std::to_string(b) + "C" + cell;
+              }
+            }
+          }
+          id(stack_balancing_cells) = stack_bal_str;
 
           // Build alarm string
           std::string alarm_str;
@@ -779,6 +823,9 @@ interval:
               snprintf(payload, sizeof(payload), "%d", id(batt_balancing_count)[batt] > 0 ? 1 : 0);
               id(mqtt_client).publish(topic, payload);
 
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/balancing_cells", batt);
+              id(mqtt_client).publish(topic, id(batt_balancing_cells)[batt].c_str());
+
               // State, warnings, alarms
               snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/state", batt);
               id(mqtt_client).publish(topic, id(batt_state)[batt].c_str());
@@ -832,22 +879,22 @@ interval:
           if (stack_cell_min < 99.0f && valid_batts > 0) {
             stack_voltage /= valid_batts;  // Average for parallel config
 
-            id(mqtt_client).publish("${rs485_prefix}/stack/cell_min",
-                String(stack_cell_min, 3).c_str());
-            id(mqtt_client).publish("${rs485_prefix}/stack/cell_max",
-                String(stack_cell_max, 3).c_str());
-            id(mqtt_client).publish("${rs485_prefix}/stack/cell_delta_mv",
-                String((stack_cell_max - stack_cell_min) * 1000.0f, 1).c_str());
-            id(mqtt_client).publish("${rs485_prefix}/stack/voltage",
-                String(stack_voltage, 2).c_str());
-            id(mqtt_client).publish("${rs485_prefix}/stack/current",
-                String(stack_current, 2).c_str());
+            snprintf(payload, sizeof(payload), "%.3f", stack_cell_min);
+            id(mqtt_client).publish("${rs485_prefix}/stack/cell_min", payload);
+            snprintf(payload, sizeof(payload), "%.3f", stack_cell_max);
+            id(mqtt_client).publish("${rs485_prefix}/stack/cell_max", payload);
+            snprintf(payload, sizeof(payload), "%.1f", (stack_cell_max - stack_cell_min) * 1000.0f);
+            id(mqtt_client).publish("${rs485_prefix}/stack/cell_delta_mv", payload);
+            snprintf(payload, sizeof(payload), "%.2f", stack_voltage);
+            id(mqtt_client).publish("${rs485_prefix}/stack/voltage", payload);
+            snprintf(payload, sizeof(payload), "%.2f", stack_current);
+            id(mqtt_client).publish("${rs485_prefix}/stack/current", payload);
 
             if (stack_temp_min < 99.0f) {
-              id(mqtt_client).publish("${rs485_prefix}/stack/temp_min",
-                  String(stack_temp_min, 1).c_str());
-              id(mqtt_client).publish("${rs485_prefix}/stack/temp_max",
-                  String(stack_temp_max, 1).c_str());
+              snprintf(payload, sizeof(payload), "%.1f", stack_temp_min);
+              id(mqtt_client).publish("${rs485_prefix}/stack/temp_min", payload);
+              snprintf(payload, sizeof(payload), "%.1f", stack_temp_max);
+              id(mqtt_client).publish("${rs485_prefix}/stack/temp_max", payload);
             }
 
             // Balancing
@@ -855,6 +902,8 @@ interval:
             id(mqtt_client).publish("${rs485_prefix}/stack/balancing_count", payload);
             id(mqtt_client).publish("${rs485_prefix}/stack/balancing_active",
                 id(stack_balancing_count) > 0 ? "1" : "0");
+            id(mqtt_client).publish("${rs485_prefix}/stack/balancing_cells",
+                id(stack_balancing_cells).c_str());
 
             // Alarms
             id(mqtt_client).publish("${rs485_prefix}/stack/alarms",

@@ -934,6 +934,9 @@ def publish_mqtt_data(pub: Publisher, data: dict):
             pub.publish("stack/temp_max", round(s['temp_max'], 1))
         pub.publish("stack/balancing_count", s.get('balancing_count', 0))
         pub.publish("stack/balancing_active", 1 if s.get('balancing_count') else 0)
+        # Publish which cells are balancing across stack (e.g., "B0C3,B1C7")
+        bal_cells = s.get('balancing_cells', [])
+        pub.publish("stack/balancing_cells", ','.join(bal_cells) if bal_cells else '')
         pub.publish("stack/alarms", ','.join(s.get('alarms', [])) if s.get('alarms') else '')
 
     # Publish per-battery data
@@ -950,6 +953,9 @@ def publish_mqtt_data(pub: Publisher, data: dict):
         pub.publish(f"{prefix}/cycles", batt['cycles'])
         pub.publish(f"{prefix}/balancing_count", batt.get('balancing_count', 0))
         pub.publish(f"{prefix}/balancing_active", 1 if batt.get('balancing_count') else 0)
+        # Publish which cells are balancing (e.g., "3,7,12")
+        bal_cells = batt.get('balancing_cells', [])
+        pub.publish(f"{prefix}/balancing_cells", ','.join(str(c) for c in bal_cells) if bal_cells else '')
 
         # Warnings (OV/OVP flags) and alarms
         pub.publish(f"{prefix}/warnings", ','.join(batt.get('warnings', [])) if batt.get('warnings') else '')
@@ -961,6 +967,11 @@ def publish_mqtt_data(pub: Publisher, data: dict):
         pub.publish(f"{prefix}/charge_mosfet", 1 if status.get('charge_mosfet_on') else 0)
         pub.publish(f"{prefix}/discharge_mosfet", 1 if status.get('discharge_mosfet_on') else 0)
         pub.publish(f"{prefix}/lmcharge_mosfet", 1 if status.get('lmcharge_mosfet_on') else 0)
+
+        # CW (Cell Warning) flag
+        pub.publish(f"{prefix}/cw_active", 1 if status.get('cw_active') else 0)
+        cw_cells = status.get('cw_cells', [])
+        pub.publish(f"{prefix}/cw_cells", ','.join(str(c) for c in cw_cells) if cw_cells else '')
 
         # Individual cell voltages
         for i, v in enumerate(batt['cells'], 1):

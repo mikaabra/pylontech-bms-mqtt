@@ -41,6 +41,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **CW flag detection** - Added detection for "Cell Warning" flag (correlates with CW=Y on BMS display)
   - Shows in terminal output: `CW=Y: cells [3, 7]` or `CW=N`
   - Raw bytes displayed for protocol analysis
+- **MQTT display script** (`mqtt_display.py`) - Console monitor that subscribes to MQTT
+  - Provides same console output view as Python scripts after ESP32 migration
+  - Shows CAN data, per-battery details, cell voltages, balancing cells, CW flags
+  - Usage: `./mqtt_display.py` or `./mqtt_display.py --host 192.168.200.217`
+- **Balancing cells list** - MQTT now publishes which specific cells are balancing
+  - New topics: `battery{N}/balancing_cells`, `stack/balancing_cells`
+  - Format: comma-separated cell numbers (e.g., "3,7,12") or stack format ("B0C3,B1C7")
+- **CW flag MQTT publishing** - Added `cw_active` and `cw_cells` topics
+  - New topics: `battery{N}/cw_active`, `battery{N}/cw_cells`
 - **Modbus-TCP configurability** - Made `deye_modbus2mqtt.py` fully configurable
   - Environment variables: `MQTT_PREFIX`, `DEVICE_ID`, `DEVICE_NAME`, `DEVICE_MODEL`, `DEVICE_MANUFACTURER`
   - CLI arguments: `--mqtt-prefix`, `--device-id`, `--device-name`, etc.
@@ -50,6 +59,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 ### Changed
 - RS485 terminal output now shows raw status bytes with position labels for protocol debugging
 - Balancing cells only reported when "Balance On" flag is set (prevents false positives)
+
+### ESPHome
+- Added `balancing_cells` and `stack/balancing_cells` MQTT topics (matching Python)
+- Fixed ESP-IDF compilation issues (replaced Arduino String with snprintf)
+- Added std::set include for alarm/warning handling
 
 ---
 
