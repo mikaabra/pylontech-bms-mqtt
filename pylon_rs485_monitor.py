@@ -515,6 +515,7 @@ def publish_discovery(client, num_batteries: int = NUM_BATTERIES, cells_per_batt
         ("stack_temp_min", "Stack Temp Min", f"{MQTT_PREFIX}/stack/temp_min", "°C", "temperature", "measurement", None, 1),
         ("stack_temp_max", "Stack Temp Max", f"{MQTT_PREFIX}/stack/temp_max", "°C", "temperature", "measurement", None, 1),
         ("stack_balancing_count", "Stack Balancing Cells", f"{MQTT_PREFIX}/stack/balancing_count", None, None, "measurement", "mdi:scale-balance", 0),
+        ("stack_overvolt_count", "Stack Overvolt Cells", f"{MQTT_PREFIX}/stack/overvolt_count", None, None, "measurement", "mdi:flash-alert", 0),
         ("stack_alarms", "Stack Alarms", f"{MQTT_PREFIX}/stack/alarms", None, None, None, "mdi:alert", None),
     ]
 
@@ -535,6 +536,18 @@ def publish_discovery(client, num_batteries: int = NUM_BATTERIES, cells_per_batt
                            f"{MQTT_PREFIX}/stack/balancing_cells", None, None, None, "mdi:scale-balance", None, None)
     client.publish(cfg_topic, json.dumps(cfg), retain=True)
 
+    # Stack overvolt active binary sensor
+    cfg_topic = f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/stack_overvolt_active/config"
+    cfg = ha_binary_sensor_config("stack_overvolt_active", "Stack Overvolt Active",
+                                   f"{MQTT_PREFIX}/stack/overvolt_active", None, "mdi:flash-alert")
+    client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+    # Stack overvolt cells list (text sensor)
+    cfg_topic = f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/stack_overvolt_cells/config"
+    cfg = ha_sensor_config("stack_overvolt_cells", "Stack Overvolt Cells List",
+                           f"{MQTT_PREFIX}/stack/overvolt_cells", None, None, None, "mdi:flash-alert", None, None)
+    client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
     # Per-battery sensors
     for batt in range(num_batteries):
         prefix = f"batt{batt}"
@@ -551,6 +564,7 @@ def publish_discovery(client, num_batteries: int = NUM_BATTERIES, cells_per_batt
             (f"{prefix}_total_ah", f"Battery {batt} Total Capacity", f"{state_prefix}/total_ah", "Ah", None, "measurement", "mdi:battery-100", 1),
             (f"{prefix}_cycles", f"Battery {batt} Cycles", f"{state_prefix}/cycles", None, None, "total_increasing", "mdi:counter", 0),
             (f"{prefix}_balancing_count", f"Battery {batt} Balancing Cells", f"{state_prefix}/balancing_count", None, None, "measurement", "mdi:scale-balance", 0),
+            (f"{prefix}_overvolt_count", f"Battery {batt} Overvolt Cells", f"{state_prefix}/overvolt_count", None, None, "measurement", "mdi:flash-alert", 0),
             (f"{prefix}_state", f"Battery {batt} State", f"{state_prefix}/state", None, None, None, "mdi:battery-charging", None),
             (f"{prefix}_warnings", f"Battery {batt} Warnings", f"{state_prefix}/warnings", None, None, None, "mdi:alert-circle-outline", None),
             (f"{prefix}_alarms", f"Battery {batt} Alarms", f"{state_prefix}/alarms", None, None, None, "mdi:alert", None),
@@ -593,6 +607,18 @@ def publish_discovery(client, num_batteries: int = NUM_BATTERIES, cells_per_batt
         cfg_topic = f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{prefix}_balancing_cells/config"
         cfg = ha_sensor_config(f"{prefix}_balancing_cells", f"Battery {batt} Balancing Cells List",
                                f"{state_prefix}/balancing_cells", None, None, None, "mdi:scale-balance", None, None)
+        client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+        # Overvolt active binary sensor
+        cfg_topic = f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/{prefix}_overvolt_active/config"
+        cfg = ha_binary_sensor_config(f"{prefix}_overvolt_active", f"Battery {batt} Overvolt Active",
+                                       f"{state_prefix}/overvolt_active", None, "mdi:flash-alert")
+        client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+        # Overvolt cells list (text sensor)
+        cfg_topic = f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{prefix}_overvolt_cells/config"
+        cfg = ha_sensor_config(f"{prefix}_overvolt_cells", f"Battery {batt} Overvolt Cells List",
+                               f"{state_prefix}/overvolt_cells", None, None, None, "mdi:flash-alert", None, None)
         client.publish(cfg_topic, json.dumps(cfg), retain=True)
 
         # CW cells list (text sensor)
@@ -695,6 +721,7 @@ def read_all_batteries(port: str = RS485_PORT, baud: int = RS485_BAUD,
     all_temps = []
     total_current = 0
     all_balancing = []
+    all_overvolt = []
     all_alarms = []
 
     for batt_num in range(num_batteries):
@@ -728,6 +755,7 @@ def read_all_batteries(port: str = RS485_PORT, baud: int = RS485_BAUD,
                 batt_data['balancing_cells'] = alarm_data.get('balancing_cells', [])
                 batt_data['balancing_count'] = len(batt_data['balancing_cells'])
                 batt_data['overvolt_cells'] = alarm_data.get('overvolt_cells', [])
+                batt_data['overvolt_count'] = len(batt_data['overvolt_cells'])
                 batt_data['undervolt_cells'] = alarm_data.get('undervolt_cells', [])
                 batt_data['warnings'] = alarm_data.get('warnings', [])
                 batt_data['alarms'] = alarm_data.get('alarms', [])
@@ -737,6 +765,8 @@ def read_all_batteries(port: str = RS485_PORT, baud: int = RS485_BAUD,
                 # Collect for stack summary
                 for cell in batt_data['balancing_cells']:
                     all_balancing.append(f"B{batt_num}C{cell}")
+                for cell in batt_data['overvolt_cells']:
+                    all_overvolt.append(f"B{batt_num}C{cell}")
                 all_alarms.extend(alarm_data.get('alarms', []))
 
             result['batteries'].append(batt_data)
@@ -761,6 +791,8 @@ def read_all_batteries(port: str = RS485_PORT, baud: int = RS485_BAUD,
             'temp_max': round(max(all_temps), 1) if all_temps else None,
             'balancing_count': len(all_balancing),
             'balancing_cells': all_balancing,
+            'overvolt_count': len(all_overvolt),
+            'overvolt_cells': all_overvolt,
             'alarms': list(set(all_alarms)),
         }
 
@@ -961,6 +993,11 @@ def publish_mqtt_data(pub: Publisher, data: dict):
         # Publish which cells are balancing across stack (e.g., "B0C3,B1C7")
         bal_cells = s.get('balancing_cells', [])
         pub.publish("stack/balancing_cells", ','.join(bal_cells) if bal_cells else '')
+        # Publish overvolt status
+        pub.publish("stack/overvolt_count", s.get('overvolt_count', 0))
+        pub.publish("stack/overvolt_active", 1 if s.get('overvolt_count') else 0)
+        ov_cells = s.get('overvolt_cells', [])
+        pub.publish("stack/overvolt_cells", ','.join(ov_cells) if ov_cells else '')
         pub.publish("stack/alarms", ','.join(s.get('alarms', [])) if s.get('alarms') else '')
 
     # Publish per-battery data
@@ -980,6 +1017,11 @@ def publish_mqtt_data(pub: Publisher, data: dict):
         # Publish which cells are balancing (e.g., "3,7,12")
         bal_cells = batt.get('balancing_cells', [])
         pub.publish(f"{prefix}/balancing_cells", ','.join(str(c) for c in bal_cells) if bal_cells else '')
+        # Publish overvolt status
+        pub.publish(f"{prefix}/overvolt_count", batt.get('overvolt_count', 0))
+        pub.publish(f"{prefix}/overvolt_active", 1 if batt.get('overvolt_count') else 0)
+        ov_cells = batt.get('overvolt_cells', [])
+        pub.publish(f"{prefix}/overvolt_cells", ','.join(str(c) for c in ov_cells) if ov_cells else '')
 
         # Warnings (OV/OVP flags) and alarms
         pub.publish(f"{prefix}/warnings", ','.join(batt.get('warnings', [])) if batt.get('warnings') else '')
