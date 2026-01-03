@@ -6,7 +6,7 @@ For comprehensive protocol documentation, see [PROTOCOL_REFERENCE.md](PROTOCOL_R
 
 Key points:
 - **CAN Bus**: 500 kbps, passive listener, Pylontech protocol (0x351, 0x355, 0x359, 0x370)
-- **RS485**: 115200 baud 8N1, request/response with ASCII hex encoding
+- **RS485**: 9600 baud 8N1, request/response with ASCII hex encoding
 - **Modbus-TCP**: Standard Modbus for Deye inverter polling
 
 ## Class Designs
@@ -156,6 +156,6 @@ def ha_sensor_config(object_id, name, state_topic,
 | `MIN_INTERVAL_S_CELLS` | 5.0 | Minimum for cell voltages |
 | `VOLT_HYST_V` | 0.002 | 2mV hysteresis for voltages |
 | `TEMP_HYST_C` | 0.2 | 0.2°C hysteresis for temps |
-| `RS485_BAUD` | 115200 | RS485 baud rate |
+| `RS485_BAUD` | 9600 | RS485 baud rate |
 | `PYLONTECH_ADDR` | 2 | Default battery address |
 | `NUM_BATTERIES` | 3 | Number of batteries (configurable via `--batteries` or env var) |

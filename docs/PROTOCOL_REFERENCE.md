@@ -118,10 +118,10 @@ Contains manufacturer name string, typically "PYLON   " (padded with spaces).
 
 ## Pylontech RS485 Protocol
 
-**Tested with:** Shoto SDA10-48200 via FTDI USB-RS485 adapter
+**Tested with:** Shoto SDA10-48200 via Waveshare Industrial USB-RS485 adapter
 
 ### Physical Layer
-- **Baud Rate:** 115200 (default, configurable via DIP switch on some models)
+- **Baud Rate:** 9600 (some models support 115200 via DIP switch)
 - **Format:** 8N1 (8 data bits, no parity, 1 stop bit)
 - **Connector:** RJ45 (RS485-A on pin 7, RS485-B on pin 8)
 
