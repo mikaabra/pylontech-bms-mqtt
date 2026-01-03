@@ -29,25 +29,26 @@ esphome:
     then:
       - logger.log: "BMS bridge starting..."
       - lambda: |-
-          // Initialize cell voltage array
-          id(cell_voltages).resize(48, 0.0f);
-          id(cell_temps).resize(18, 0.0f);  // 6 temps per battery
-          id(batt_current).resize(3, 0.0f);
-          id(batt_voltage).resize(3, 0.0f);
-          id(batt_soc).resize(3, 0.0f);
-          id(batt_remain_ah).resize(3, 0.0f);
-          id(batt_total_ah).resize(3, 0.0f);
-          id(batt_cycles).resize(3, 0);
-          id(batt_balancing_count).resize(3, 0);
-          id(batt_balancing_cells).resize(3, std::string(""));
-          id(batt_alarms).resize(3, std::string(""));
-          id(batt_warnings).resize(3, std::string(""));
-          id(batt_state).resize(3, std::string(""));
-          id(batt_charge_mosfet).resize(3, false);
-          id(batt_discharge_mosfet).resize(3, false);
-          id(batt_lmcharge_mosfet).resize(3, false);
-          id(batt_cw_active).resize(3, false);
-          id(batt_cw_cells).resize(3, std::string(""));
+          // Initialize arrays based on num_batteries
+          const int num_batt = ${num_batteries};
+          id(cell_voltages).resize(16 * num_batt, 0.0f);  // 16 cells per battery
+          id(cell_temps).resize(6 * num_batt, 0.0f);      // 6 temps per battery
+          id(batt_current).resize(num_batt, 0.0f);
+          id(batt_voltage).resize(num_batt, 0.0f);
+          id(batt_soc).resize(num_batt, 0.0f);
+          id(batt_remain_ah).resize(num_batt, 0.0f);
+          id(batt_total_ah).resize(num_batt, 0.0f);
+          id(batt_cycles).resize(num_batt, 0);
+          id(batt_balancing_count).resize(num_batt, 0);
+          id(batt_balancing_cells).resize(num_batt, std::string(""));
+          id(batt_alarms).resize(num_batt, std::string(""));
+          id(batt_warnings).resize(num_batt, std::string(""));
+          id(batt_state).resize(num_batt, std::string(""));
+          id(batt_charge_mosfet).resize(num_batt, false);
+          id(batt_discharge_mosfet).resize(num_batt, false);
+          id(batt_lmcharge_mosfet).resize(num_batt, false);
+          id(batt_cw_active).resize(num_batt, false);
+          id(batt_cw_cells).resize(num_batt, std::string(""));
 
 esp32:
   board: esp32-s3-devkitc-1
