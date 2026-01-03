@@ -6,7 +6,7 @@ This document contains all information needed to transition from the Raspberry P
 
 ### Hardware
 - Raspberry Pi 4
-- Waveshare RS485 CAN HAT (CAN bus)
+- MCP2515 SPI CAN module (CAN bus)
 - FTDI USB-RS485 adapter (RS485)
 
 ### Services Running
@@ -189,7 +189,7 @@ Both Python and ESPHome implementations have been verified to include:
 If ESP32 doesn't work, reconnect Pi:
 
 1. Power off ESP32
-2. Reconnect CAN HAT and USB-RS485 to Pi
+2. Reconnect MCP2515 CAN module and USB-RS485 to Pi
 3. Start services:
 ```bash
 ./pylon_can2mqtt.py &
