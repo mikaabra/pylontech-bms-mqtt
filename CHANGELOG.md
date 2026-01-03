@@ -22,6 +22,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - Balance flags at ByteIndex 9-10 are now correctly read from `ext_bit_start + 18`
   - Previously was reading wrong bytes, causing incorrect cell balancing reports
 - **ESPHome balancing detection** - Same fix applied to ESPHome config
+- **ESPHome CW flag detection** - Added Cell Warning flag detection matching Python script
 
 ### Added
 - **Debug logging** (`--debug-log FILE`) for RS485 monitor

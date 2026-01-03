@@ -43,6 +43,8 @@ esphome:
           id(batt_charge_mosfet).resize(3, false);
           id(batt_discharge_mosfet).resize(3, false);
           id(batt_lmcharge_mosfet).resize(3, false);
+          id(batt_cw_active).resize(3, false);
+          id(batt_cw_cells).resize(3, std::string(""));
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -281,6 +283,14 @@ globals:
     restore_value: no
   - id: batt_lmcharge_mosfet
     type: std::vector<bool>
+    restore_value: no
+
+  # CW (Cell Warning) flag - correlates with CW=Y on BMS display
+  - id: batt_cw_active
+    type: std::vector<bool>
+    restore_value: no
+  - id: batt_cw_cells
+    type: std::vector<std::string>
     restore_value: no
 
   # Stack totals
@@ -610,6 +620,27 @@ interval:
                 id(batt_lmcharge_mosfet)[batt] = (mosfet_status & 0x04) != 0;
               }
 
+              // CW (Cell Warning) flag - read from OLD position (status_pos+18)
+              // This correlates with CW=Y on BMS display
+              if (status_pos + 22 <= (int)data.length()) {
+                int cw_byte1 = strtol(data.substr(status_pos + 18, 2).c_str(), nullptr, 16);
+                int cw_byte2 = strtol(data.substr(status_pos + 20, 2).c_str(), nullptr, 16);
+                id(batt_cw_active)[batt] = (cw_byte1 != 0) || (cw_byte2 != 0);
+                // Build CW cells string
+                std::string cw_str;
+                for (int bit = 0; bit < 8; bit++) {
+                  if (cw_byte1 & (1 << bit)) {
+                    if (!cw_str.empty()) cw_str += ",";
+                    cw_str += std::to_string(bit + 1);
+                  }
+                  if (cw_byte2 & (1 << bit)) {
+                    if (!cw_str.empty()) cw_str += ",";
+                    cw_str += std::to_string(bit + 9);
+                  }
+                }
+                id(batt_cw_cells)[batt] = cw_str;
+              }
+
               // Operating state from last byte
               // 0x01=Discharge, 0x02=Charge, 0x04=Float, 0x08=Full, 0x10=Standby, 0x20=Shutdown
               if (data.length() >= 2) {
@@ -767,6 +798,13 @@ interval:
 
               snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/lmcharge_mosfet", batt);
               id(mqtt_client).publish(topic, id(batt_lmcharge_mosfet)[batt] ? "1" : "0");
+
+              // CW (Cell Warning) flag
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cw_active", batt);
+              id(mqtt_client).publish(topic, id(batt_cw_active)[batt] ? "1" : "0");
+
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cw_cells", batt);
+              id(mqtt_client).publish(topic, id(batt_cw_cells)[batt].c_str());
 
               // Individual cell voltages
               for (int cell = 0; cell < 16; cell++) {
