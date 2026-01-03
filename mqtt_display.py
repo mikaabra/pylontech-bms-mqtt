@@ -29,13 +29,13 @@ MQTT_PASS = os.environ.get("MQTT_PASS")
 
 RS485_PREFIX = "deye_bms/rs485"
 CAN_PREFIX = "deye_bms"
-NUM_BATTERIES = 3
+NUM_BATTERIES = int(os.environ.get("NUM_BATTERIES", 3))
 
-# Data storage
+# Data storage - initialized in main() after parsing args
 data = {
     'can': {},
     'stack': {},
-    'batteries': [{} for _ in range(NUM_BATTERIES)]
+    'batteries': []
 }
 
 last_display = 0
@@ -207,10 +207,16 @@ def display_data():
 
 
 def main():
+    global NUM_BATTERIES
+
     parser = argparse.ArgumentParser(description='Display battery data from MQTT')
     parser.add_argument('--host', default=MQTT_HOST, help='MQTT broker host')
     parser.add_argument('--port', type=int, default=MQTT_PORT, help='MQTT broker port')
+    parser.add_argument('--batteries', type=int, default=NUM_BATTERIES, help='Number of batteries')
     args = parser.parse_args()
+
+    NUM_BATTERIES = args.batteries
+    data['batteries'] = [{} for _ in range(NUM_BATTERIES)]
 
     # Connect to MQTT
     try:

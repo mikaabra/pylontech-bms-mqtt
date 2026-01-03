@@ -36,7 +36,7 @@ logging.basicConfig(
 RS485_PORT = "/dev/ttyUSB0"
 RS485_BAUD = 9600
 PYLONTECH_ADDR = 2  # Battery stack address
-NUM_BATTERIES = 3   # Number of batteries in stack (0, 1, 2)
+NUM_BATTERIES = int(os.environ.get("NUM_BATTERIES", "3"))  # Number of batteries in stack
 
 # MQTT settings (from environment variables)
 MQTT_HOST = os.environ.get("MQTT_HOST", "localhost")
@@ -1012,6 +1012,7 @@ def main():
 
     parser = argparse.ArgumentParser(description='Pylontech RS485 Battery Monitor')
     parser.add_argument('--port', default=RS485_PORT, help='Serial port')
+    parser.add_argument('--batteries', type=int, default=NUM_BATTERIES, help='Number of batteries in stack')
     parser.add_argument('--loop', action='store_true', help='Continuous monitoring')
     parser.add_argument('--interval', type=int, default=30, help='Loop interval seconds')
     parser.add_argument('--json', action='store_true', help='JSON output')
@@ -1019,6 +1020,8 @@ def main():
     parser.add_argument('--quiet', action='store_true', help='Suppress console output (for daemon mode)')
     parser.add_argument('--debug-log', metavar='FILE', help='Log balancing/OV/state changes to file')
     args = parser.parse_args()
+
+    num_batteries = args.batteries
 
     # Set up debug logging
     global _debug_log_file
@@ -1046,7 +1049,7 @@ def main():
                 logging.info("Connected to MQTT broker %s:%d", MQTT_HOST, MQTT_PORT)
                 # Re-publish discovery after reconnect
                 try:
-                    publish_discovery(client)
+                    publish_discovery(client, num_batteries=num_batteries)
                 except Exception:
                     pass
             else:
@@ -1082,7 +1085,7 @@ def main():
 
     while _running:
         try:
-            data = read_all_batteries(port=args.port)
+            data = read_all_batteries(port=args.port, num_batteries=num_batteries)
 
             if args.json:
                 print(json.dumps(data, indent=2))
