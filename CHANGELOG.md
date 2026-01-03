@@ -215,7 +215,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### Technical Details
 - Tested with 3× Shoto SDA10-48200 (16S LFP) in parallel
-- Raspberry Pi 4 with MCP2515 SPI CAN module
+- Raspberry Pi 4 with Openmoko USB-CAN adapter (gs_usb compatible)
 - FTDI USB-RS485 adapter
 - paho-mqtt v2.x compatibility
 - Python 3.x required

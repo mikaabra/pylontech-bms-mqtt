@@ -48,12 +48,13 @@ For production use, see [Running as a Service](#running-as-a-service) below.
   - Other "Pylontech compatible" batteries
 
 ### Tested Interfaces
+- **CAN**: Openmoko USB-CAN adapter (gs_usb compatible) - [Amazon](https://www.amazon.se/dp/B0CRB8KXWL)
 - **CAN**: MCP2515-based SPI CAN modules
 - **RS485**: FTDI FT232-based USB-RS485 adapters
 - **RS485**: CH340-based USB-RS485 adapters
 
 ### Known Non-Working Hardware
-- **Waveshare USB-CAN adapters** - Cannot run in passive/listen-only mode, which is required for monitoring BMS-to-inverter CAN traffic without interfering with the bus. The adapter sends ACKs which disrupts the existing communication. Avoid for CAN bus monitoring applications.
+- **Waveshare USB to CAN Adapter (STM32-based, "4 Working Modes")** - Cannot run in passive/listen-only mode, which is required for monitoring BMS-to-inverter CAN traffic without interfering with the bus. The adapter sends ACKs which disrupts the existing communication. Avoid for CAN bus monitoring applications.
 
 ### Host Systems
 - Raspberry Pi 4 (recommended)
