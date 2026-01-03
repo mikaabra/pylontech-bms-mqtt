@@ -529,6 +529,12 @@ def publish_discovery(client, num_batteries: int = NUM_BATTERIES, cells_per_batt
                                    f"{MQTT_PREFIX}/stack/balancing_active", None, "mdi:scale-balance")
     client.publish(cfg_topic, json.dumps(cfg), retain=True)
 
+    # Stack balancing cells list (text sensor)
+    cfg_topic = f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/stack_balancing_cells/config"
+    cfg = ha_sensor_config("stack_balancing_cells", "Stack Balancing Cells List",
+                           f"{MQTT_PREFIX}/stack/balancing_cells", None, None, None, "mdi:scale-balance", None, None)
+    client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
     # Per-battery sensors
     for batt in range(num_batteries):
         prefix = f"batt{batt}"
@@ -575,6 +581,24 @@ def publish_discovery(client, num_batteries: int = NUM_BATTERIES, cells_per_batt
         cfg_topic = f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/{prefix}_lmcharge_mosfet/config"
         cfg = ha_binary_sensor_config(f"{prefix}_lmcharge_mosfet", f"Battery {batt} LM Charge MOSFET",
                                        f"{state_prefix}/lmcharge_mosfet", None, "mdi:electric-switch")
+        client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+        # CW (Cell Warning) binary sensor
+        cfg_topic = f"{DISCOVERY_PREFIX}/binary_sensor/{DEVICE_ID}/{prefix}_cw_active/config"
+        cfg = ha_binary_sensor_config(f"{prefix}_cw_active", f"Battery {batt} Cell Warning",
+                                       f"{state_prefix}/cw_active", None, "mdi:alert-circle")
+        client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+        # Balancing cells list (text sensor)
+        cfg_topic = f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{prefix}_balancing_cells/config"
+        cfg = ha_sensor_config(f"{prefix}_balancing_cells", f"Battery {batt} Balancing Cells List",
+                               f"{state_prefix}/balancing_cells", None, None, None, "mdi:scale-balance", None, None)
+        client.publish(cfg_topic, json.dumps(cfg), retain=True)
+
+        # CW cells list (text sensor)
+        cfg_topic = f"{DISCOVERY_PREFIX}/sensor/{DEVICE_ID}/{prefix}_cw_cells/config"
+        cfg = ha_sensor_config(f"{prefix}_cw_cells", f"Battery {batt} CW Cells List",
+                               f"{state_prefix}/cw_cells", None, None, None, "mdi:alert-circle-outline", None, None)
         client.publish(cfg_topic, json.dumps(cfg), retain=True)
 
         # Individual cell voltages
