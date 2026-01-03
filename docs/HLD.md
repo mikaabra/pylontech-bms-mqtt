@@ -91,22 +91,47 @@ This system provides a bridge between Pylontech-compatible BMS (Battery Manageme
 **Data Captured**:
 - Individual cell voltages (16 per battery, 48 total)
 - Per-battery temperatures (6 sensors each)
-- Per-battery SOC, current, cycles
-- Cell balancing status
-- Alarm and protection states
+- Per-battery SOC, current, cycles, capacity
+- Cell balancing status (which cells are balancing)
+- Cell overvolt status (which cells are in overvolt)
+- CW (Cell Warning) flags
+- MOSFET status (charge, discharge, LM charge)
+- Operating state (Charge, Discharge, Float, Full, Standby)
+- Alarm and protection states (separated warnings from alarms)
 
 **Characteristics**:
 - Active polling (request/response)
 - Configurable update interval (default 30s)
+- Configurable battery count (`--batteries` or `NUM_BATTERIES` env var)
 - Detailed cell-level granularity
 
-### 3. Home Assistant Integration
+### 3. Modbus-TCP Bridge (`deye_modbus2mqtt.py`)
+
+**Purpose**: Monitor Deye inverter via Modbus-TCP gateway
+
+**Data Captured**:
+- PV power, voltage, current (per string)
+- Battery charge/discharge power, voltage, current
+- Grid import/export power
+- Load power consumption
+- Temperatures (inverter, DC transformer)
+- Daily/total energy counters
+- Inverter operating mode
+
+**Characteristics**:
+- Three scan groups (fast 5s, normal 30s, slow 300s)
+- Connects via Modbus-TCP gateway (e.g., Waveshare)
+- Fully configurable device ID and topic prefix
+- Compatible with existing Solarman entity history
+
+### 4. Home Assistant Integration
 
 **Discovery Mechanism**: MQTT Discovery protocol
 
 **Device Grouping**:
 - `Deye BMS (CAN)` - Stack-level metrics from CAN
-- `Deye BMS (RS485)` - Cell-level metrics from RS485
+- `Pylontech RS485` - Cell-level metrics from RS485
+- `Deye Inverter` - Inverter metrics from Modbus-TCP
 
 **Availability Tracking**: Last Will Testament (LWT) for online/offline status
 
@@ -121,6 +146,12 @@ This system provides a bridge between Pylontech-compatible BMS (Battery Manageme
    ```
    pylon_rs485_monitor.py → Command → RS485 → BMS
    BMS → Response → RS485 → pylon_rs485_monitor.py → MQTT → Home Assistant
+   ```
+
+3. **Modbus-TCP Flow**:
+   ```
+   deye_modbus2mqtt.py → Modbus Request → TCP Gateway → Inverter
+   Inverter → Modbus Response → TCP Gateway → deye_modbus2mqtt.py → MQTT → Home Assistant
    ```
 
 ## Design Decisions

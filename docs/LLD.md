@@ -2,127 +2,12 @@
 
 ## Protocol Specifications
 
-### CAN Bus Protocol
+For comprehensive protocol documentation, see [PROTOCOL_REFERENCE.md](PROTOCOL_REFERENCE.md).
 
-**Physical Layer**:
-- Bit rate: 500 kbps
-- Interface: SocketCAN (`can0`)
-
-**Frame Format**:
-- Standard 11-bit arbitration IDs
-- 8-byte data payload
-- Little-endian byte order
-
-**Message Types**:
-
-#### 0x351 - Charge/Discharge Limits
-```
-Byte 0-1: V_charge_max (uint16, ÷10 = volts)
-Byte 2-3: I_charge_limit (uint16, ÷10 = amps)
-Byte 4-5: I_discharge_limit (uint16, ÷10 = amps)
-Byte 6-7: V_low_limit (uint16, ÷10 = volts)
-```
-
-#### 0x355 - State of Charge/Health
-```
-Byte 0-1: SOC (uint16, percentage)
-Byte 2-3: SOH (uint16, percentage)
-Byte 4-7: Reserved
-```
-
-#### 0x359 - Status Flags
-```
-Byte 0-7: Flags bitfield (uint64, little-endian)
-         Bit meanings vary by BMS firmware
-```
-
-#### 0x370 - Cell/Temperature Extremes
-```
-Byte 0-1: Temperature 1 (uint16, ÷10 = °C)
-Byte 2-3: Temperature 2 (uint16, ÷10 = °C)
-Byte 4-5: Cell voltage 1 (uint16, ÷1000 = volts)
-Byte 6-7: Cell voltage 2 (uint16, ÷1000 = volts)
-```
-
-### RS485 Protocol
-
-**Physical Layer**:
-- Baud rate: 9600
-- Data bits: 8
-- Parity: None
-- Stop bits: 1
-- Half-duplex
-
-**Frame Format**:
-```
-~{VER}{ADR}{CID1}{CID2}{LENGTH}{INFO}{CHKSUM}\r
-
-VER    = "20" (protocol version)
-ADR    = 2-digit hex address (default "02")
-CID1   = "46" (command identifier 1)
-CID2   = Command type (e.g., "42" for analog, "44" for alarm)
-LENGTH = 4-digit length with checksum nibble
-INFO   = Variable payload (hex encoded)
-CHKSUM = 4-digit checksum
-\r     = Carriage return terminator
-```
-
-**Checksum Calculation**:
-```python
-def calc_chksum(frame_content: str) -> str:
-    total = sum(ord(c) for c in frame_content)
-    return f"{(~total + 1) & 0xFFFF:04X}"
-```
-
-**Length Field**:
-```python
-len_hex = f"{len(info):03X}"
-lchksum = (~sum(int(c, 16) for c in len_hex) + 1) & 0xF
-lenid = f"{lchksum:X}{len_hex}"
-```
-
-#### Command 0x42 - Analog Data Request
-
-**Request**: `INFO = battery_number (2 hex digits)`
-
-**Response Structure**:
-```
-Offset  Size  Description
-0       4     Header (battery info)
-4       2     Number of cells (N)
-6       N×4   Cell voltages (uint16 mV each)
-6+N×4   2     Number of temps (M)
-8+N×4   M×4   Temperatures (uint16, Kelvin×10 - 2731 = °C×10)
-...     4     Current (int16, ÷100 = amps, signed)
-...     4     Voltage (uint16, ÷1000 = volts)
-...     4     Remaining capacity (uint16, ÷100 = Ah)
-...     2     Custom field (skip)
-...     4     Total capacity (uint16, ÷100 = Ah)
-...     4     Cycle count (uint16)
-```
-
-#### Command 0x44 - Alarm Info Request
-
-**Request**: `INFO = battery_number (2 hex digits)`
-
-**Response Structure**:
-```
-Offset  Size  Description
-0       2     Info flag
-2       2     Battery number
-4       2     Number of cells (N)
-6       N×2   Cell status bytes:
-              0x00 = Normal
-              0x01 = Under-voltage alarm
-              0x02 = Over-voltage alarm
-              0x80 = Balancing active
-6+N×2   2     Number of temps (M)
-8+N×2   M×2   Temp status bytes (same encoding)
-...     2     Charge current alarm
-...     2     Pack voltage alarm
-...     2     Discharge current alarm
-...     2     Status flags byte
-```
+Key points:
+- **CAN Bus**: 500 kbps, passive listener, Pylontech protocol (0x351, 0x355, 0x359, 0x370)
+- **RS485**: 115200 baud 8N1, request/response with ASCII hex encoding
+- **Modbus-TCP**: Standard Modbus for Deye inverter polling
 
 ## Class Designs
 
@@ -205,6 +90,10 @@ def ha_sensor_config(object_id, name, state_topic,
 │   ├── temp_max           # °C
 │   ├── balancing_count    # integer
 │   ├── balancing_active   # 0/1
+│   ├── balancing_cells    # "B0C3,B1C7" format
+│   ├── overvolt_count     # integer
+│   ├── overvolt_active    # 0/1
+│   ├── overvolt_cells     # "B0C3,B1C7" format
 │   └── alarms             # comma-separated list
 ├── battery0/
 │   ├── cell_min           # volts
@@ -213,9 +102,23 @@ def ha_sensor_config(object_id, name, state_topic,
 │   ├── voltage            # volts
 │   ├── current            # amps
 │   ├── soc                # percentage
+│   ├── remain_ah          # Ah
+│   ├── total_ah           # Ah
 │   ├── cycles             # integer
+│   ├── state              # "Charge", "Float", etc.
 │   ├── balancing_count    # integer
 │   ├── balancing_active   # 0/1
+│   ├── balancing_cells    # "3,7,12" format
+│   ├── overvolt_count     # integer
+│   ├── overvolt_active    # 0/1
+│   ├── overvolt_cells     # "3,7" format
+│   ├── cw_active          # 0/1 (Cell Warning)
+│   ├── cw_cells           # "3,7" format
+│   ├── charge_mosfet      # 0/1
+│   ├── discharge_mosfet   # 0/1
+│   ├── lmcharge_mosfet    # 0/1
+│   ├── warnings           # comma-separated list
+│   ├── alarms             # comma-separated list
 │   ├── cell01 ... cell16  # volts (3 decimals)
 │   └── temp1 ... temp6    # °C
 ├── battery1/
@@ -253,6 +156,6 @@ def ha_sensor_config(object_id, name, state_topic,
 | `MIN_INTERVAL_S_CELLS` | 5.0 | Minimum for cell voltages |
 | `VOLT_HYST_V` | 0.002 | 2mV hysteresis for voltages |
 | `TEMP_HYST_C` | 0.2 | 0.2°C hysteresis for temps |
-| `RS485_BAUD` | 9600 | RS485 baud rate |
+| `RS485_BAUD` | 115200 | RS485 baud rate |
 | `PYLONTECH_ADDR` | 2 | Default battery address |
-| `NUM_BATTERIES` | 3 | Number of batteries in stack |
+| `NUM_BATTERIES` | 3 | Number of batteries (configurable via `--batteries` or env var) |
