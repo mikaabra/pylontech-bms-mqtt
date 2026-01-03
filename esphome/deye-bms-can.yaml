@@ -93,6 +93,158 @@ mqtt:
         id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
         ESP_LOGI("mqtt", "Connected, published availability");
 
+        // Publish HA Discovery configs
+        // Device info shared by all entities
+        const char* device_json = R"("device":{"identifiers":["pylontech_rs485"],"name":"Pylontech RS485","manufacturer":"Pylontech","model":"BMS RS485"})";
+        const char* avail_json = R"("availability_topic":"${rs485_prefix}/status","payload_available":"online","payload_not_available":"offline")";
+
+        char topic[128];
+        char payload[512];
+
+        // Stack sensors
+        const char* stack_sensors[][5] = {
+          {"stack_cell_min", "Stack Cell Min", "${rs485_prefix}/stack/cell_min", "V", "voltage"},
+          {"stack_cell_max", "Stack Cell Max", "${rs485_prefix}/stack/cell_max", "V", "voltage"},
+          {"stack_cell_delta", "Stack Cell Delta", "${rs485_prefix}/stack/cell_delta_mv", "mV", ""},
+          {"stack_voltage", "Stack Voltage", "${rs485_prefix}/stack/voltage", "V", "voltage"},
+          {"stack_current", "Stack Current", "${rs485_prefix}/stack/current", "A", "current"},
+          {"stack_temp_min", "Stack Temp Min", "${rs485_prefix}/stack/temp_min", "°C", "temperature"},
+          {"stack_temp_max", "Stack Temp Max", "${rs485_prefix}/stack/temp_max", "°C", "temperature"},
+          {"stack_balancing_count", "Stack Balancing Cells", "${rs485_prefix}/stack/balancing_count", "", ""},
+          {"stack_balancing_cells", "Stack Balancing Cells List", "${rs485_prefix}/stack/balancing_cells", "", ""},
+          {"stack_alarms", "Stack Alarms", "${rs485_prefix}/stack/alarms", "", ""},
+        };
+
+        for (int i = 0; i < 10; i++) {
+          snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", stack_sensors[i][0]);
+          if (strlen(stack_sensors[i][3]) > 0 && strlen(stack_sensors[i][4]) > 0) {
+            snprintf(payload, sizeof(payload),
+              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+              stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], stack_sensors[i][4], avail_json, device_json);
+          } else if (strlen(stack_sensors[i][3]) > 0) {
+            snprintf(payload, sizeof(payload),
+              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
+              stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], avail_json, device_json);
+          } else {
+            snprintf(payload, sizeof(payload),
+              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s",%s,%s})",
+              stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], avail_json, device_json);
+          }
+          id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        }
+
+        // Stack binary sensor
+        snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/stack_balancing_active/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"Stack Balancing Active","state_topic":"${rs485_prefix}/stack/balancing_active","unique_id":"pylontech_rs485_stack_balancing_active","payload_on":"1","payload_off":"0","icon":"mdi:scale-balance",%s,%s})",
+          avail_json, device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        // Per-battery discovery
+        for (int batt = 0; batt < ${num_batteries}; batt++) {
+          char prefix[16], state_prefix[48];
+          snprintf(prefix, sizeof(prefix), "batt%d", batt);
+          snprintf(state_prefix, sizeof(state_prefix), "${rs485_prefix}/battery%d", batt);
+
+          // Battery sensors
+          const char* batt_sensor_names[][4] = {
+            {"cell_min", "Cell Min", "V", "voltage"},
+            {"cell_max", "Cell Max", "V", "voltage"},
+            {"cell_delta", "Cell Delta", "mV", ""},
+            {"voltage", "Voltage", "V", "voltage"},
+            {"current", "Current", "A", "current"},
+            {"soc", "SOC", "%", ""},
+            {"remain_ah", "Remaining Capacity", "Ah", ""},
+            {"total_ah", "Total Capacity", "Ah", ""},
+            {"cycles", "Cycles", "", ""},
+            {"balancing_count", "Balancing Cells", "", ""},
+            {"balancing_cells", "Balancing Cells List", "", ""},
+            {"state", "State", "", ""},
+            {"warnings", "Warnings", "", ""},
+            {"alarms", "Alarms", "", ""},
+            {"cw_cells", "CW Cells List", "", ""},
+          };
+
+          for (int i = 0; i < 15; i++) {
+            char obj_id[32], name[48], st[64];
+            snprintf(obj_id, sizeof(obj_id), "%s_%s", prefix, batt_sensor_names[i][0]);
+            snprintf(name, sizeof(name), "Battery %d %s", batt, batt_sensor_names[i][1]);
+            snprintf(st, sizeof(st), "%s/%s", state_prefix, batt_sensor_names[i][0]);
+            // Fix topic names for cell_delta
+            if (strcmp(batt_sensor_names[i][0], "cell_delta") == 0) {
+              snprintf(st, sizeof(st), "%s/cell_delta_mv", state_prefix);
+            }
+
+            snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
+            if (strlen(batt_sensor_names[i][2]) > 0 && strlen(batt_sensor_names[i][3]) > 0) {
+              snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+                name, st, obj_id, batt_sensor_names[i][2], batt_sensor_names[i][3], avail_json, device_json);
+            } else if (strlen(batt_sensor_names[i][2]) > 0) {
+              snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
+                name, st, obj_id, batt_sensor_names[i][2], avail_json, device_json);
+            } else {
+              snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s",%s,%s})",
+                name, st, obj_id, avail_json, device_json);
+            }
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+          }
+
+          // Battery binary sensors
+          const char* batt_binary_names[][2] = {
+            {"balancing_active", "Balancing Active"},
+            {"charge_mosfet", "Charge MOSFET"},
+            {"discharge_mosfet", "Discharge MOSFET"},
+            {"lmcharge_mosfet", "LM Charge MOSFET"},
+            {"cw_active", "Cell Warning"},
+          };
+
+          for (int i = 0; i < 5; i++) {
+            char obj_id[32], name[48], st[64];
+            snprintf(obj_id, sizeof(obj_id), "%s_%s", prefix, batt_binary_names[i][0]);
+            snprintf(name, sizeof(name), "Battery %d %s", batt, batt_binary_names[i][1]);
+            snprintf(st, sizeof(st), "%s/%s", state_prefix, batt_binary_names[i][0]);
+
+            snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", obj_id);
+            snprintf(payload, sizeof(payload),
+              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","payload_on":"1","payload_off":"0",%s,%s})",
+              name, st, obj_id, avail_json, device_json);
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+          }
+
+          // Individual cell voltages
+          for (int cell = 1; cell <= 16; cell++) {
+            char obj_id[32], name[48], st[64];
+            snprintf(obj_id, sizeof(obj_id), "%s_cell%02d", prefix, cell);
+            snprintf(name, sizeof(name), "Battery %d Cell %d", batt, cell);
+            snprintf(st, sizeof(st), "%s/cell%02d", state_prefix, cell);
+
+            snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
+            snprintf(payload, sizeof(payload),
+              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"V","device_class":"voltage","state_class":"measurement","suggested_display_precision":3,%s,%s})",
+              name, st, obj_id, avail_json, device_json);
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+          }
+
+          // Temperature sensors
+          for (int temp = 1; temp <= 6; temp++) {
+            char obj_id[32], name[48], st[64];
+            snprintf(obj_id, sizeof(obj_id), "%s_temp%d", prefix, temp);
+            snprintf(name, sizeof(name), "Battery %d Temp %d", batt, temp);
+            snprintf(st, sizeof(st), "%s/temp%d", state_prefix, temp);
+
+            snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
+            snprintf(payload, sizeof(payload),
+              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"°C","device_class":"temperature","state_class":"measurement",%s,%s})",
+              name, st, obj_id, avail_json, device_json);
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+          }
+        }
+
+        ESP_LOGI("mqtt", "Published HA discovery configs for %d batteries", ${num_batteries});
+
 ota:
   - platform: esphome
     password: !secret ota_password
