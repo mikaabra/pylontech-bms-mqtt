@@ -1,6 +1,8 @@
 # Battery Protocol Reference
 
-Comprehensive documentation of CAN and RS485 protocols for Pylontech-compatible BMS systems, plus EPever inverter protocols for the planned protocol translator project.
+Comprehensive documentation of CAN and RS485 protocols for Pylontech-compatible BMS systems, plus EPever UPower-HI inverter protocols for the planned protocol translator project.
+
+**Note:** Protocol details in this document have been verified against working implementations in `pylon_can2mqtt.py` and `pylon_rs485_monitor.py`, tested with Shoto SDA10-48200 batteries.
 
 ## Table of Contents
 
@@ -195,37 +197,38 @@ Response structure (more complex, variable length):
 | GB_Byte section | Current status, Pack voltage status |
 | Ext_Bit section | Detailed flags (see below) |
 
-#### Ext_Bit Section Layout (from BMS XML spec)
+#### Ext_Bit Section Layout (Verified from BMS XML + Working Code)
 
-**Important:** The Ext_Bit section starts 3 bytes after the GB_Byte section (Current + PackVolt + Count).
+**Critical:** The Ext_Bit section starts 3 bytes (6 hex chars) after the status section start:
+```
+status_pos = temp_start + num_temps * 2
+ext_bit_start = status_pos + 6  # Skip Current(1) + PackVolt(1) + Count(1)
+```
 
-| ByteIndex | Bit | Flag Name | Type |
-|-----------|-----|-----------|------|
-| 0 | 0 | Balance On | Normal |
-| 0 | 1 | Static Balance | Normal |
-| 0 | 2 | Static Balance Timeout | Protect |
-| 0 | 3 | Over Temp Prohibit Balanced | Normal |
-| 0 | 6 | Communication Protect ON | Normal |
-| 1 | 0 | Cell Over Voltage Alarm | Warn |
-| 1 | 1 | Cell Over Voltage Protect | Protect |
-| 1 | 2 | Cell Under Voltage Alarm | Warn |
-| 1 | 3 | Cell Under Voltage Protect | Protect |
-| 1 | 4 | Pack Over Voltage Alarm | Warn |
-| 1 | 5 | Pack Over Voltage Protect | Protect |
-| 1 | 6 | Pack Under Voltage Alarm | Warn |
-| 1 | 7 | Pack Under Voltage Protect | Protect |
-| 2 | 0-7 | Temperature alarms/protections | Various |
-| 3 | 0-7 | Environment/MOSFET temp, Fire alarm | Various |
-| 4 | 0-7 | Current alarms/protections | Various |
-| 5 | 0-2 | Current protect locking | Protect |
-| 6 | 2-5 | SOC alarm, calibration flags | Warn |
-| 7 | 0-7 | Hardware failures | Warn |
-| 8 | 0 | DISCHG_MOSFET On | Normal |
-| 8 | 1 | CHG_MOSFET On | Normal |
-| 8 | 2 | LMCHG_MOSFET On | Normal |
-| 8 | 3 | Heat_MOSFET On | Normal |
-| 9 | 0-7 | Balance1-8 (individual cell flags) | Normal |
-| 10 | 0-7 | Balance9-16 (individual cell flags) | Normal |
+| ByteIndex | Hex Offset | Bit | Flag Name | Type |
+|-----------|------------|-----|-----------|------|
+| 0 | ext_bit_start+0 | 0 | Balance On | Normal |
+| 0 | ext_bit_start+0 | 1 | Static Balance | Normal |
+| 0 | ext_bit_start+0 | 2 | Static Balance Timeout | Protect |
+| 4 | ext_bit_start+8 | 0 | Cell Over Voltage Alarm | Warn |
+| 4 | ext_bit_start+8 | 1 | Cell Over Voltage Protect | Warn |
+| 4 | ext_bit_start+8 | 2 | Cell Under Voltage Alarm | Warn |
+| 4 | ext_bit_start+8 | 3 | Cell Under Voltage Protect | **Protect** |
+| 4 | ext_bit_start+8 | 4 | Pack Over Voltage Alarm | Warn |
+| 4 | ext_bit_start+8 | 5 | Pack Over Voltage Protect | Warn |
+| 4 | ext_bit_start+8 | 6 | Pack Under Voltage Alarm | Warn |
+| 4 | ext_bit_start+8 | 7 | Pack Under Voltage Protect | **Protect** |
+| 8 | ext_bit_start+16 | 0 | DISCHG_MOSFET On | Normal |
+| 8 | ext_bit_start+16 | 1 | CHG_MOSFET On | Normal |
+| 8 | ext_bit_start+16 | 2 | LMCHG_MOSFET On | Normal |
+| 8 | ext_bit_start+16 | 3 | Heat_MOSFET On | Normal |
+| 9 | ext_bit_start+18 | 0-7 | Balance1-8 (bit0=cell1) | Normal |
+| 10 | ext_bit_start+20 | 0-7 | Balance9-16 (bit0=cell9) | Normal |
+
+**Verified behavior:**
+- Balancing cells only reported when ByteIndex 0 bit 0 (Balance On) is set
+- Cell overvolt at 100% SOC is warning only, not alarm
+- Only undervolt protections (bit 3, bit 7) are actual alarms
 
 #### Operating State (Last Byte)
 
@@ -238,13 +241,37 @@ Response structure (more complex, variable length):
 | 4 | Standby |
 | 5 | Shutdown |
 
-### CW Flag (Cell Warning)
+### CW Flag (Cell Warning) - Empirically Discovered
 
-Discovered during debugging: bytes at offset `status_pos + 18/20` correlate with "CW=Y" shown on BMS display. This appears to indicate cells currently receiving balancing attention but differs from the Balance1-16 flags which indicate active balancing FETs.
+**Location:** `status_pos + 18` and `status_pos + 20` (NOT ext_bit_start!)
+
+During testing, we observed that bytes at offset `status_pos + 18/20` correlate with "CW=Y" shown on the BMS display panel. This is different from the documented Balance1-16 flags.
+
+```python
+# CW flag detection (verified in pylon_rs485_monitor.py)
+if status_pos + 22 <= len(data_hex):
+    cw_byte1 = int(data_hex[status_pos+18:status_pos+20], 16)  # Cells 1-8
+    cw_byte2 = int(data_hex[status_pos+20:status_pos+22], 16)  # Cells 9-16
+    cw_active = (cw_byte1 != 0) or (cw_byte2 != 0)
+```
+
+**Observed behavior:**
+- CW=Y appears at ~3.501V (balancing threshold on Shoto BMS)
+- CW=N appears at ~3.500V (just below threshold)
+- This correlates with cells being "watched" for balancing, not necessarily active balancing
+
+**Relationship to Balance flags:**
+- CW flag (status_pos+18): "Cell Warning" - cell is at/above balancing threshold
+- Balance flags (ext_bit_start+18): Active balancing FET state
+- A cell may have CW=Y but not be actively balancing yet
 
 ---
 
 ## EPever Inverter Protocols
+
+**Target Device:** EPever UPower-HI Series (UP-Hi3000, UP-Hi5000, etc.)
+
+The UPower-HI series is a hybrid inverter/charger that supports lithium battery communication via RS485. It does NOT have CAN bus - only RS485.
 
 ### Native Modbus Protocol (Charge Controllers & Inverters)
 
@@ -277,20 +304,22 @@ Discovered during debugging: bytes at offset `status_pos + 18/20` correlate with
 | 0x9008 | Float Voltage |
 | 0x900D | Low Voltage Disconnect |
 
-### UPower Series RS485 BMS Communication
+### UPower-HI Series RS485 BMS Communication
 
-The EPever UPower series (UP1000-UP5000, UP-Hi series) can communicate with lithium BMS systems:
+The EPever UPower-HI series communicates with lithium BMS via RS485 using the Pylontech protocol (or other supported protocols via BMS-Link).
 
 **Direct RS485 Connection (without BMS-Link):**
-- RS485-A to RS485-A
-- RS485-B to RS485-B
+- RS485-A to RS485-A (typically pin 7 on Pylontech RJ45)
+- RS485-B to RS485-B (typically pin 8 on Pylontech RJ45)
 - Must use twisted pair cable
 
-**RJ45 Pinout Options:**
-- Pins 3 & 6 (green pair)
-- Pins 4 & 5 (blue pair)
+**EPever RJ45 Pinout Options:**
+- Pins 3 & 6 (green pair) - RS485 A/B
+- Pins 4 & 5 (blue pair) - RS485 A/B
 
-**Important:** EPever inverters do NOT have CAN bus - only RS485 for BMS communication.
+**Critical:** EPever UPower-HI does NOT have CAN bus - only RS485 for BMS communication. This is why a protocol translator is needed when the battery only outputs CAN.
+
+**Known Issue:** User reports indicate Pylontech protocol sometimes doesn't work reliably with UPower-HI, even with BMS-Link dongle. This may require protocol sniffing to determine exact requirements.
 
 ---
 
@@ -331,33 +360,48 @@ The BMS-Link is an external protocol converter with independent MCU that transla
 
 ### Project Goal
 
-Create a translator that:
-1. Reads battery data from CAN bus (Pylontech protocol)
-2. Responds to RS485 queries from EPever inverter
+Create a translator for the EPever UPower-HI installation that:
+1. Reads battery data from CAN bus (Pylontech protocol from Shoto/similar battery)
+2. Responds to RS485 queries from UPower-HI inverter in Pylontech RS485 format
+
+### Current Setup Context
+
+- EPever UPower-HI inverter at remote location
+- Same type of battery stack (Shoto SDA10-48200 or similar Pylontech-compatible)
+- BMS-Link dongle is present but "never got it working"
+- Need to understand why and potentially bypass with custom translator
 
 ### Hardware Options
 
 **Option A: Dual RS485**
-- One RS485 to sniff/respond to EPever
-- One RS485 to query battery (if no CAN available)
+- One RS485 to sniff/respond to EPever UPower-HI
+- One RS485 to query battery (if no CAN available or CAN unreliable)
 - Suitable for: Raspberry Pi with 2× USB-RS485 adapters
 
-**Option B: CAN + RS485 (ESP32)**
-- CAN bus to read from battery stack (passive listener)
-- RS485 to respond to EPever inverter queries
-- Suitable for: ESP32-S3-RS485-CAN (Waveshare)
+**Option B: CAN + RS485 (ESP32) - Preferred**
+- CAN bus to passively read from battery stack (same as current Deye setup)
+- RS485 to respond to UPower-HI inverter queries
+- Suitable for: ESP32-S3-RS485-CAN (Waveshare) - same board we have ESPHome config for
 
 ### Implementation Strategy
 
-**Phase 1: Protocol Capture**
-1. Connect RS485 sniffer between EPever and battery
-2. Capture what commands EPever sends (likely CID2=0x42, 0x44)
+**Phase 1: Protocol Capture (Next Site Visit)**
+1. Connect RS485 sniffer between UPower-HI and battery (or BMS-Link)
+2. Capture what commands UPower-HI sends (expected: CID2=0x42, 0x44)
 3. Document exact frame format and timing expectations
+4. Check if BMS-Link is translating correctly or failing
 
-**Phase 2: Translator Development**
-1. Continuously read CAN messages from battery stack
+**Phase 2: Determine Root Cause**
+- Is UPower-HI sending correct Pylontech RS485 frames?
+- Is BMS-Link responding but with wrong data?
+- Is there a timing/baud rate mismatch?
+- Is the battery even responding to RS485?
+
+**Phase 3: Translator Development**
+1. Continuously read CAN messages from battery stack (passive listener, no bus impact)
 2. Cache latest values (SOC, voltage, current, limits, alarms)
-3. When RS485 query received, respond with cached data in Pylontech RS485 format
+3. When RS485 query received from UPower-HI, respond with cached data in Pylontech RS485 format
+4. Use our verified frame building code from `pylon_rs485_monitor.py`
 
 ### Key Translation Mappings
 
@@ -380,12 +424,36 @@ Create a translator that:
 - RS485 query timeout: Typically 200-500ms
 - Translator must respond within timeout window
 
-### Open Questions
+### Open Questions (To Resolve During Site Visit)
 
-1. What exact RS485 commands does EPever send? (need to capture)
-2. Does EPever use standard Pylontech framing or modified?
-3. What is the polling interval from EPever?
-4. Does BMS-Link do any additional protocol translation beyond framing?
+1. What exact RS485 commands does UPower-HI send? (expected: CID2=0x42, 0x44)
+2. What baud rate is UPower-HI using? (likely 115200, but verify)
+3. What is the polling interval from UPower-HI? (likely 1-5 seconds)
+4. Is BMS-Link receiving queries? (sniff between UPower-HI and BMS-Link)
+5. Is BMS-Link forwarding to battery? (sniff between BMS-Link and battery)
+6. What is battery responding with? (if anything)
+7. What PRO setting is configured on BMS-Link? (should be PRO=2 for Pylontech)
+8. What Fixed ID is set on DIP switches? (should be ID=2 for Pylontech)
+
+### Sniffing Setup
+
+For protocol capture, we need:
+- USB-RS485 adapter connected to laptop/Pi running capture script
+- Tap into RS485 lines (A/B) - can be done with parallel connection
+- Capture script that logs raw hex with timestamps
+
+```python
+# Simple RS485 sniffer (run on Pi with USB-RS485)
+import serial
+import time
+
+ser = serial.Serial('/dev/ttyUSB0', 115200, timeout=0.1)
+while True:
+    data = ser.read(256)
+    if data:
+        ts = time.strftime('%H:%M:%S')
+        print(f"{ts} [{len(data):3d}] {data.hex()}")
+```
 
 ---
 
