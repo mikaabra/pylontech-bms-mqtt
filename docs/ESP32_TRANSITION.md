@@ -7,7 +7,7 @@ This document contains all information needed to transition from the Raspberry P
 ### Hardware
 - Raspberry Pi 4
 - Openmoko USB-CAN adapter (gs_usb compatible)
-- FTDI USB-RS485 adapter (RS485)
+- Waveshare Industrial USB to RS485 (FT232RNL)
 
 ### Services Running
 ```bash

@@ -50,6 +50,7 @@ For production use, see [Running as a Service](#running-as-a-service) below.
 ### Tested Interfaces
 - **CAN**: Openmoko USB-CAN adapter (gs_usb compatible) - [Amazon](https://www.amazon.se/dp/B0CRB8KXWL)
 - **CAN**: MCP2515-based SPI CAN modules
+- **RS485**: Waveshare Industrial USB to RS485 (FT232RNL) - [Amazon](https://www.amazon.de/-/en/dp/B082D5PXJ4)
 - **RS485**: FTDI FT232-based USB-RS485 adapters
 - **RS485**: CH340-based USB-RS485 adapters
 
