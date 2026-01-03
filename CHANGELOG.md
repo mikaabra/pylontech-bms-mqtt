@@ -14,6 +14,44 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ---
 
+## [2026-01-03] - Balancing Detection Fix & Debug Logging
+
+### Fixed
+- **RS485 balancing detection** - Fixed byte offset calculation for balance flags
+  - Status section has 3 header bytes (Current, PackVolt, Count) before Ext_Bit data
+  - Balance flags at ByteIndex 9-10 are now correctly read from `ext_bit_start + 18`
+  - Previously was reading wrong bytes, causing incorrect cell balancing reports
+- **ESPHome balancing detection** - Same fix applied to ESPHome config
+
+### Added
+- **Debug logging** (`--debug-log FILE`) for RS485 monitor
+  - Logs balancing flag changes: `BAL+` (started), `BAL-` (stopped)
+  - Logs overvolt flag changes: `OV+`, `OV-`
+  - Logs battery state transitions: `STATE Charge -> Float`
+  - Includes cell voltages at time of change
+  - Initial state logged on startup (`INIT`)
+  - Example output:
+    ```
+    2026-01-03 08:06:43 B0 INIT  STATE=Full
+    2026-01-03 08:15:00 B1 BAL+ C3=3.501V C7=3.502V
+    2026-01-03 08:16:00 B1 BAL- C3=3.500V
+    2026-01-03 08:20:00 B2 STATE Charge -> Float
+    ```
+- **CW flag detection** - Added detection for "Cell Warning" flag (correlates with CW=Y on BMS display)
+  - Shows in terminal output: `CW=Y: cells [3, 7]` or `CW=N`
+  - Raw bytes displayed for protocol analysis
+- **Modbus-TCP configurability** - Made `deye_modbus2mqtt.py` fully configurable
+  - Environment variables: `MQTT_PREFIX`, `DEVICE_ID`, `DEVICE_NAME`, `DEVICE_MODEL`, `DEVICE_MANUFACTURER`
+  - CLI arguments: `--mqtt-prefix`, `--device-id`, `--device-name`, etc.
+  - Solarman history preservation: `--solarman-prefix`, `--solarman-serial`
+  - Entities can match existing Solarman unique_ids for seamless migration
+
+### Changed
+- RS485 terminal output now shows raw status bytes with position labels for protocol debugging
+- Balancing cells only reported when "Balance On" flag is set (prevents false positives)
+
+---
+
 ## [2026-01-02] - Deye Inverter Modbus Support
 
 ### Added

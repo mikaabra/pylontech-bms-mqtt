@@ -4,7 +4,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-This is a CAN/RS485-to-MQTT bridge for a Deye/Shoto BMS (Battery Management System) using the Pylontech protocol. It reads battery data from CAN bus and RS485 interfaces and publishes to MQTT with Home Assistant auto-discovery.
+This is a multi-protocol MQTT bridge for Deye/Shoto solar systems:
+- **BMS monitoring** via CAN bus and RS485 (Pylontech protocol)
+- **Inverter monitoring** via Modbus-TCP
+
+All data is published to MQTT with Home Assistant auto-discovery.
 
 ## Running
 
@@ -14,6 +18,12 @@ This is a CAN/RS485-to-MQTT bridge for a Deye/Shoto BMS (Battery Management Syst
 
 # Run the RS485 monitor with MQTT publishing
 ./pylon_rs485_monitor.py --mqtt --loop
+
+# Run the RS485 monitor with debug logging
+./pylon_rs485_monitor.py --mqtt --loop --debug-log /var/log/batt_balance.log
+
+# Run the Modbus-TCP inverter bridge
+./deye_modbus2mqtt.py --mqtt --loop
 
 # Debug/decode raw CAN frames
 ./pylon_decode.py
@@ -32,9 +42,10 @@ The bridges require MQTT configuration via environment variables:
 
 ## Dependencies
 
-- Python 3.x with `python-can`, `paho-mqtt` (v2.x), `pyserial`
+- Python 3.x with `python-can`, `paho-mqtt` (v2.x), `pyserial`, `pymodbus`
 - Linux SocketCAN (`can0` interface must be configured)
 - RS485 USB adapter (e.g., `/dev/ttyUSB0`)
+- Modbus-TCP gateway for inverter monitoring
 
 ## Architecture
 
@@ -55,6 +66,13 @@ The bridges require MQTT configuration via environment variables:
 **pylon_decode.py** - Development/debug tool:
 - Prints decoded CAN frames with optional repeat suppression
 - Useful for reverse-engineering unknown frame types
+
+**deye_modbus2mqtt.py** - Inverter Modbus-TCP bridge:
+- Polls Deye SG04LP3 (and compatible) inverters via Modbus-TCP
+- 60+ sensors: PV, battery, grid, load, temperatures, energy totals
+- Three scan groups (fast/normal/slow) for efficient polling
+- Fully configurable via environment variables or CLI arguments
+- Supports Solarman unique_id format for history preservation when migrating
 
 ## CAN Protocol Reference
 

@@ -155,6 +155,7 @@ Options:
 - `--interval N` - Polling interval in seconds (default: 30)
 - `--quiet` - Suppress console output
 - `--port /dev/ttyUSB0` - RS485 serial port
+- `--debug-log FILE` - Log balancing/OV/state changes to file (for debugging)
 
 ### Modbus-TCP Bridge (Inverter)
 
@@ -179,11 +180,18 @@ Options:
 - `--loop` - Continuous monitoring mode
 - `--interval N` - Fast poll interval in seconds (default: 10)
 - `--quiet` - Suppress console output
+- `--mqtt-prefix` - MQTT topic prefix (default: deye_inverter)
+- `--device-id` - Home Assistant device identifier
+- `--solarman-prefix` - Solarman unique_id prefix for history preservation
+- `--solarman-serial` - Solarman inverter serial for history preservation
 
 Environment variables:
 - `MODBUS_HOST` - Modbus gateway address
 - `MODBUS_PORT` - Modbus port (default: 502)
 - `MODBUS_SLAVE` - Device ID (default: 1)
+- `MQTT_PREFIX` - MQTT topic prefix
+- `DEVICE_ID`, `DEVICE_NAME`, `DEVICE_MODEL`, `DEVICE_MANUFACTURER` - HA device info
+- `SOLARMAN_PREFIX`, `SOLARMAN_SERIAL` - For preserving Solarman entity history
 
 ### Debug Tool
 

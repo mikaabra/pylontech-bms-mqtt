@@ -34,7 +34,7 @@ logging.basicConfig(
     datefmt='%Y-%m-%d %H:%M:%S'
 )
 
-# Configuration
+# Configuration - all values can be overridden via environment variables
 MODBUS_HOST = os.environ.get("MODBUS_HOST", "192.168.200.111")
 MODBUS_PORT = int(os.environ.get("MODBUS_PORT", "502"))
 MODBUS_SLAVE = int(os.environ.get("MODBUS_SLAVE", "1"))
@@ -44,15 +44,81 @@ MQTT_HOST = os.environ.get("MQTT_HOST", "localhost")
 MQTT_PORT = int(os.environ.get("MQTT_PORT", "1883"))
 MQTT_USER = os.environ.get("MQTT_USER")
 MQTT_PASS = os.environ.get("MQTT_PASS")
-MQTT_PREFIX = "deye_inverter"
+MQTT_PREFIX = os.environ.get("MQTT_PREFIX", "deye_inverter")
 AVAIL_TOPIC = f"{MQTT_PREFIX}/status"
 
 # Home Assistant Discovery
-DISCOVERY_PREFIX = "homeassistant"
-DEVICE_ID = "deye_inverter"
-DEVICE_NAME = "Deye Inverter"
-DEVICE_MODEL = "SUN-12K-SG04LP3-EU"
-DEVICE_MANUFACTURER = "Deye"
+DISCOVERY_PREFIX = os.environ.get("DISCOVERY_PREFIX", "homeassistant")
+DEVICE_ID = os.environ.get("DEVICE_ID", "deye_inverter")
+DEVICE_NAME = os.environ.get("DEVICE_NAME", "Deye Inverter")
+DEVICE_MODEL = os.environ.get("DEVICE_MODEL", "SUN-12K-SG04LP3-EU")
+DEVICE_MANUFACTURER = os.environ.get("DEVICE_MANUFACTURER", "Deye")
+
+# Legacy unique_id prefixes for preserving HA entity history
+# Format: prefix_serial_SensorName (e.g., "deye_2957831690_Battery SOC")
+SOLARMAN_PREFIX = os.environ.get("SOLARMAN_PREFIX", "")  # e.g., "deye"
+SOLARMAN_SERIAL = os.environ.get("SOLARMAN_SERIAL", "")  # e.g., "2957831690"
+
+# Mapping from our register names to Solarman sensor names
+# Used to generate Solarman-compatible unique_ids for history preservation
+SOLARMAN_NAME_MAP = {
+    # Solar/PV
+    "pv1_power": "PV1 Power",
+    "pv2_power": "PV2 Power",
+    "pv1_voltage": "PV1 Voltage",
+    "pv2_voltage": "PV2 Voltage",
+    "pv1_current": "PV1 Current",
+    "pv2_current": "PV2 Current",
+    "daily_production": "Daily Production",
+    "total_production": "Total Production",
+    # Battery
+    "battery_temperature": "Battery Temperature",
+    "battery_voltage": "Battery Voltage",
+    "battery_soc": "Battery SOC",
+    "battery_power": "Battery Power",
+    "battery_current": "Battery Current",
+    "daily_battery_charge": "Daily Battery Charge",
+    "daily_battery_discharge": "Daily Battery Discharge",
+    "total_battery_charge": "Total Battery Charge",
+    "total_battery_discharge": "Total Battery Discharge",
+    # Grid
+    "grid_voltage_l1": "Grid Voltage L1",
+    "grid_voltage_l2": "Grid Voltage L2",
+    "grid_voltage_l3": "Grid Voltage L3",
+    "grid_frequency": "Grid Frequency",
+    "total_grid_power": "Total Grid Power",
+    "grid_power_ct_l1": "Grid CT L1 Power",
+    "grid_power_ct_l2": "Grid CT L2 Power",
+    "grid_power_ct_l3": "Grid CT L3 Power",
+    "grid_power_ext_ct_l1": "External CT L1 Power",
+    "grid_power_ext_ct_l2": "External CT L2 Power",
+    "grid_power_ext_ct_l3": "External CT L3 Power",
+    "daily_energy_bought": "Daily Energy Bought",
+    "daily_energy_sold": "Daily Energy Sold",
+    "total_energy_bought": "Total Energy Bought",
+    "total_energy_sold": "Total Energy Sold",
+    # Load
+    "total_load_power": "Total Load Power",
+    "load_power_l1": "Load L1 Power",
+    "load_power_l2": "Load L2 Power",
+    "load_power_l3": "Load L3 Power",
+    "load_voltage_l1": "Load Voltage L1",
+    "load_voltage_l2": "Load Voltage L2",
+    "load_voltage_l3": "Load Voltage L3",
+    "daily_load_consumption": "Daily Load Consumption",
+    "total_load_consumption": "Total Load Consumption",
+    # Inverter
+    "inverter_current_l1": "Inverter L1 Current",
+    "inverter_current_l2": "Inverter L2 Current",
+    "inverter_current_l3": "Inverter L3 Current",
+    "inverter_power_l1": "Inverter L1 Power",
+    "inverter_power_l2": "Inverter L2 Power",
+    "inverter_power_l3": "Inverter L3 Power",
+    "inverter_frequency": "Inverter Frequency",
+    # Temperatures
+    "dc_temperature": "DC Temperature",
+    "ac_temperature": "AC Temperature",
+}
 
 # Rate limiting
 FORCE_PUBLISH_INTERVAL_S = 60
@@ -232,8 +298,17 @@ class Publisher:
 
 def ha_sensor_config(reg: Register) -> dict:
     """Build HA MQTT Discovery payload for a register."""
-    # Use legacy unique_id if available to preserve existing HA entities
-    unique_id = reg.legacy_unique_id or f"{DEVICE_ID}_{reg.name}"
+    # Determine unique_id with priority:
+    # 1. Explicit legacy_unique_id (e.g., "deye-tcp-battery-soc")
+    # 2. Solarman format if prefix/serial configured (e.g., "deye_2957831690_Battery SOC")
+    # 3. Default format (device_id_name)
+    if reg.legacy_unique_id:
+        unique_id = reg.legacy_unique_id
+    elif SOLARMAN_PREFIX and SOLARMAN_SERIAL and reg.name in SOLARMAN_NAME_MAP:
+        solarman_name = SOLARMAN_NAME_MAP[reg.name]
+        unique_id = f"{SOLARMAN_PREFIX}_{SOLARMAN_SERIAL}_{solarman_name}"
+    else:
+        unique_id = f"{DEVICE_ID}_{reg.name}"
 
     cfg = {
         "name": reg.name.replace("_", " ").title(),
@@ -412,16 +487,75 @@ def shutdown(signum=None, frame=None):
 def main():
     global _mqtt_client, _running
 
-    parser = argparse.ArgumentParser(description='Deye Inverter Modbus-TCP to MQTT Bridge')
+    parser = argparse.ArgumentParser(
+        description='Deye Inverter Modbus-TCP to MQTT Bridge',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Environment variables (can also be set via command line):
+  MODBUS_HOST, MODBUS_PORT, MODBUS_SLAVE
+  MQTT_HOST, MQTT_PORT, MQTT_USER, MQTT_PASS, MQTT_PREFIX
+  DEVICE_ID, DEVICE_NAME, DEVICE_MODEL, DEVICE_MANUFACTURER
+  SOLARMAN_PREFIX, SOLARMAN_SERIAL (for preserving Solarman entity history)
+
+Examples:
+  # Basic usage
+  ./deye_modbus2mqtt.py --host 192.168.1.100 --mqtt --loop
+
+  # Preserve Solarman entity history
+  ./deye_modbus2mqtt.py --mqtt --loop --solarman-prefix deye --solarman-serial 2957831690
+        """)
+    # Modbus settings
     parser.add_argument('--host', default=MODBUS_HOST, help='Modbus TCP host')
     parser.add_argument('--port', type=int, default=MODBUS_PORT, help='Modbus TCP port')
     parser.add_argument('--slave', type=int, default=MODBUS_SLAVE, help='Modbus slave ID')
+    # Operation mode
     parser.add_argument('--loop', action='store_true', help='Continuous monitoring')
     parser.add_argument('--interval', type=int, default=10, help='Fast poll interval (seconds)')
     parser.add_argument('--json', action='store_true', help='JSON output')
     parser.add_argument('--mqtt', action='store_true', help='Publish to MQTT')
     parser.add_argument('--quiet', action='store_true', help='Suppress console output')
+    parser.add_argument('--test', action='store_true',
+                        help='Test mode: use separate device/topics to run alongside existing integration')
+    # Device/MQTT customization
+    parser.add_argument('--mqtt-prefix', default=None, help='MQTT topic prefix (default: deye_inverter)')
+    parser.add_argument('--device-id', default=None, help='HA device identifier')
+    parser.add_argument('--device-name', default=None, help='HA device display name')
+    parser.add_argument('--device-model', default=None, help='HA device model')
+    parser.add_argument('--device-manufacturer', default=None, help='HA device manufacturer')
+    # Solarman compatibility
+    parser.add_argument('--solarman-prefix', default=None,
+                        help='Solarman unique_id prefix (e.g., "deye") for history preservation')
+    parser.add_argument('--solarman-serial', default=None,
+                        help='Solarman inverter serial (e.g., "2957831690") for history preservation')
     args = parser.parse_args()
+
+    # Apply command-line overrides to globals
+    global MQTT_PREFIX, AVAIL_TOPIC, DEVICE_ID, DEVICE_NAME, DEVICE_MODEL, DEVICE_MANUFACTURER
+    global SOLARMAN_PREFIX, SOLARMAN_SERIAL
+
+    if args.mqtt_prefix:
+        MQTT_PREFIX = args.mqtt_prefix
+        AVAIL_TOPIC = f"{MQTT_PREFIX}/status"
+    if args.device_id:
+        DEVICE_ID = args.device_id
+    if args.device_name:
+        DEVICE_NAME = args.device_name
+    if args.device_model:
+        DEVICE_MODEL = args.device_model
+    if args.device_manufacturer:
+        DEVICE_MANUFACTURER = args.device_manufacturer
+    if args.solarman_prefix:
+        SOLARMAN_PREFIX = args.solarman_prefix
+    if args.solarman_serial:
+        SOLARMAN_SERIAL = args.solarman_serial
+
+    # Test mode: use different prefix/device to avoid conflicts
+    if args.test:
+        MQTT_PREFIX = "deye_inverter_test"
+        AVAIL_TOPIC = f"{MQTT_PREFIX}/status"
+        DEVICE_ID = "deye_inverter_test"
+        DEVICE_NAME = "Deye Inverter (TEST)"
+        logging.info("TEST MODE: Using prefix '%s' - will create separate HA device", MQTT_PREFIX)
 
     # Connect to Modbus
     modbus = ModbusTcpClient(args.host, port=args.port)

@@ -546,9 +546,11 @@ interval:
               }
 
               // Status bytes start after temp status bytes
+              // Structure: Current(1) + PackVolt(1) + ExtBitCount(1) + ExtBit data
               int status_pos = t_start + num_temps * 2;
+              int ext_bit_start = status_pos + 6;  // Skip Current + PackVolt + Count (3 bytes = 6 hex chars)
 
-              // Byte 0-1: Current/voltage status
+              // Byte 0-1: Current/voltage status (before Ext_Bit section)
               if (status_pos + 2 <= (int)data.length()) {
                 int charge_current = strtol(data.substr(status_pos, 2).c_str(), nullptr, 16);
                 if (charge_current == 0x02) { batt_alarms_set.insert("charge_overcurrent"); all_alarms.insert("charge_overcurrent"); }
@@ -559,11 +561,18 @@ interval:
                 if (module_voltage == 0x02) { batt_alarms_set.insert("pack_overvolt"); all_alarms.insert("pack_overvolt"); }
               }
 
-              // Byte 4 (status_pos+8): Voltage status bitfield
+              // ByteIndex 0: Balance On flag (in Ext_Bit section)
+              bool balance_on = false;
+              if (ext_bit_start + 2 <= (int)data.length()) {
+                int balance_status = strtol(data.substr(ext_bit_start, 2).c_str(), nullptr, 16);
+                balance_on = (balance_status & 0x01) != 0;
+              }
+
+              // ByteIndex 4 (ext_bit_start+8): Voltage status bitfield
               // bit0=CellOV_Alarm, bit1=CellOV_Protect, bit2=CellUV_Alarm, bit3=CellUV_Protect
               // bit4=PackOV_Alarm, bit5=PackOV_Protect, bit6=PackUV_Alarm, bit7=PackUV_Protect
-              if (status_pos + 10 <= (int)data.length()) {
-                int voltage_status = strtol(data.substr(status_pos + 8, 2).c_str(), nullptr, 16);
+              if (ext_bit_start + 10 <= (int)data.length()) {
+                int voltage_status = strtol(data.substr(ext_bit_start + 8, 2).c_str(), nullptr, 16);
                 // Warnings (informational - normal at 100% SOC)
                 if (voltage_status & 0x01) batt_warnings_set.insert("cell_overvolt_alarm");
                 if (voltage_status & 0x02) batt_warnings_set.insert("cell_overvolt_protect");
@@ -576,13 +585,14 @@ interval:
                 if (voltage_status & 0x80) { batt_alarms_set.insert("pack_undervolt_protect"); all_alarms.insert("pack_undervolt_protect"); }
               }
 
-              // ByteIndex 9-10 (status_pos+18): Individual cell balance flags
+              // ByteIndex 9-10 (ext_bit_start+18): Individual cell balance flags
               // ByteIndex 9: Balance1-8 (bit0=cell1...bit7=cell8)
               // ByteIndex 10: Balance9-16 (bit0=cell9...bit7=cell16)
+              // Only count balancing cells if Balance On flag is set
               int balancing = 0;
-              if (status_pos + 22 <= (int)data.length()) {
-                int balance1_8 = strtol(data.substr(status_pos + 18, 2).c_str(), nullptr, 16);
-                int balance9_16 = strtol(data.substr(status_pos + 20, 2).c_str(), nullptr, 16);
+              if (balance_on && ext_bit_start + 22 <= (int)data.length()) {
+                int balance1_8 = strtol(data.substr(ext_bit_start + 18, 2).c_str(), nullptr, 16);
+                int balance9_16 = strtol(data.substr(ext_bit_start + 20, 2).c_str(), nullptr, 16);
                 for (int bit = 0; bit < 8; bit++) {
                   if (balance1_8 & (1 << bit)) balancing++;
                   if (balance9_16 & (1 << bit)) balancing++;
@@ -591,10 +601,10 @@ interval:
               id(batt_balancing_count)[batt] = balancing;
               total_balancing += balancing;
 
-              // ByteIndex 11 (status_pos+22): MOSFET status
+              // ByteIndex 8 (ext_bit_start+16): MOSFET status
               // bit0=DISCHG_MOSFET, bit1=CHG_MOSFET, bit2=LMCHG_MOSFET
-              if (status_pos + 24 <= (int)data.length()) {
-                int mosfet_status = strtol(data.substr(status_pos + 22, 2).c_str(), nullptr, 16);
+              if (ext_bit_start + 18 <= (int)data.length()) {
+                int mosfet_status = strtol(data.substr(ext_bit_start + 16, 2).c_str(), nullptr, 16);
                 id(batt_discharge_mosfet)[batt] = (mosfet_status & 0x01) != 0;
                 id(batt_charge_mosfet)[batt] = (mosfet_status & 0x02) != 0;
                 id(batt_lmcharge_mosfet)[batt] = (mosfet_status & 0x04) != 0;

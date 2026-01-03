@@ -63,6 +63,10 @@ VOLT_HYST_V = 0.002  # 2mV hysteresis for cell voltages
 _mqtt_client = None
 _running = True
 
+# Debug log state tracking (for --debug-log)
+_debug_log_file = None
+_prev_state = {}  # {batt_id: {'balancing': set(), 'overvolt': set(), 'state': str}}
+
 
 def calc_chksum(frame_content: str) -> str:
     """Calculate Pylontech frame checksum."""
@@ -186,7 +190,8 @@ def decode_alarm_response(data_hex: str) -> dict:
         'warnings': [],      # Informational (normal at 100% SOC)
         'protections': [],   # Active protection events
         'alarms': [],        # Only real problems (protections)
-        'status': {}
+        'status': {},
+        'debug': {}  # Raw data for debugging
     }
 
     if len(data_hex) < 10:
@@ -236,6 +241,21 @@ def decode_alarm_response(data_hex: str) -> dict:
         # Last byte = operating state (1=Discharge, 2=Charge, 4=Float, 8=Full)
         status_pos = temp_start + num_temps * 2
 
+        # The status section structure is:
+        # - 2 bytes: Current status, Pack Voltage status (GB_Byte block)
+        # - 1 byte: Ext_Bit count field (NumFieldEnable=True)
+        # - N bytes: Ext_Bit status data where ByteIndex 0 is at offset +6
+        ext_bit_start = status_pos + 6  # Skip Current(1) + PackVolt(1) + Count(1) = 3 bytes = 6 hex chars
+
+        # Debug: capture raw status bytes
+        status_hex = data_hex[status_pos:]
+        result['debug']['status_pos'] = status_pos
+        result['debug']['ext_bit_start'] = ext_bit_start
+        result['debug']['status_hex'] = status_hex
+        result['debug']['ext_bit_hex'] = data_hex[ext_bit_start:] if ext_bit_start < len(data_hex) else ""
+        result['debug']['status_len'] = len(status_hex) // 2
+        result['debug']['full_data_hex'] = data_hex
+
         # Bytes 0-1: Current/voltage status (0=normal, 1=below, 2=above)
         if status_pos + 2 <= len(data_hex):
             charge_current = int(data_hex[status_pos:status_pos+2], 16)
@@ -251,19 +271,19 @@ def decode_alarm_response(data_hex: str) -> dict:
 
         # ByteIndex 0: Balance status flags
         # bit0=Balance On, bit1=Static Balance, bit2=Static Balance Timeout
-        if status_pos + 2 <= len(data_hex):
-            balance_status = int(data_hex[status_pos:status_pos+2], 16)
+        if ext_bit_start + 2 <= len(data_hex):
+            balance_status = int(data_hex[ext_bit_start:ext_bit_start+2], 16)
             result['status']['balance_status'] = balance_status
             if balance_status & 0x01:
                 result['status']['balance_on'] = True
             if balance_status & 0x02:
                 result['status']['static_balance'] = True
 
-        # Byte 4 is voltage status bitfield
+        # ByteIndex 4 is voltage status bitfield
         # Layout: bit0=CellOV_Alarm, bit1=CellOV_Protect, bit2=CellUV_Alarm, bit3=CellUV_Protect,
         #         bit4=PackOV_Alarm, bit5=PackOV_Protect, bit6=PackUV_Alarm, bit7=PackUV_Protect
-        if status_pos + 10 <= len(data_hex):
-            voltage_status = int(data_hex[status_pos+8:status_pos+10], 16)
+        if ext_bit_start + 10 <= len(data_hex):
+            voltage_status = int(data_hex[ext_bit_start+8:ext_bit_start+10], 16)
             result['status']['voltage_raw'] = voltage_status
 
             # These are informational - normal during charging
@@ -286,10 +306,10 @@ def decode_alarm_response(data_hex: str) -> dict:
             if voltage_status & 0x80:
                 result['protections'].append('pack_undervolt_protect')
 
-        # MOSFET status appears to be at offset 11 in status bytes (not ByteIndex 8 as in XML)
+        # ByteIndex 8: MOSFET status
         # bit0=DISCHG_MOSFET On, bit1=CHG_MOSFET On, bit2=LMCHG_MOSFET On, bit3=Heat_MOSFET On
-        if status_pos + 24 <= len(data_hex):
-            mosfet_status = int(data_hex[status_pos+22:status_pos+24], 16)
+        if ext_bit_start + 18 <= len(data_hex):
+            mosfet_status = int(data_hex[ext_bit_start+16:ext_bit_start+18], 16)
             result['status']['mosfet_raw'] = mosfet_status
             result['status']['discharge_mosfet_on'] = bool(mosfet_status & 0x01)
             result['status']['charge_mosfet_on'] = bool(mosfet_status & 0x02)
@@ -297,20 +317,47 @@ def decode_alarm_response(data_hex: str) -> dict:
             # If both charge and discharge MOSFETs are off, battery is isolated from bus
             result['status']['isolated'] = (mosfet_status & 0x03) == 0
 
-        # ByteIndex 9-10: Individual cell balance flags
+        # ByteIndex 9-10: Individual cell balance flags (per XML spec)
         # ByteIndex 9: Balance1-8 (bit0=cell1, bit7=cell8)
         # ByteIndex 10: Balance9-16 (bit0=cell9, bit7=cell16)
-        if status_pos + 22 <= len(data_hex):  # Need to reach ByteIndex 10
-            balance1_8 = int(data_hex[status_pos+18:status_pos+20], 16)
-            balance9_16 = int(data_hex[status_pos+20:status_pos+22], 16)
+        if ext_bit_start + 22 <= len(data_hex):  # Need to reach ByteIndex 10
+            balance1_8 = int(data_hex[ext_bit_start+18:ext_bit_start+20], 16)
+            balance9_16 = int(data_hex[ext_bit_start+20:ext_bit_start+22], 16)
             result['status']['balance1_8_raw'] = balance1_8
             result['status']['balance9_16_raw'] = balance9_16
 
+            # Only report balancing cells if Balance On flag is set
+            if result['status'].get('balance_on'):
+                for bit in range(8):
+                    if balance1_8 & (1 << bit):
+                        result['balancing_cells'].append(bit + 1)
+                    if balance9_16 & (1 << bit):
+                        result['balancing_cells'].append(bit + 9)
+
+        # CW flag detection - read from OLD position (status_pos+18) which correlated with CW=Y on display
+        # This appears to be a cell warning/balancing indicator that differs from the XML-spec ByteIndex 9
+        if status_pos + 22 <= len(data_hex):
+            cw_byte1 = int(data_hex[status_pos+18:status_pos+20], 16)
+            cw_byte2 = int(data_hex[status_pos+20:status_pos+22], 16)
+            result['status']['cw_raw'] = (cw_byte1, cw_byte2)
+            # CW=Y if any bits are set
+            result['status']['cw_active'] = (cw_byte1 != 0) or (cw_byte2 != 0)
+            # Decode which cells have CW flag
+            cw_cells = []
             for bit in range(8):
-                if balance1_8 & (1 << bit):
-                    result['balancing_cells'].append(bit + 1)
-                if balance9_16 & (1 << bit):
-                    result['balancing_cells'].append(bit + 9)
+                if cw_byte1 & (1 << bit):
+                    cw_cells.append(bit + 1)
+                if cw_byte2 & (1 << bit):
+                    cw_cells.append(bit + 9)
+            result['status']['cw_cells'] = cw_cells
+
+        # Raw status bytes for correlation with display
+        # Store key bytes with their positions for debugging
+        result['status']['raw_bytes'] = {}
+        status_hex_bytes = data_hex[status_pos:]
+        for i in range(min(16, len(status_hex_bytes) // 2)):
+            byte_val = int(status_hex_bytes[i*2:i*2+2], 16)
+            result['status']['raw_bytes'][i] = byte_val
 
         # Operating state from last byte (from XML modeText)
         # 0x01=Discharge, 0x02=Charge, 0x04=Float, 0x08=Full, 0x10=Standby, 0x20=Shutdown
@@ -661,6 +708,7 @@ def read_all_batteries(port: str = RS485_PORT, baud: int = RS485_BAUD,
                 batt_data['warnings'] = alarm_data.get('warnings', [])
                 batt_data['alarms'] = alarm_data.get('alarms', [])
                 batt_data['status'] = alarm_data.get('status', {})
+                batt_data['debug'] = alarm_data.get('debug', {})
 
                 # Collect for stack summary
                 for cell in batt_data['balancing_cells']:
@@ -751,6 +799,22 @@ def print_report(data: dict):
                 flags.append('StaticBalance')
             print(f"    Balance: {', '.join(flags)}")
 
+        # Show CW flag (Cell Warning - correlates with CW=Y on display)
+        cw_raw = status.get('cw_raw', (0, 0))
+        if status.get('cw_active'):
+            cw_cells = status.get('cw_cells', [])
+            print(f"    CW=Y: cells {cw_cells} (raw: 0x{cw_raw[0]:02X} 0x{cw_raw[1]:02X})")
+        elif cw_raw:
+            print(f"    CW=N (raw: 0x{cw_raw[0]:02X} 0x{cw_raw[1]:02X})")
+
+        # Show raw status bytes for correlation with display
+        raw_bytes = status.get('raw_bytes', {})
+        if raw_bytes:
+            byte_str = ' '.join(f'{raw_bytes.get(i, 0):02X}' for i in range(min(16, len(raw_bytes))))
+            print(f"    Raw status: [{byte_str}]")
+            # Label key positions
+            print(f"    Positions: [0-1:Cur/Volt 2:ExtCnt 3-5:ExtBit0-2 9:CW1 10:CW2 11:? 12-13:? 14:State]")
+
         # Show alarms if any (actual problems)
         if batt.get('alarms'):
             print(f"    ⚠️  ALARMS: {', '.join(batt['alarms'])}")
@@ -776,6 +840,82 @@ def print_report(data: dict):
             print(f"  ⚠️  ALARMS: {', '.join(s['alarms'])}")
 
     print("=" * 70)
+
+
+def write_debug_log(data: dict):
+    """Write change-based debug log for balancing/OV flags and state transitions."""
+    global _prev_state, _debug_log_file
+
+    if not _debug_log_file:
+        return
+
+    timestamp = data.get('timestamp', time.strftime('%Y-%m-%d %H:%M:%S'))
+    lines = []
+
+    for batt in data.get('batteries', []):
+        batt_id = batt['id']
+        cells = batt.get('cells', [])
+
+        # Current state
+        curr_bal = set(batt.get('balancing_cells', []))
+        curr_ov = set(batt.get('overvolt_cells', []))
+        curr_state = batt.get('status', {}).get('state', 'Unknown')
+
+        # Previous state (initialize if first time - log initial state)
+        if batt_id not in _prev_state:
+            _prev_state[batt_id] = {'balancing': set(), 'overvolt': set(), 'state': ''}
+            # Log initial state on first poll
+            init_parts = [f"STATE={curr_state}"]
+            if curr_bal:
+                cell_info = ','.join(f"C{c}={cells[c-1]:.3f}V" for c in sorted(curr_bal) if c <= len(cells))
+                init_parts.append(f"BAL[{cell_info}]")
+            if curr_ov:
+                cell_info = ','.join(f"C{c}={cells[c-1]:.3f}V" for c in sorted(curr_ov) if c <= len(cells))
+                init_parts.append(f"OV[{cell_info}]")
+            lines.append(f"{timestamp} B{batt_id} INIT  {' '.join(init_parts)}")
+
+        prev = _prev_state[batt_id]
+
+        # Check for balancing changes
+        bal_added = curr_bal - prev['balancing']
+        bal_removed = prev['balancing'] - curr_bal
+
+        if bal_added:
+            cell_info = ' '.join(f"C{c}={cells[c-1]:.3f}V" for c in sorted(bal_added) if c <= len(cells))
+            lines.append(f"{timestamp} B{batt_id} BAL+ {cell_info}")
+
+        if bal_removed:
+            cell_info = ' '.join(f"C{c}={cells[c-1]:.3f}V" for c in sorted(bal_removed) if c <= len(cells))
+            lines.append(f"{timestamp} B{batt_id} BAL- {cell_info}")
+
+        # Check for overvolt changes
+        ov_added = curr_ov - prev['overvolt']
+        ov_removed = prev['overvolt'] - curr_ov
+
+        if ov_added:
+            cell_info = ' '.join(f"C{c}={cells[c-1]:.3f}V" for c in sorted(ov_added) if c <= len(cells))
+            lines.append(f"{timestamp} B{batt_id} OV+  {cell_info}")
+
+        if ov_removed:
+            cell_info = ' '.join(f"C{c}={cells[c-1]:.3f}V" for c in sorted(ov_removed) if c <= len(cells))
+            lines.append(f"{timestamp} B{batt_id} OV-  {cell_info}")
+
+        # Check for state changes
+        if curr_state != prev['state'] and prev['state']:  # Skip initial empty state
+            lines.append(f"{timestamp} B{batt_id} STATE {prev['state']} -> {curr_state}")
+
+        # Update previous state
+        _prev_state[batt_id] = {'balancing': curr_bal, 'overvolt': curr_ov, 'state': curr_state}
+
+    # Write to log file
+    if lines:
+        try:
+            with open(_debug_log_file, 'a') as f:
+                for line in lines:
+                    f.write(line + '\n')
+                f.flush()
+        except Exception as e:
+            logging.warning("Failed to write debug log: %s", e)
 
 
 def publish_mqtt_data(pub: Publisher, data: dict):
@@ -842,7 +982,14 @@ def main():
     parser.add_argument('--json', action='store_true', help='JSON output')
     parser.add_argument('--mqtt', action='store_true', help='Publish to MQTT with HA discovery')
     parser.add_argument('--quiet', action='store_true', help='Suppress console output (for daemon mode)')
+    parser.add_argument('--debug-log', metavar='FILE', help='Log balancing/OV/state changes to file')
     args = parser.parse_args()
+
+    # Set up debug logging
+    global _debug_log_file
+    if args.debug_log:
+        _debug_log_file = args.debug_log
+        logging.info("Debug logging to: %s", _debug_log_file)
 
     pub = None
 
@@ -911,6 +1058,10 @@ def main():
                 publish_mqtt_data(pub, data)
                 if not args.quiet:
                     logging.info("Published %d batteries to MQTT", len(data.get('batteries', [])))
+
+            # Write debug log (if enabled)
+            if _debug_log_file:
+                write_debug_log(data)
 
             if not args.loop:
                 break
