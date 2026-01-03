@@ -50,6 +50,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   - Format: comma-separated cell numbers (e.g., "3,7,12") or stack format ("B0C3,B1C7")
 - **CW flag MQTT publishing** - Added `cw_active` and `cw_cells` topics
   - New topics: `battery{N}/cw_active`, `battery{N}/cw_cells`
+- **Overvolt cell tracking** - MQTT now publishes which cells are in overvolt state
+  - Per-battery: `battery{N}/overvolt_count`, `battery{N}/overvolt_active`, `battery{N}/overvolt_cells`
+  - Stack-level: `stack/overvolt_count`, `stack/overvolt_active`, `stack/overvolt_cells`
+  - Format matches balancing cells (e.g., "3,7" for battery, "B0C3,B1C7" for stack)
+  - HA discovery for all new sensors
+- **Configurable battery count** - Both Python scripts and ESPHome support variable battery counts
+  - Python: `--batteries N` CLI arg or `NUM_BATTERIES` env var (default: 3)
+  - ESPHome: `num_batteries` substitution in config
 - **Modbus-TCP configurability** - Made `deye_modbus2mqtt.py` fully configurable
   - Environment variables: `MQTT_PREFIX`, `DEVICE_ID`, `DEVICE_NAME`, `DEVICE_MODEL`, `DEVICE_MANUFACTURER`
   - CLI arguments: `--mqtt-prefix`, `--device-id`, `--device-name`, etc.
@@ -62,6 +70,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ### ESPHome
 - Added `balancing_cells` and `stack/balancing_cells` MQTT topics (matching Python)
+- Added overvolt tracking: `overvolt_count`, `overvolt_active`, `overvolt_cells` (per-battery and stack)
+- Self-contained HA discovery - ESPHome now publishes all discovery configs on MQTT connect
+- Fixed hardcoded battery count - now uses `num_batteries` substitution
 - Fixed ESP-IDF compilation issues (replaced Arduino String with snprintf)
 - Added std::set include for alarm/warning handling
 

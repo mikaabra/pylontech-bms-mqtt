@@ -41,6 +41,8 @@ esphome:
           id(batt_cycles).resize(num_batt, 0);
           id(batt_balancing_count).resize(num_batt, 0);
           id(batt_balancing_cells).resize(num_batt, std::string(""));
+          id(batt_overvolt_count).resize(num_batt, 0);
+          id(batt_overvolt_cells).resize(num_batt, std::string(""));
           id(batt_alarms).resize(num_batt, std::string(""));
           id(batt_warnings).resize(num_batt, std::string(""));
           id(batt_state).resize(num_batt, std::string(""));
@@ -113,10 +115,12 @@ mqtt:
           {"stack_temp_max", "Stack Temp Max", "${rs485_prefix}/stack/temp_max", "°C", "temperature"},
           {"stack_balancing_count", "Stack Balancing Cells", "${rs485_prefix}/stack/balancing_count", "", ""},
           {"stack_balancing_cells", "Stack Balancing Cells List", "${rs485_prefix}/stack/balancing_cells", "", ""},
+          {"stack_overvolt_count", "Stack Overvolt Cells", "${rs485_prefix}/stack/overvolt_count", "", ""},
+          {"stack_overvolt_cells", "Stack Overvolt Cells List", "${rs485_prefix}/stack/overvolt_cells", "", ""},
           {"stack_alarms", "Stack Alarms", "${rs485_prefix}/stack/alarms", "", ""},
         };
 
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 12; i++) {
           snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", stack_sensors[i][0]);
           if (strlen(stack_sensors[i][3]) > 0 && strlen(stack_sensors[i][4]) > 0) {
             snprintf(payload, sizeof(payload),
@@ -134,10 +138,16 @@ mqtt:
           id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
         }
 
-        // Stack binary sensor
+        // Stack binary sensors
         snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/stack_balancing_active/config");
         snprintf(payload, sizeof(payload),
           R"({"name":"Stack Balancing Active","state_topic":"${rs485_prefix}/stack/balancing_active","unique_id":"pylontech_rs485_stack_balancing_active","payload_on":"1","payload_off":"0","icon":"mdi:scale-balance",%s,%s})",
+          avail_json, device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/stack_overvolt_active/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"Stack Overvolt Active","state_topic":"${rs485_prefix}/stack/overvolt_active","unique_id":"pylontech_rs485_stack_overvolt_active","payload_on":"1","payload_off":"0","icon":"mdi:flash-alert",%s,%s})",
           avail_json, device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
 
@@ -160,13 +170,15 @@ mqtt:
             {"cycles", "Cycles", "", ""},
             {"balancing_count", "Balancing Cells", "", ""},
             {"balancing_cells", "Balancing Cells List", "", ""},
+            {"overvolt_count", "Overvolt Cells", "", ""},
+            {"overvolt_cells", "Overvolt Cells List", "", ""},
             {"state", "State", "", ""},
             {"warnings", "Warnings", "", ""},
             {"alarms", "Alarms", "", ""},
             {"cw_cells", "CW Cells List", "", ""},
           };
 
-          for (int i = 0; i < 15; i++) {
+          for (int i = 0; i < 17; i++) {
             char obj_id[32], name[48], st[64];
             snprintf(obj_id, sizeof(obj_id), "%s_%s", prefix, batt_sensor_names[i][0]);
             snprintf(name, sizeof(name), "Battery %d %s", batt, batt_sensor_names[i][1]);
@@ -196,13 +208,14 @@ mqtt:
           // Battery binary sensors
           const char* batt_binary_names[][2] = {
             {"balancing_active", "Balancing Active"},
+            {"overvolt_active", "Overvolt Active"},
             {"charge_mosfet", "Charge MOSFET"},
             {"discharge_mosfet", "Discharge MOSFET"},
             {"lmcharge_mosfet", "LM Charge MOSFET"},
             {"cw_active", "Cell Warning"},
           };
 
-          for (int i = 0; i < 5; i++) {
+          for (int i = 0; i < 6; i++) {
             char obj_id[32], name[48], st[64];
             snprintf(obj_id, sizeof(obj_id), "%s_%s", prefix, batt_binary_names[i][0]);
             snprintf(name, sizeof(name), "Battery %d %s", batt, batt_binary_names[i][1]);
@@ -425,6 +438,12 @@ globals:
   - id: batt_balancing_cells
     type: std::vector<std::string>
     restore_value: no
+  - id: batt_overvolt_count
+    type: std::vector<int>
+    restore_value: no
+  - id: batt_overvolt_cells
+    type: std::vector<std::string>
+    restore_value: no
   - id: batt_alarms
     type: std::vector<std::string>
     restore_value: no
@@ -457,6 +476,12 @@ globals:
     type: int
     initial_value: '0'
   - id: stack_balancing_cells
+    type: std::string
+    restore_value: no
+  - id: stack_overvolt_count
+    type: int
+    initial_value: '0'
+  - id: stack_overvolt_cells
     type: std::string
     restore_value: no
   - id: stack_alarms
@@ -652,6 +677,7 @@ interval:
 
           int addr = ${pylontech_addr};
           int total_balancing = 0;
+          int total_overvolt = 0;
           std::set<std::string> all_alarms;
 
           for (int batt = 0; batt < ${num_batteries}; batt++) {
@@ -692,6 +718,8 @@ interval:
             // Note: Balance flags are NOT in per-cell bytes - they're in status bytes 9-10
             std::set<std::string> batt_warnings_set;
             std::set<std::string> batt_alarms_set;
+            int overvolt_count = 0;
+            std::string ov_cells_str;
 
             for (int c = 0; c < num_cells && c < 16; c++) {
               int pos = 6 + c * 2;
@@ -699,9 +727,17 @@ interval:
                 int status = strtol(data.substr(pos, 2).c_str(), nullptr, 16);
                 // Cell undervolt is an alarm, overvolt at 100% SOC is just a warning
                 if (status == 0x01) { batt_alarms_set.insert("cell_undervolt"); all_alarms.insert("cell_undervolt"); }
-                if (status == 0x02) { batt_warnings_set.insert("cell_overvolt"); }
+                if (status == 0x02) {
+                  batt_warnings_set.insert("cell_overvolt");
+                  overvolt_count++;
+                  if (!ov_cells_str.empty()) ov_cells_str += ",";
+                  ov_cells_str += std::to_string(c + 1);
+                }
               }
             }
+            id(batt_overvolt_count)[batt] = overvolt_count;
+            id(batt_overvolt_cells)[batt] = ov_cells_str;
+            total_overvolt += overvolt_count;
 
             // Temperature status
             int temp_pos = 6 + num_cells * 2;
@@ -869,6 +905,32 @@ interval:
           }
           id(stack_balancing_cells) = stack_bal_str;
 
+          // Stack overvolt tracking
+          id(stack_overvolt_count) = total_overvolt;
+
+          // Build stack overvolt cells string (e.g., "B0C3,B1C7")
+          std::string stack_ov_str;
+          for (int b = 0; b < ${num_batteries}; b++) {
+            const std::string& cells = id(batt_overvolt_cells)[b];
+            if (!cells.empty()) {
+              size_t pos = 0;
+              size_t comma_pos;
+              std::string cell_list = cells;
+              while ((comma_pos = cell_list.find(',', pos)) != std::string::npos) {
+                std::string cell = cell_list.substr(pos, comma_pos - pos);
+                if (!stack_ov_str.empty()) stack_ov_str += ",";
+                stack_ov_str += "B" + std::to_string(b) + "C" + cell;
+                pos = comma_pos + 1;
+              }
+              std::string cell = cell_list.substr(pos);
+              if (!cell.empty()) {
+                if (!stack_ov_str.empty()) stack_ov_str += ",";
+                stack_ov_str += "B" + std::to_string(b) + "C" + cell;
+              }
+            }
+          }
+          id(stack_overvolt_cells) = stack_ov_str;
+
           // Build alarm string
           std::string alarm_str;
           for (const auto& a : all_alarms) {
@@ -979,6 +1041,18 @@ interval:
               snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/balancing_cells", batt);
               id(mqtt_client).publish(topic, id(batt_balancing_cells)[batt].c_str());
 
+              // Overvolt
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/overvolt_count", batt);
+              snprintf(payload, sizeof(payload), "%d", id(batt_overvolt_count)[batt]);
+              id(mqtt_client).publish(topic, payload);
+
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/overvolt_active", batt);
+              snprintf(payload, sizeof(payload), "%d", id(batt_overvolt_count)[batt] > 0 ? 1 : 0);
+              id(mqtt_client).publish(topic, payload);
+
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/overvolt_cells", batt);
+              id(mqtt_client).publish(topic, id(batt_overvolt_cells)[batt].c_str());
+
               // State, warnings, alarms
               snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/state", batt);
               id(mqtt_client).publish(topic, id(batt_state)[batt].c_str());
@@ -1057,6 +1131,14 @@ interval:
                 id(stack_balancing_count) > 0 ? "1" : "0");
             id(mqtt_client).publish("${rs485_prefix}/stack/balancing_cells",
                 id(stack_balancing_cells).c_str());
+
+            // Overvolt
+            snprintf(payload, sizeof(payload), "%d", id(stack_overvolt_count));
+            id(mqtt_client).publish("${rs485_prefix}/stack/overvolt_count", payload);
+            id(mqtt_client).publish("${rs485_prefix}/stack/overvolt_active",
+                id(stack_overvolt_count) > 0 ? "1" : "0");
+            id(mqtt_client).publish("${rs485_prefix}/stack/overvolt_cells",
+                id(stack_overvolt_cells).c_str());
 
             // Alarms
             id(mqtt_client).publish("${rs485_prefix}/stack/alarms",
