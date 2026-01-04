@@ -6,8 +6,12 @@ This directory contains the ESPHome configuration to replace both `pylon_can2mqt
 
 - **CAN Bus**: Full decoding of 0x351, 0x355, 0x359, 0x370 frames (passive listen-only mode)
 - **RS485**: Individual cell voltages, temperatures, current, SOC, cycles, alarms, balancing
+- **Per-battery tracking**: Balancing cells, overvolt cells, MOSFET status, warnings, alarms
+- **Stack aggregation**: Min/max voltages, balancing/overvolt counts across all batteries
 - **MQTT Topics**: Identical to Python scripts for seamless migration
-- **Home Assistant**: Works with discovery configs published by Python scripts
+- **Home Assistant**: Publishes HA discovery configs on connect (no Python scripts needed)
+- **Resilient**: Automatic WiFi/MQTT reconnection, stale data detection
+- **Rate limiting**: Hysteresis filters to reduce MQTT traffic (60s heartbeat + delta thresholds)
 
 ## Hardware
 
@@ -186,14 +190,37 @@ If one pair doesn't work, try the other.
 | Topic | Description |
 |-------|-------------|
 | `deye_bms/rs485/status` | online/offline availability |
+| **Stack Topics** | |
 | `deye_bms/rs485/stack/cell_min` | Stack minimum cell voltage |
 | `deye_bms/rs485/stack/cell_max` | Stack maximum cell voltage |
-| `deye_bms/rs485/stack/voltage` | Stack total voltage |
-| `deye_bms/rs485/stack/current` | Stack current |
-| `deye_bms/rs485/batteryN/cellXX` | Individual cell voltages |
+| `deye_bms/rs485/stack/cell_delta_mv` | Stack cell voltage delta (mV) |
+| `deye_bms/rs485/stack/voltage` | Stack average voltage |
+| `deye_bms/rs485/stack/current` | Stack total current |
+| `deye_bms/rs485/stack/temp_min` | Stack minimum temperature |
+| `deye_bms/rs485/stack/temp_max` | Stack maximum temperature |
+| `deye_bms/rs485/stack/balancing_count` | Total cells balancing |
+| `deye_bms/rs485/stack/balancing_active` | 1 if any cell balancing |
+| `deye_bms/rs485/stack/balancing_cells` | List of balancing cells (e.g., "B0C3,B1C7") |
+| `deye_bms/rs485/stack/overvolt_count` | Total cells in overvolt |
+| `deye_bms/rs485/stack/overvolt_active` | 1 if any cell overvolt |
+| `deye_bms/rs485/stack/overvolt_cells` | List of overvolt cells |
+| `deye_bms/rs485/stack/alarms` | Combined alarm list |
+| **Per-Battery Topics** | (N = 0, 1, 2) |
+| `deye_bms/rs485/batteryN/cellXX` | Individual cell voltages (XX = 01-16) |
+| `deye_bms/rs485/batteryN/tempX` | Temperature sensors (X = 1-6) |
+| `deye_bms/rs485/batteryN/voltage` | Battery voltage |
+| `deye_bms/rs485/batteryN/current` | Battery current |
 | `deye_bms/rs485/batteryN/soc` | Battery SOC |
 | `deye_bms/rs485/batteryN/cycles` | Charge cycles |
-| `deye_bms/rs485/batteryN/balancing_cells` | Cells currently balancing |
+| `deye_bms/rs485/batteryN/balancing_count` | Cells balancing in this battery |
+| `deye_bms/rs485/batteryN/balancing_cells` | List of balancing cells (e.g., "3,7") |
+| `deye_bms/rs485/batteryN/overvolt_count` | Cells in overvolt |
+| `deye_bms/rs485/batteryN/overvolt_cells` | List of overvolt cells |
+| `deye_bms/rs485/batteryN/state` | Operating state (Charge, Discharge, etc.) |
+| `deye_bms/rs485/batteryN/warnings` | Warning list |
+| `deye_bms/rs485/batteryN/alarms` | Alarm list |
+| `deye_bms/rs485/batteryN/charge_mosfet` | Charge MOSFET status (1/0) |
+| `deye_bms/rs485/batteryN/discharge_mosfet` | Discharge MOSFET status (1/0) |
 
 ## Migration from Python Scripts
 
@@ -236,7 +263,8 @@ If one pair doesn't work, try the other.
 
 ### RS485 receiving data but error codes
 - Error 03 (CID2 invalid): Check LENID checksum calculation
-- No response from battery 0: Try polling batteries 1, 2, 3 instead of 0, 1, 2
+- Error 07 (ADR error): Battery address doesn't exist
+- No response from a battery: Try resetting that battery's BMS
 
 ### WiFi connection issues
 - Check `secrets.yaml` credentials
@@ -246,3 +274,41 @@ If one pair doesn't work, try the other.
 ### Device crashes or becomes unresponsive
 - Check power supply - USB-C from Pi may be insufficient under load
 - Use external 12V power supply for production deployment
+
+## Production Deployment
+
+### Log Level
+
+The default log level is `WARN` to minimize serial output. To enable debug logging
+for troubleshooting, edit `deye-bms-can.yaml`:
+
+```yaml
+logger:
+  level: DEBUG  # Change from WARN to DEBUG
+```
+
+### Stale Data Detection
+
+The ESP32 monitors data freshness and publishes availability status:
+
+- **CAN**: Publishes `deye_bms/status: offline` if no CAN frames received for 30 seconds
+- **RS485**: Publishes `deye_bms/rs485/status: offline` if no valid responses for 90 seconds
+
+When data resumes, status automatically returns to `online`.
+
+### Rate Limiting (Hysteresis)
+
+To reduce MQTT traffic, sensors use filters:
+- **Heartbeat**: Publish at least every 60 seconds
+- **Delta**: Publish immediately if value changes significantly
+  - SOC/SOH: ±1%
+  - Voltages: ±0.1V (pack) or ±5mV (cell)
+  - Currents: ±1A
+  - Temperatures: ±0.5°C
+
+### Automatic Recovery
+
+ESPHome handles these scenarios automatically:
+- **WiFi disconnect**: Reconnects and resumes operation
+- **MQTT disconnect**: Reconnects and republishes availability/discovery
+- **OTA updates**: Safe mode if boot fails multiple times
