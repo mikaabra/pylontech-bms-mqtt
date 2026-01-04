@@ -83,8 +83,9 @@ Getting this checksum wrong results in error code 03 (CID2 invalid) from the bat
 
 ### Battery Numbering
 
-Batteries may be numbered starting from 1, not 0. If battery 0 doesn't respond but
-batteries 1 and 2 do, check the `pylontech_addr` and battery iteration in the config.
+Battery numbers in the INFO field are **0-based** (0, 1, 2), matching the Python script.
+If a battery doesn't respond, try resetting the BMS - it may have entered a bad state
+from previous RS485 communication attempts.
 
 ## Before First Flash
 
