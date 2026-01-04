@@ -3,7 +3,7 @@
 #
 # Hardware: Waveshare ESP32-S3-RS485-CAN
 # CAN pins: TX=GPIO15, RX=GPIO16 (500kbps Pylontech protocol)
-# RS485 pins: TX=GPIO17, RX=GPIO18 (9600 baud Pylontech protocol)
+# RS485 pins: TX=GPIO17, RX=GPIO18, EN=GPIO21 (9600 baud Pylontech protocol)
 #
 # MQTT topics match Python scripts exactly for seamless migration.
 # Run Python scripts once to publish HA discovery configs, then switch to ESP32.
@@ -276,6 +276,12 @@ uart:
   stop_bits: 1
   parity: NONE
 
+# RS485 direction control (active high = transmit)
+output:
+  - platform: gpio
+    id: rs485_en
+    pin: GPIO21
+
 # CAN bus configuration
 canbus:
   - platform: esp32_can
@@ -545,10 +551,16 @@ interval:
             id(rs485_uart).read_byte(&c);
           }
 
+          // Enable RS485 transmit
+          id(rs485_en).turn_on();
+
           for (char c : cmd) {
             id(rs485_uart).write_byte((uint8_t)c);
           }
           id(rs485_uart).flush();
+
+          // Disable RS485 transmit (back to receive mode)
+          id(rs485_en).turn_off();
 
           id(rs485_poll_battery) = (batt + 1) % ${num_batteries};
 
@@ -689,10 +701,17 @@ interval:
 
             // Send alarm request (CID2=0x44)
             std::string cmd = make_cmd(addr, 0x44, batt);
+
+            // Enable RS485 transmit
+            id(rs485_en).turn_on();
+
             for (char c : cmd) {
               id(rs485_uart).write_byte((uint8_t)c);
             }
             id(rs485_uart).flush();
+
+            // Disable RS485 transmit (back to receive mode)
+            id(rs485_en).turn_off();
 
             delay(300);
 
