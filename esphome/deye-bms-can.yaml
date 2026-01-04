@@ -65,7 +65,7 @@ esp32:
     type: esp-idf
 
 logger:
-  level: INFO
+  level: DEBUG
 
 wifi:
   ssid: !secret wifi_ssid
@@ -282,12 +282,10 @@ uart:
   data_bits: 8
   stop_bits: 1
   parity: NONE
+  # Hardware RS485 half-duplex direction control
+  flow_control_pin: GPIO21
 
-# RS485 direction control (active high = transmit)
-output:
-  - platform: gpio
-    id: rs485_en
-    pin: GPIO21
+# RS485 direction control now handled by UART flow_control_pin
 
 # CAN bus configuration (listen-only mode - no ACKs sent)
 canbus:
@@ -417,6 +415,17 @@ globals:
     type: int
     initial_value: '0'
 
+  # RS485 EN polarity auto-detection
+  - id: rs485_en_high_for_tx
+    type: bool
+    initial_value: 'true'  # Start with HIGH=transmit
+  - id: rs485_fail_count
+    type: int
+    initial_value: '0'
+  - id: rs485_polarity_locked
+    type: bool
+    initial_value: 'false'
+
   # Cell voltages: 3 batteries x 16 cells = 48
   - id: cell_voltages
     type: std::vector<float>
@@ -534,10 +543,12 @@ interval:
             char frame[32];
             char info[3];
             snprintf(info, sizeof(info), "%02X", batt_num);
-            int info_len = 1;
-            int lchksum = (~(0 + 0 + info_len) + 1) & 0xF;
+            int info_hex_len = 2;  // 1 byte = 2 hex chars
+            // LENID checksum: sum of hex digits of length field (e.g., "002" -> 0+0+2=2)
+            int len_digit_sum = (info_hex_len / 256) + ((info_hex_len / 16) % 16) + (info_hex_len % 16);
+            int lchksum = (~len_digit_sum + 1) & 0xF;
             char lenid[5];
-            snprintf(lenid, sizeof(lenid), "%X%03X", lchksum, info_len * 2);
+            snprintf(lenid, sizeof(lenid), "%X%03X", lchksum, info_hex_len);
             snprintf(frame, sizeof(frame), "20%02X46%02X%s%s", addr, cid2, lenid, info);
             std::string result = "~";
             result += frame;
@@ -559,16 +570,22 @@ interval:
             id(rs485_uart).read_byte(&c);
           }
 
-          // Enable RS485 transmit
-          id(rs485_en).turn_on();
+          // Try without manual EN control - Waveshare may have auto direction
+          // Uncomment below to enable manual control if needed
+          // if (id(rs485_en_high_for_tx)) { id(rs485_en).turn_on(); } else { id(rs485_en).turn_off(); }
+
+          ESP_LOGD("rs485", "TX (auto-EN): %s", cmd.c_str());
 
           for (char c : cmd) {
             id(rs485_uart).write_byte((uint8_t)c);
           }
           id(rs485_uart).flush();
 
-          // Disable RS485 transmit (back to receive mode)
-          id(rs485_en).turn_off();
+          // Wait for transmission to complete (at 9600 baud, ~1ms per byte)
+          delay(20);
+
+          // No manual EN control - let hardware handle direction
+          // if (id(rs485_en_high_for_tx)) { id(rs485_en).turn_off(); } else { id(rs485_en).turn_on(); }
 
           id(rs485_poll_battery) = (batt + 1) % ${num_batteries};
 
@@ -583,9 +600,29 @@ interval:
             response += (char)c;
           }
 
+          ESP_LOGD("rs485", "RX len=%d: %s", response.length(), response.c_str());
+
           if (response.length() < 18 || response.substr(7, 2) != "00") {
-            ESP_LOGW("rs485", "Analog response error");
+            ESP_LOGW("rs485", "Analog response error (len=%d, code=%s)", response.length(),
+                     response.length() >= 9 ? response.substr(7, 2).c_str() : "?");
+
+            // Auto-detection: if not locked, try flipping polarity after failures
+            if (!id(rs485_polarity_locked)) {
+              id(rs485_fail_count)++;
+              if (id(rs485_fail_count) >= 6) {  // After 6 failures (2 full cycles), flip polarity
+                id(rs485_en_high_for_tx) = !id(rs485_en_high_for_tx);
+                id(rs485_fail_count) = 0;
+                ESP_LOGW("rs485", "Flipping EN polarity to %s", id(rs485_en_high_for_tx) ? "HIGH" : "LOW");
+              }
+            }
             return;
+          }
+
+          // Success! Lock in the polarity
+          if (!id(rs485_polarity_locked)) {
+            id(rs485_polarity_locked) = true;
+            id(rs485_fail_count) = 0;
+            ESP_LOGI("rs485", "Polarity locked: EN=%s for TX", id(rs485_en_high_for_tx) ? "HIGH" : "LOW");
           }
 
           // Extract INFO data
@@ -683,10 +720,12 @@ interval:
             char frame[32];
             char info[3];
             snprintf(info, sizeof(info), "%02X", batt_num);
-            int info_len = 1;
-            int lchksum = (~(0 + 0 + info_len) + 1) & 0xF;
+            int info_hex_len = 2;  // 1 byte = 2 hex chars
+            // LENID checksum: sum of hex digits of length field (e.g., "002" -> 0+0+2=2)
+            int len_digit_sum = (info_hex_len / 256) + ((info_hex_len / 16) % 16) + (info_hex_len % 16);
+            int lchksum = (~len_digit_sum + 1) & 0xF;
             char lenid[5];
-            snprintf(lenid, sizeof(lenid), "%X%03X", lchksum, info_len * 2);
+            snprintf(lenid, sizeof(lenid), "%X%03X", lchksum, info_hex_len);
             snprintf(frame, sizeof(frame), "20%02X46%02X%s%s", addr, cid2, lenid, info);
             std::string result = "~";
             result += frame;
@@ -710,16 +749,15 @@ interval:
             // Send alarm request (CID2=0x44)
             std::string cmd = make_cmd(addr, 0x44, batt);
 
-            // Enable RS485 transmit
-            id(rs485_en).turn_on();
+            // No manual EN control - let hardware handle direction
 
             for (char c : cmd) {
               id(rs485_uart).write_byte((uint8_t)c);
             }
             id(rs485_uart).flush();
 
-            // Disable RS485 transmit (back to receive mode)
-            id(rs485_en).turn_off();
+            // Wait for transmission to complete (at 9600 baud, ~1ms per byte)
+            delay(20);
 
             delay(300);
 
