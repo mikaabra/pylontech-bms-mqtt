@@ -65,7 +65,7 @@ esp32:
     type: esp-idf
 
 logger:
-  level: DEBUG
+  level: WARN  # Change to DEBUG for troubleshooting
 
 wifi:
   ssid: !secret wifi_ssid
@@ -354,9 +354,19 @@ canbus:
               for (int i = 7; i >= 0; i--) {
                 flags = (flags << 8) | x[i];
               }
-              char buf[32];
-              snprintf(buf, sizeof(buf), "0x%016llX", flags);
-              id(sensor_flags).publish_state(buf);
+
+              // Hysteresis: only publish if flags changed OR 60s passed
+              uint32_t now = millis();
+              bool changed = (flags != id(last_flags_value));
+              bool heartbeat = (now - id(last_flags_publish) >= 60000);
+
+              if (changed || heartbeat) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "0x%016llX", flags);
+                id(sensor_flags).publish_state(buf);
+                id(last_flags_value) = flags;
+                id(last_flags_publish) = now;
+              }
 
       # 0x370: Temperature and cell voltage extremes
       - can_id: 0x370
@@ -409,6 +419,22 @@ globals:
   - id: can_stale
     type: bool
     initial_value: 'false'
+
+  # Flags hysteresis (text_sensor doesn't support filters)
+  - id: last_flags_value
+    type: uint64_t
+    initial_value: '0'
+  - id: last_flags_publish
+    type: uint32_t
+    initial_value: '0'
+
+  # RS485 stale detection
+  - id: last_rs485_rx
+    type: uint32_t
+    initial_value: '0'
+  - id: rs485_stale
+    type: bool
+    initial_value: 'true'  # Start as stale until first successful receive
 
   # RS485 polling state
   - id: rs485_poll_battery
@@ -525,11 +551,22 @@ interval:
             id(mqtt_client).publish(std::string("${can_prefix}/status"), std::string("offline"), (uint8_t)0, true);
           }
 
-  # RS485 availability - periodically republish to ensure HA knows we're online
-  - interval: 60s
+  # RS485 stale detection and availability
+  - interval: 30s
     then:
       - lambda: |-
-          id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
+          uint32_t now = millis();
+          uint32_t elapsed = now - id(last_rs485_rx);
+          // Mark stale if no data for 90s (3 full polling cycles)
+          if (elapsed > 90000 && !id(rs485_stale) && id(last_rs485_rx) > 0) {
+            id(rs485_stale) = true;
+            ESP_LOGW("rs485", "No RS485 data for 90s, marking stale");
+            id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("offline"), (uint8_t)0, true);
+          }
+          // Republish current status periodically
+          if (!id(rs485_stale)) {
+            id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
+          }
 
   # RS485 analog data polling - cycle through batteries
   - interval: 10s
@@ -625,7 +662,13 @@ interval:
             return;
           }
 
-          // Success! Lock in the polarity
+          // Success! Lock in the polarity and mark as not stale
+          id(last_rs485_rx) = millis();
+          if (id(rs485_stale)) {
+            id(rs485_stale) = false;
+            id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
+            ESP_LOGI("rs485", "RS485 data received, marking online");
+          }
           if (!id(rs485_polarity_locked)) {
             id(rs485_polarity_locked) = true;
             id(rs485_fail_count) = 0;
