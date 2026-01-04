@@ -525,6 +525,12 @@ interval:
             id(mqtt_client).publish(std::string("${can_prefix}/status"), std::string("offline"), (uint8_t)0, true);
           }
 
+  # RS485 availability - periodically republish to ensure HA knows we're online
+  - interval: 60s
+    then:
+      - lambda: |-
+          id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
+
   # RS485 analog data polling - cycle through batteries
   - interval: 10s
     then:
@@ -1215,6 +1221,7 @@ interval:
           ESP_LOGI("mqtt", "Published RS485 data for %d batteries", ${num_batteries});
 
 # CAN sensors - publish to topics matching Python script
+# Filters: publish every 60s OR immediately if value changes significantly
 sensor:
   - platform: template
     id: sensor_soc
@@ -1223,6 +1230,10 @@ sensor:
     accuracy_decimals: 0
     icon: "mdi:battery"
     state_topic: ${can_prefix}/soc
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 1.0
 
   - platform: template
     id: sensor_soh
@@ -1231,6 +1242,10 @@ sensor:
     accuracy_decimals: 0
     icon: "mdi:battery-heart"
     state_topic: ${can_prefix}/soh
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 1.0
 
   - platform: template
     id: sensor_v_charge_max
@@ -1239,6 +1254,10 @@ sensor:
     device_class: voltage
     accuracy_decimals: 1
     state_topic: ${can_prefix}/limit/v_charge_max
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.1
 
   - platform: template
     id: sensor_v_low
@@ -1247,6 +1266,10 @@ sensor:
     device_class: voltage
     accuracy_decimals: 1
     state_topic: ${can_prefix}/limit/v_low
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.1
 
   - platform: template
     id: sensor_i_charge
@@ -1255,6 +1278,10 @@ sensor:
     device_class: current
     accuracy_decimals: 1
     state_topic: ${can_prefix}/limit/i_charge
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 1.0
 
   - platform: template
     id: sensor_i_discharge
@@ -1263,6 +1290,10 @@ sensor:
     device_class: current
     accuracy_decimals: 1
     state_topic: ${can_prefix}/limit/i_discharge
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 1.0
 
   - platform: template
     id: sensor_cell_v_min
@@ -1271,6 +1302,10 @@ sensor:
     device_class: voltage
     accuracy_decimals: 3
     state_topic: ${can_prefix}/ext/cell_v_min
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.005
 
   - platform: template
     id: sensor_cell_v_max
@@ -1279,6 +1314,10 @@ sensor:
     device_class: voltage
     accuracy_decimals: 3
     state_topic: ${can_prefix}/ext/cell_v_max
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.005
 
   - platform: template
     id: sensor_cell_v_delta
@@ -1287,6 +1326,10 @@ sensor:
     accuracy_decimals: 3
     icon: "mdi:chart-bell-curve-cumulative"
     state_topic: ${can_prefix}/ext/cell_v_delta
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.002
 
   - platform: template
     id: sensor_temp_min
@@ -1295,6 +1338,10 @@ sensor:
     device_class: temperature
     accuracy_decimals: 1
     state_topic: ${can_prefix}/ext/temp_min
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.5
 
   - platform: template
     id: sensor_temp_max
@@ -1303,6 +1350,10 @@ sensor:
     device_class: temperature
     accuracy_decimals: 1
     state_topic: ${can_prefix}/ext/temp_max
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.5
 
   - platform: wifi_signal
     name: "WiFi Signal"
