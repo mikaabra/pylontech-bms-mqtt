@@ -2,7 +2,11 @@
 
 This document contains all information needed to transition from the Raspberry Pi to the Waveshare ESP32-S3-RS485-CAN board for the Deye BMS monitoring.
 
-## Current Setup (Raspberry Pi)
+> **Status: COMPLETE** ✅
+> The ESP32 transition has been successfully completed. The ESP32 is now running in production,
+> replacing both `pylon_can2mqtt.py` and `pylon_rs485_monitor.py`.
+
+## Previous Setup (Raspberry Pi)
 
 ### Hardware
 - Raspberry Pi 4
@@ -27,9 +31,9 @@ This document contains all information needed to transition from the Raspberry P
 ## Target Setup (ESP32-S3-RS485-CAN)
 
 ### Hardware: Waveshare ESP32-S3-RS485-CAN
-- CAN: TX=GPIO15, RX=GPIO16, 500kbps
-- RS485: TX=GPIO17, RX=GPIO18, 115200 baud
-- Power: USB-C or 5V
+- CAN: TX=GPIO15, RX=GPIO16, 500kbps, **listen-only mode**
+- RS485: TX=GPIO17, RX=GPIO18, DE/RE=GPIO21, 9600 baud
+- Power: USB-C or 12V barrel jack (12V recommended for production)
 
 ### Wiring
 
@@ -54,6 +58,52 @@ substitutions:
   num_batteries: "3"
   pylontech_addr: "2"
 ```
+
+---
+
+## Critical Implementation Notes
+
+These issues were discovered during the transition and are **essential** for successful operation:
+
+### 1. CAN Bus Listen-Only Mode
+
+The ESP32 **must** operate in listen-only mode to avoid interfering with BMS-to-inverter communication.
+Standard ESPHome `esp32_can` doesn't support this - use the custom `esp32_can_listen` component.
+
+Without listen-only mode, the ESP32 sends ACK signals that can cause the inverter to behave erratically.
+
+### 2. RS485 Hardware Flow Control
+
+The Waveshare board requires **hardware flow control** for RS485. Manual GPIO toggling does NOT work.
+
+```yaml
+uart:
+  tx_pin: GPIO17
+  rx_pin: GPIO18
+  baud_rate: 9600
+  flow_control_pin: GPIO21  # REQUIRED - automatic RS485 direction control
+```
+
+### 3. Pylontech LENID Checksum
+
+The RS485 protocol uses a specific checksum for the LENID field:
+```
+LENID = LCHKSUM + LENGTH (4 hex chars)
+LCHKSUM = (~(sum of hex digits of LENGTH) + 1) & 0xF
+```
+
+Example for INFO length of 2 hex chars: LENID = "E002" (not "F002")
+
+Error code 03 from battery = checksum error in request.
+
+### 4. Battery Numbering
+
+Battery numbers in the RS485 INFO field are **0-based** (0, 1, 2), matching the Python script.
+
+### 5. Termination Resistors
+
+- **CAN**: Leave 120Ω jumper OFF (you're tapping an existing terminated bus)
+- **RS485**: Leave 120Ω jumper OFF (improved reliability in testing)
 
 ---
 
@@ -133,7 +183,7 @@ Both Python and ESPHome implementations have been verified to include:
 | 0x359 | Flags | ✓ | ✓ |
 | 0x370 | Cell/temp extremes | ✓ | ✓ |
 
-### RS485 (115200 baud)
+### RS485 (9600 baud)
 | Feature | Python | ESPHome |
 |---------|--------|---------|
 | Cell voltages (16 per battery) | ✓ | ✓ |
@@ -148,10 +198,23 @@ Both Python and ESPHome implementations have been verified to include:
 | Warnings/alarms | ✓ | ✓ |
 | CW flag (status_pos+18) | ✓ | ✓ |
 | Stack totals | ✓ | ✓ |
+| Overvolt tracking | ✓ | ✓ |
+| HA Discovery auto-publish | - | ✓ |
+
+### Production Features (ESPHome)
+| Feature | Status |
+|---------|--------|
+| Hysteresis/rate limiting | ✓ (60s heartbeat + delta) |
+| CAN stale detection | ✓ (30s timeout → offline) |
+| RS485 stale detection | ✓ (90s timeout → offline) |
+| WiFi auto-reconnect | ✓ (ESPHome built-in) |
+| MQTT auto-reconnect | ✓ (ESPHome built-in) |
+| OTA updates | ✓ |
+| Web interface | ✓ (port 80) |
 
 ### Debug Logging
 - Python: `--debug-log` writes to file
-- ESPHome: No equivalent (would need custom logging component)
+- ESPHome: Change `logger: level: DEBUG` in YAML (default: WARN)
 
 ---
 
@@ -168,9 +231,12 @@ Both Python and ESPHome implementations have been verified to include:
 3. Look for CAN RX LED activity on board
 
 ### No RS485 Data
-1. Verify A/B wiring (try swapping if reversed)
-2. Check baud rate (115200)
-3. Verify Pylontech address (default 2)
+1. Verify `flow_control_pin: GPIO21` is set in UART config
+2. Verify A/B wiring (try swapping if reversed)
+3. Check baud rate is 9600
+4. Verify Pylontech address (default 2)
+5. Try disabling 120Ω termination resistor
+6. If battery doesn't respond, reset its BMS
 
 ### MQTT Not Publishing
 1. Check broker connectivity

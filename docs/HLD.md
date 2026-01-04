@@ -181,6 +181,54 @@ To reduce MQTT traffic and Home Assistant database load:
 - Hysteresis thresholds (e.g., 2mV for cell voltages)
 - Force-publish every 60s regardless of change
 
-## Future: ESP32 Migration
+## ESP32 Implementation (Production)
 
-The `esphome/` directory contains configuration to migrate from Raspberry Pi to an ESP32-based solution (Waveshare ESP32-S3-RS485-CAN board), reducing power consumption and complexity.
+The Raspberry Pi has been replaced by a **Waveshare ESP32-S3-RS485-CAN** board running ESPHome.
+
+### Benefits
+- **Lower power**: ~0.5W vs ~5W for Pi
+- **Single device**: Replaces two Python scripts
+- **Simpler**: No Linux OS, no SD card failures
+- **Reliable**: ESPHome handles WiFi/MQTT reconnection automatically
+
+### Architecture
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                        Battery Stack                                 │
+│              ┌──────┴──────┐                                        │
+│              │   BMS       │                                        │
+│              └──────┬──────┘                                        │
+│         ┌───────────┼───────────┐                                   │
+│    ┌────┴────┐ ┌────┴────┐                                          │
+│    │ CAN Bus │ │ RS485   │                                          │
+│    │ 500kbps │ │ 9600bps │                                          │
+│    └────┬────┘ └────┬────┘                                          │
+└─────────┼───────────┼───────────────────────────────────────────────┘
+          │           │
+┌─────────┼───────────┼───────────────────────────────────────────────┐
+│         │           │        ESP32-S3-RS485-CAN                      │
+│    ┌────┴────┐ ┌────┴────┐                                          │
+│    │ CAN     │ │ UART    │                                          │
+│    │(listen) │ │(hw flow)│                                          │
+│    └────┬────┘ └────┬────┘                                          │
+│         └─────┬─────┘                                                │
+│         ┌─────┴─────┐                                               │
+│         │ ESPHome   │                                               │
+│         │ Firmware  │                                               │
+│         └─────┬─────┘                                               │
+│               │ WiFi                                                 │
+└───────────────┼─────────────────────────────────────────────────────┘
+                │
+         ┌──────┴──────┐
+         │ MQTT Broker │ → Home Assistant
+         └─────────────┘
+```
+
+### Configuration
+See `/root/esphome/deye-bms-can.yaml` and `/root/esphome/README.md` for full details.
+
+### Key Implementation Notes
+- CAN: Custom component for listen-only mode (no ACK signals)
+- RS485: Hardware flow control via `flow_control_pin: GPIO21`
+- Checksum: LENID uses sum of hex digits, not byte count
+- Battery numbering: 0-based (0, 1, 2)

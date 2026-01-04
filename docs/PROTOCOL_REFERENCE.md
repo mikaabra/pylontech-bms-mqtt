@@ -149,11 +149,38 @@ SOI  VER   ADR   CID1  CID2  LENGTH  INFO        CHKSUM  EOI
 
 ### Checksum Calculation
 
+**Frame Checksum (CHKSUM):**
 ```python
 def calc_chksum(frame_content: str) -> str:
     total = sum(ord(c) for c in frame_content)
     chk = (~total + 1) & 0xFFFF
     return f"{chk:04X}"
+```
+
+**LENID Calculation (Critical!):**
+
+The LENGTH field includes a checksum nibble (LCHKSUM):
+```
+LENID = LCHKSUM (1 hex char) + LENGTH (3 hex chars)
+LCHKSUM = (~(sum of hex digits of LENGTH) + 1) & 0xF
+```
+
+**Example:** For INFO length of 2 hex chars (1 byte):
+- LENGTH = "002" (3 hex chars representing value 2)
+- Sum of hex digits: 0 + 0 + 2 = 2
+- LCHKSUM = (~2 + 1) & 0xF = 0xE
+- LENID = "E002"
+
+**Common mistake:** Using the byte count (1) instead of summing hex digits (0+0+2=2).
+This error results in response code 03 (CID2 invalid / checksum error).
+
+```python
+def calc_lenid(info_len: int) -> str:
+    """Calculate LENID field for Pylontech RS485 protocol."""
+    length_hex = f"{info_len:03X}"  # 3 hex chars for length
+    digit_sum = sum(int(c, 16) for c in length_hex)
+    lchksum = (~digit_sum + 1) & 0xF
+    return f"{lchksum:X}{length_hex}"
 ```
 
 ### CID2 Command Codes
@@ -178,7 +205,7 @@ Response INFO field structure (all values ASCII hex, 2 chars per byte):
 | 70-71 | Num temps | 2 | - | Number of temp sensors (6) |
 | 72-95 | Temperatures | 24 | Kelvin×10 | 6 × 4 chars |
 | 96-99 | Current | 4 | ÷100 A | Signed, 10mA units |
-| 100-103 | Voltage | 4 | ÷1000 V | Pack voltage in mV |
+| 100-103 | Voltage | 4 | ÷100 V | Pack voltage in 10mV units |
 | 104-107 | Remain capacity | 4 | ÷100 Ah | 10mAh units |
 | 108-109 | Custom byte | 2 | - | User defined |
 | 110-113 | Total capacity | 4 | ÷100 Ah | 10mAh units |
