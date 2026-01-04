@@ -561,8 +561,9 @@ interval:
           int addr = ${pylontech_addr};
 
           // Send analog data request (CID2=0x42)
-          std::string cmd = make_cmd(addr, 0x42, batt);
-          ESP_LOGD("rs485", "TX analog batt %d", batt);
+          // Battery addresses are 1-based in Pylontech protocol
+          std::string cmd = make_cmd(addr, 0x42, batt + 1);
+          ESP_LOGD("rs485", "TX analog batt %d (addr %d)", batt, batt + 1);
 
           // Clear RX buffer
           while (id(rs485_uart).available()) {
@@ -668,9 +669,9 @@ interval:
             i += 4;
           }
 
-          // Voltage (mV)
+          // Voltage (10mV units, same as current)
           if (data.length() >= i + 4) {
-            id(batt_voltage)[batt] = strtol(data.substr(i, 4).c_str(), nullptr, 16) / 1000.0f;
+            id(batt_voltage)[batt] = strtol(data.substr(i, 4).c_str(), nullptr, 16) / 100.0f;
             i += 4;
           }
 
@@ -747,7 +748,8 @@ interval:
             }
 
             // Send alarm request (CID2=0x44)
-            std::string cmd = make_cmd(addr, 0x44, batt);
+            // Battery addresses are 1-based in Pylontech protocol
+            std::string cmd = make_cmd(addr, 0x44, batt + 1);
 
             // No manual EN control - let hardware handle direction
 
