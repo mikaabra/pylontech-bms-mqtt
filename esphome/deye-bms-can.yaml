@@ -19,6 +19,13 @@ substitutions:
   # Pylontech RS485 address
   pylontech_addr: "2"
 
+# Custom component for CAN listen-only mode
+external_components:
+  - source:
+      type: local
+      path: custom_components
+    components: [esp32_can_listen]
+
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
@@ -282,14 +289,15 @@ output:
     id: rs485_en
     pin: GPIO21
 
-# CAN bus configuration
+# CAN bus configuration (listen-only mode - no ACKs sent)
 canbus:
-  - platform: esp32_can
+  - platform: esp32_can_listen
     id: can_bus
     tx_pin: GPIO15
     rx_pin: GPIO16
     can_id: 0
     bit_rate: 500kbps
+    mode: LISTEN_ONLY
 
     on_frame:
       # 0x351: Voltage/current limits
