@@ -561,9 +561,9 @@ interval:
           int addr = ${pylontech_addr};
 
           // Send analog data request (CID2=0x42)
-          // Battery addresses are 1-based in Pylontech protocol
-          std::string cmd = make_cmd(addr, 0x42, batt + 1);
-          ESP_LOGD("rs485", "TX analog batt %d (addr %d)", batt, batt + 1);
+          // Battery numbers are 0-based in INFO field (matches Python script)
+          std::string cmd = make_cmd(addr, 0x42, batt);
+          ESP_LOGD("rs485", "TX analog batt %d", batt);
 
           // Clear RX buffer
           while (id(rs485_uart).available()) {
@@ -748,8 +748,8 @@ interval:
             }
 
             // Send alarm request (CID2=0x44)
-            // Battery addresses are 1-based in Pylontech protocol
-            std::string cmd = make_cmd(addr, 0x44, batt + 1);
+            // Battery numbers are 0-based in INFO field (matches Python script)
+            std::string cmd = make_cmd(addr, 0x44, batt);
 
             // No manual EN control - let hardware handle direction
 
