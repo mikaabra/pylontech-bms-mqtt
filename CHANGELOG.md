@@ -28,6 +28,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - **Debug logging** (`--debug-log FILE`) for RS485 monitor
   - Logs balancing flag changes: `BAL+` (started), `BAL-` (stopped)
   - Logs overvolt flag changes: `OV+`, `OV-`
+  - Logs Cell Warning flag changes: `CW+`, `CW-`
   - Logs battery state transitions: `STATE Charge -> Float`
   - Includes cell voltages at time of change
   - Initial state logged on startup (`INIT`)
@@ -35,6 +36,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
     ```
     2026-01-03 08:06:43 B0 INIT  STATE=Full
     2026-01-03 08:15:00 B1 BAL+ C3=3.501V C7=3.502V
+    2026-01-03 08:15:00 B1 CW+  C3=3.501V C7=3.502V
     2026-01-03 08:16:00 B1 BAL- C3=3.500V
     2026-01-03 08:20:00 B2 STATE Charge -> Float
     ```

@@ -915,11 +915,12 @@ def write_debug_log(data: dict):
         # Current state
         curr_bal = set(batt.get('balancing_cells', []))
         curr_ov = set(batt.get('overvolt_cells', []))
+        curr_cw = set(batt.get('status', {}).get('cw_cells', []))
         curr_state = batt.get('status', {}).get('state', 'Unknown')
 
         # Previous state (initialize if first time - log initial state)
         if batt_id not in _prev_state:
-            _prev_state[batt_id] = {'balancing': set(), 'overvolt': set(), 'state': ''}
+            _prev_state[batt_id] = {'balancing': set(), 'overvolt': set(), 'cw': set(), 'state': ''}
             # Log initial state on first poll
             init_parts = [f"STATE={curr_state}"]
             if curr_bal:
@@ -928,6 +929,9 @@ def write_debug_log(data: dict):
             if curr_ov:
                 cell_info = ','.join(f"C{c}={cells[c-1]:.3f}V" for c in sorted(curr_ov) if c <= len(cells))
                 init_parts.append(f"OV[{cell_info}]")
+            if curr_cw:
+                cell_info = ','.join(f"C{c}={cells[c-1]:.3f}V" for c in sorted(curr_cw) if c <= len(cells))
+                init_parts.append(f"CW[{cell_info}]")
             lines.append(f"{timestamp} B{batt_id} INIT  {' '.join(init_parts)}")
 
         prev = _prev_state[batt_id]
@@ -956,12 +960,24 @@ def write_debug_log(data: dict):
             cell_info = ' '.join(f"C{c}={cells[c-1]:.3f}V" for c in sorted(ov_removed) if c <= len(cells))
             lines.append(f"{timestamp} B{batt_id} OV-  {cell_info}")
 
+        # Check for CW (Cell Warning) changes
+        cw_added = curr_cw - prev['cw']
+        cw_removed = prev['cw'] - curr_cw
+
+        if cw_added:
+            cell_info = ' '.join(f"C{c}={cells[c-1]:.3f}V" for c in sorted(cw_added) if c <= len(cells))
+            lines.append(f"{timestamp} B{batt_id} CW+  {cell_info}")
+
+        if cw_removed:
+            cell_info = ' '.join(f"C{c}={cells[c-1]:.3f}V" for c in sorted(cw_removed) if c <= len(cells))
+            lines.append(f"{timestamp} B{batt_id} CW-  {cell_info}")
+
         # Check for state changes
         if curr_state != prev['state'] and prev['state']:  # Skip initial empty state
             lines.append(f"{timestamp} B{batt_id} STATE {prev['state']} -> {curr_state}")
 
         # Update previous state
-        _prev_state[batt_id] = {'balancing': curr_bal, 'overvolt': curr_ov, 'state': curr_state}
+        _prev_state[batt_id] = {'balancing': curr_bal, 'overvolt': curr_ov, 'cw': curr_cw, 'state': curr_state}
 
     # Write to log file
     if lines:
