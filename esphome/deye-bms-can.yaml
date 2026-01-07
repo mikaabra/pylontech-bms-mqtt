@@ -285,6 +285,7 @@ uart:
   # Hardware RS485 half-duplex direction control
   flow_control_pin: GPIO21
 
+  rx_buffer_size: 1024
 # RS485 direction control now handled by UART flow_control_pin
 
 # CAN bus configuration (listen-only mode - no ACKs sent)
@@ -537,6 +538,11 @@ globals:
     type: std::string
     restore_value: no
 
+  - id: rs485_busy
+    type: bool
+    restore_value: no
+    initial_value: 'false'
+
 # Intervals for stale detection and RS485 polling
 interval:
   # CAN stale detection
@@ -573,6 +579,18 @@ interval:
     then:
       - lambda: |-
           // Pylontech RS485 command builder
+          // Prevent overlapping RS485 transactions (10s/30s polls)
+          if (id(rs485_busy)) {
+            ESP_LOGW("rs485", "BUSY: skipping RS485 poll (another transaction in progress)");
+            return;
+          }
+          struct Rs485BusyGuard {
+            bool *flag;
+            explicit Rs485BusyGuard(bool &f) : flag(&f) { f = true; }
+            ~Rs485BusyGuard() { *flag = false; }
+          };
+          Rs485BusyGuard _rs485_guard(id(rs485_busy));
+
           auto calc_chksum = [](const std::string& frame) -> std::string {
             uint32_t total = 0;
             for (char c : frame) total += (uint8_t)c;
@@ -633,17 +651,28 @@ interval:
 
           id(rs485_poll_battery) = (batt + 1) % ${num_batteries};
 
-      - delay: 300ms
+          // Wait for response
+          delay(300);
 
-      - lambda: |-
-          // Read response
+          // Read response (frame-based: wait for '\r')
+
           std::string response;
-          while (id(rs485_uart).available()) {
-            uint8_t c;
-            id(rs485_uart).read_byte(&c);
-            response += (char)c;
+          response.reserve(600);
+          uint32_t start_ms = millis();
+          bool got_eof = false;
+          while (millis() - start_ms < 1200) {
+            while (id(rs485_uart).available()) {
+              uint8_t c;
+              id(rs485_uart).read_byte(&c);
+              response += (char)c;
+              if (c == '\r') { got_eof = true; break; }
+            }
+            if (got_eof) break;
+            delay(5);
           }
-
+          // Trim leading garbage until start marker '~' (if present)
+          auto tilde = response.find('~');
+          if (tilde != std::string::npos) response = response.substr(tilde);
           ESP_LOGD("rs485", "RX len=%d: %s", response.length(), response.c_str());
 
           if (response.length() < 18 || response.substr(7, 2) != "00") {
@@ -675,9 +704,8 @@ interval:
             ESP_LOGI("rs485", "Polarity locked: EN=%s for TX", id(rs485_en_high_for_tx) ? "HIGH" : "LOW");
           }
 
-          // Extract INFO data
+          // Extract INFO data (batt variable already set at start of lambda)
           std::string data = response.substr(13, response.length() - 13 - 5);
-          int batt = (id(rs485_poll_battery) + ${num_batteries} - 1) % ${num_batteries};
 
           size_t i = 0;
 
@@ -757,6 +785,18 @@ interval:
   - interval: 30s
     then:
       - lambda: |-
+          // Prevent overlapping RS485 transactions (10s/30s polls)
+          if (id(rs485_busy)) {
+            ESP_LOGW("rs485", "BUSY: skipping RS485 poll (another transaction in progress)");
+            return;
+          }
+          struct Rs485BusyGuard {
+            bool *flag;
+            explicit Rs485BusyGuard(bool &f) : flag(&f) { f = true; }
+            ~Rs485BusyGuard() { *flag = false; }
+          };
+          Rs485BusyGuard _rs485_guard(id(rs485_busy));
+
           auto calc_chksum = [](const std::string& frame) -> std::string {
             uint32_t total = 0;
             for (char c : frame) total += (uint8_t)c;
@@ -812,14 +852,24 @@ interval:
 
             delay(300);
 
-            // Read response
+            // Read response (frame-based: wait for '\r')
             std::string response;
-            while (id(rs485_uart).available()) {
-              uint8_t c;
-              id(rs485_uart).read_byte(&c);
-              response += (char)c;
+            response.reserve(600);
+            uint32_t start_ms = millis();
+            bool got_eof = false;
+            while (millis() - start_ms < 1200) {
+              while (id(rs485_uart).available()) {
+                uint8_t c;
+                id(rs485_uart).read_byte(&c);
+                response += (char)c;
+                if (c == '\r') { got_eof = true; break; }
+              }
+              if (got_eof) break;
+              delay(5);
             }
-
+            // Trim leading garbage until start marker '~' (if present)
+            auto tilde = response.find('~');
+            if (tilde != std::string::npos) response = response.substr(tilde);
             if (response.length() < 18 || response.substr(7, 2) != "00") {
               continue;
             }
