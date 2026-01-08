@@ -12,6 +12,9 @@ This directory contains the ESPHome configuration to replace both `pylon_can2mqt
 - **Home Assistant**: Publishes HA discovery configs on connect (no Python scripts needed)
 - **Resilient**: Automatic WiFi/MQTT reconnection, stale data detection
 - **Rate limiting**: Hysteresis filters to reduce MQTT traffic (60s heartbeat + delta thresholds)
+- **Data validation**: Response checksum verification and address matching
+- **Poll alarms**: Per-battery alarm after 10 consecutive communication failures
+- **Diagnostics**: Heap monitoring for memory health tracking
 
 ## Hardware
 
@@ -184,6 +187,7 @@ If one pair doesn't work, try the other.
 | `deye_bms/ext/temp_min` | Min temperature |
 | `deye_bms/ext/temp_max` | Max temperature |
 | `deye_bms/flags` | BMS status flags |
+| `deye_bms/diag/free_heap` | ESP32 free heap memory (bytes) |
 
 ### RS485 Topics (deye_bms/rs485/)
 
@@ -221,6 +225,7 @@ If one pair doesn't work, try the other.
 | `deye_bms/rs485/batteryN/alarms` | Alarm list |
 | `deye_bms/rs485/batteryN/charge_mosfet` | Charge MOSFET status (1/0) |
 | `deye_bms/rs485/batteryN/discharge_mosfet` | Discharge MOSFET status (1/0) |
+| `deye_bms/rs485/batteryN/poll_alarm` | ON if 10+ consecutive poll failures |
 
 ## Migration from Python Scripts
 
@@ -295,6 +300,29 @@ The ESP32 monitors data freshness and publishes availability status:
 - **RS485**: Publishes `deye_bms/rs485/status: offline` if no valid responses for 90 seconds
 
 When data resumes, status automatically returns to `online`.
+
+### Data Validation
+
+Every RS485 response is validated before processing:
+- **Checksum**: Verifies the 4-character checksum at end of frame matches calculated value
+- **Address**: Confirms response address matches the configured Pylontech address
+- **Error code**: Checks for success code (00) in response
+
+If validation fails, the response is rejected and logged.
+
+### Poll Alarms
+
+Each battery has an independent poll failure counter:
+- Counter increments on any validation failure (checksum, address, error code, timeout)
+- Counter resets to zero on successful response
+- **Alarm triggers** when counter reaches 10 consecutive failures
+- Alarm publishes `ON` to `deye_bms/rs485/batteryN/poll_alarm` (retained)
+- Alarm clears automatically when battery responds successfully
+
+### Heap Monitoring
+
+Free heap memory is published every 60 seconds to `deye_bms/diag/free_heap`.
+Typical healthy values are 200-250KB. Significant drops may indicate memory leaks.
 
 ### Rate Limiting (Hysteresis)
 
