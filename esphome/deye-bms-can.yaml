@@ -58,6 +58,8 @@ esphome:
           id(batt_lmcharge_mosfet).resize(num_batt, false);
           id(batt_cw_active).resize(num_batt, false);
           id(batt_cw_cells).resize(num_batt, std::string(""));
+          id(batt_poll_failures).resize(num_batt, 0);
+          id(batt_poll_alarm).resize(num_batt, false);
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -442,17 +444,6 @@ globals:
     type: int
     initial_value: '0'
 
-  # RS485 EN polarity auto-detection
-  - id: rs485_en_high_for_tx
-    type: bool
-    initial_value: 'true'  # Start with HIGH=transmit
-  - id: rs485_fail_count
-    type: int
-    initial_value: '0'
-  - id: rs485_polarity_locked
-    type: bool
-    initial_value: 'false'
-
   # Cell voltages: 3 batteries x 16 cells = 48
   - id: cell_voltages
     type: std::vector<float>
@@ -543,6 +534,14 @@ globals:
     restore_value: no
     initial_value: 'false'
 
+  # Per-battery poll failure tracking (for poll alarm)
+  - id: batt_poll_failures
+    type: std::vector<int>
+    restore_value: no
+  - id: batt_poll_alarm
+    type: std::vector<bool>
+    restore_value: no
+
 # Intervals for stale detection and RS485 polling
 interval:
   # CAN stale detection
@@ -632,11 +631,7 @@ interval:
             id(rs485_uart).read_byte(&c);
           }
 
-          // Try without manual EN control - Waveshare may have auto direction
-          // Uncomment below to enable manual control if needed
-          // if (id(rs485_en_high_for_tx)) { id(rs485_en).turn_on(); } else { id(rs485_en).turn_off(); }
-
-          ESP_LOGD("rs485", "TX (auto-EN): %s", cmd.c_str());
+          ESP_LOGD("rs485", "TX: %s", cmd.c_str());
 
           for (char c : cmd) {
             id(rs485_uart).write_byte((uint8_t)c);
@@ -645,9 +640,6 @@ interval:
 
           // Wait for transmission to complete (at 9600 baud, ~1ms per byte)
           delay(20);
-
-          // No manual EN control - let hardware handle direction
-          // if (id(rs485_en_high_for_tx)) { id(rs485_en).turn_off(); } else { id(rs485_en).turn_on(); }
 
           id(rs485_poll_battery) = (batt + 1) % ${num_batteries};
 
@@ -675,33 +667,75 @@ interval:
           if (tilde != std::string::npos) response = response.substr(tilde);
           ESP_LOGD("rs485", "RX len=%d: %s", response.length(), response.c_str());
 
-          if (response.length() < 18 || response.substr(7, 2) != "00") {
-            ESP_LOGW("rs485", "Analog response error (len=%d, code=%s)", response.length(),
-                     response.length() >= 9 ? response.substr(7, 2).c_str() : "?");
-
-            // Auto-detection: if not locked, try flipping polarity after failures
-            if (!id(rs485_polarity_locked)) {
-              id(rs485_fail_count)++;
-              if (id(rs485_fail_count) >= 6) {  // After 6 failures (2 full cycles), flip polarity
-                id(rs485_en_high_for_tx) = !id(rs485_en_high_for_tx);
-                id(rs485_fail_count) = 0;
-                ESP_LOGW("rs485", "Flipping EN polarity to %s", id(rs485_en_high_for_tx) ? "HIGH" : "LOW");
-              }
+          // Helper to handle poll failure for this battery
+          auto handle_poll_failure = [&batt](const char* reason) {
+            ESP_LOGW("rs485", "Batt %d poll failed: %s", batt, reason);
+            id(batt_poll_failures)[batt]++;
+            if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
+              id(batt_poll_alarm)[batt] = true;
+              ESP_LOGW("rs485", "POLL ALARM: Battery %d not responding (10 consecutive failures)", batt);
+              char topic[64];
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+              id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
             }
+          };
+
+          // Basic response validation
+          if (response.length() < 18 || response.substr(7, 2) != "00") {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "error code=%s len=%d",
+                     response.length() >= 9 ? response.substr(7, 2).c_str() : "?", (int)response.length());
+            handle_poll_failure(msg);
             return;
           }
 
-          // Success! Lock in the polarity and mark as not stale
+          // Verify response address matches request (positions 3-4 after ~)
+          int resp_addr = strtol(response.substr(3, 2).c_str(), nullptr, 16);
+          if (resp_addr != ${pylontech_addr}) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "address mismatch (expected %d, got %d)", ${pylontech_addr}, resp_addr);
+            handle_poll_failure(msg);
+            return;
+          }
+
+          // Verify checksum (last 4 chars before \r)
+          // Frame to checksum: from position 1 (after ~) to len-5 (before checksum)
+          if (response.length() >= 6) {
+            std::string frame = response.substr(1, response.length() - 6);  // Exclude ~ at start, CCCC\r at end
+            std::string recv_chk = response.substr(response.length() - 5, 4);
+
+            uint32_t total = 0;
+            for (char c : frame) total += (uint8_t)c;
+            uint16_t calc = (~total + 1) & 0xFFFF;
+            char expected[5];
+            snprintf(expected, sizeof(expected), "%04X", calc);
+
+            if (recv_chk != std::string(expected)) {
+              char msg[64];
+              snprintf(msg, sizeof(msg), "checksum mismatch (expected %s, got %s)", expected, recv_chk.c_str());
+              handle_poll_failure(msg);
+              return;
+            }
+          }
+
+          // Success! Reset poll failure counter and clear alarm if set
+          if (id(batt_poll_failures)[batt] > 0 || id(batt_poll_alarm)[batt]) {
+            id(batt_poll_failures)[batt] = 0;
+            if (id(batt_poll_alarm)[batt]) {
+              id(batt_poll_alarm)[batt] = false;
+              ESP_LOGI("rs485", "Poll alarm cleared for battery %d", batt);
+              char topic[64];
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+              id(mqtt_client).publish(std::string(topic), std::string("OFF"), (uint8_t)0, true);
+            }
+          }
+
+          // Mark as not stale
           id(last_rs485_rx) = millis();
           if (id(rs485_stale)) {
             id(rs485_stale) = false;
             id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
             ESP_LOGI("rs485", "RS485 data received, marking online");
-          }
-          if (!id(rs485_polarity_locked)) {
-            id(rs485_polarity_locked) = true;
-            id(rs485_fail_count) = 0;
-            ESP_LOGI("rs485", "Polarity locked: EN=%s for TX", id(rs485_en_high_for_tx) ? "HIGH" : "LOW");
           }
 
           // Extract INFO data (batt variable already set at start of lambda)
@@ -870,8 +904,72 @@ interval:
             // Trim leading garbage until start marker '~' (if present)
             auto tilde = response.find('~');
             if (tilde != std::string::npos) response = response.substr(tilde);
+
+            // Basic response validation
             if (response.length() < 18 || response.substr(7, 2) != "00") {
+              ESP_LOGW("rs485", "Batt %d alarm poll failed: error code=%s len=%d", batt,
+                       response.length() >= 9 ? response.substr(7, 2).c_str() : "?", (int)response.length());
+              id(batt_poll_failures)[batt]++;
+              if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
+                id(batt_poll_alarm)[batt] = true;
+                ESP_LOGW("rs485", "POLL ALARM: Battery %d not responding (10 consecutive failures)", batt);
+                char topic[64];
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+                id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
+              }
               continue;
+            }
+
+            // Verify response address matches request (positions 3-4 after ~)
+            int resp_addr = strtol(response.substr(3, 2).c_str(), nullptr, 16);
+            if (resp_addr != ${pylontech_addr}) {
+              ESP_LOGW("rs485", "Batt %d alarm poll failed: address mismatch (expected %d, got %d)",
+                       batt, ${pylontech_addr}, resp_addr);
+              id(batt_poll_failures)[batt]++;
+              if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
+                id(batt_poll_alarm)[batt] = true;
+                char topic[64];
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+                id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
+              }
+              continue;
+            }
+
+            // Verify checksum (last 4 chars before \r)
+            if (response.length() >= 6) {
+              std::string frame = response.substr(1, response.length() - 6);
+              std::string recv_chk = response.substr(response.length() - 5, 4);
+
+              uint32_t chk_total = 0;
+              for (char c : frame) chk_total += (uint8_t)c;
+              uint16_t calc = (~chk_total + 1) & 0xFFFF;
+              char expected[5];
+              snprintf(expected, sizeof(expected), "%04X", calc);
+
+              if (recv_chk != std::string(expected)) {
+                ESP_LOGW("rs485", "Batt %d alarm poll failed: checksum mismatch (expected %s, got %s)",
+                         batt, expected, recv_chk.c_str());
+                id(batt_poll_failures)[batt]++;
+                if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
+                  id(batt_poll_alarm)[batt] = true;
+                  char topic[64];
+                  snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+                  id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
+                }
+                continue;
+              }
+            }
+
+            // Success! Reset poll failure counter and clear alarm if set
+            if (id(batt_poll_failures)[batt] > 0 || id(batt_poll_alarm)[batt]) {
+              id(batt_poll_failures)[batt] = 0;
+              if (id(batt_poll_alarm)[batt]) {
+                id(batt_poll_alarm)[batt] = false;
+                ESP_LOGI("rs485", "Poll alarm cleared for battery %d", batt);
+                char topic[64];
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+                id(mqtt_client).publish(std::string(topic), std::string("OFF"), (uint8_t)0, true);
+              }
             }
 
             std::string data = response.substr(13, response.length() - 13 - 5);
@@ -1455,6 +1553,16 @@ sensor:
   - platform: uptime
     name: "Uptime"
 
+  - platform: template
+    name: "Free Heap"
+    id: sensor_free_heap
+    unit_of_measurement: "bytes"
+    icon: "mdi:memory"
+    entity_category: diagnostic
+    state_topic: ${can_prefix}/diag/free_heap
+    update_interval: 60s
+    lambda: 'return heap_caps_get_free_size(MALLOC_CAP_INTERNAL);'
+
 text_sensor:
   - platform: template
     id: sensor_flags
@@ -1470,6 +1578,25 @@ binary_sensor:
     name: "CAN Data Stale"
     lambda: 'return id(can_stale);'
     device_class: problem
+
+  # Per-battery poll alarms (10 consecutive failures)
+  - platform: template
+    name: "Battery 0 Poll Alarm"
+    device_class: problem
+    state_topic: ${rs485_prefix}/battery0/poll_alarm
+    lambda: 'return id(batt_poll_alarm).size() > 0 ? id(batt_poll_alarm)[0] : false;'
+
+  - platform: template
+    name: "Battery 1 Poll Alarm"
+    device_class: problem
+    state_topic: ${rs485_prefix}/battery1/poll_alarm
+    lambda: 'return id(batt_poll_alarm).size() > 1 ? id(batt_poll_alarm)[1] : false;'
+
+  - platform: template
+    name: "Battery 2 Poll Alarm"
+    device_class: problem
+    state_topic: ${rs485_prefix}/battery2/poll_alarm
+    lambda: 'return id(batt_poll_alarm).size() > 2 ? id(batt_poll_alarm)[2] : false;'
 
 button:
   - platform: restart
