@@ -32,7 +32,7 @@ canbus:
 - **mode** (*Optional*, enum): Operating mode. One of:
 
   - `NORMAL`: Normal operation, sends ACK signals. *(default)*
-  - `LISTEN_ONLY`: Receive data only, no ACK signals sent.
+  - `LISTENONLY`: Receive data only, no ACK signals sent.
 
 - **rx_queue_len** (*Optional*, int): Length of RX queue.
 - **tx_queue_len** (*Optional*, int): Length of TX queue, 0 to disable.
@@ -62,7 +62,7 @@ canbus:
     tx_pin: GPIO15
     rx_pin: GPIO16
     bit_rate: 500kbps
-    mode: LISTEN_ONLY
+    mode: LISTENONLY
     on_frame:
       - can_id: 0x355
         then:

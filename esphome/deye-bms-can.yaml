@@ -298,7 +298,7 @@ canbus:
     rx_pin: GPIO16
     can_id: 0
     bit_rate: 500kbps
-    mode: LISTEN_ONLY
+    mode: LISTENONLY
 
     on_frame:
       # 0x351: Voltage/current limits

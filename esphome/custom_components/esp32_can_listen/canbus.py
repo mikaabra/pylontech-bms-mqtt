@@ -34,11 +34,11 @@ CONF_TX_ENQUEUE_TIMEOUT = "tx_enqueue_timeout"
 esp32_can_ns = cg.esphome_ns.namespace("esp32_can_listen")
 esp32_can = esp32_can_ns.class_("ESP32CanListen", CanbusComponent)
 
-# Mode options
+# Mode options - consistent with MCP2515 component
 CanMode = esp32_can_ns.enum("CanMode")
 CAN_MODES = {
     "NORMAL": CanMode.CAN_MODE_NORMAL,
-    "LISTEN_ONLY": CanMode.CAN_MODE_LISTEN_ONLY,
+    "LISTENONLY": CanMode.CAN_MODE_LISTEN_ONLY,
 }
 
 # Currently the driver only supports a subset of the bit rates defined in canbus

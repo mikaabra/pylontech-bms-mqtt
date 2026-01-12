@@ -48,7 +48,7 @@ canbus:
     tx_pin: GPIO5
     rx_pin: GPIO4
     bit_rate: 500kbps
-    mode: LISTEN_ONLY
+    mode: LISTENONLY
     on_frame:
       - can_id: 0x355
         then:
@@ -65,11 +65,11 @@ esphome compile test_listen_only.yaml
 git add -A
 git commit -m "Add listen-only mode to esp32_can component
 
-Add mode configuration option to esp32_can supporting NORMAL and LISTEN_ONLY modes.
+Add mode configuration option to esp32_can supporting NORMAL and LISTENONLY modes.
 Listen-only mode enables passive CAN bus monitoring without sending ACK signals,
 useful for tapping into existing BMS-to-inverter communication.
 
-- Add mode enum (NORMAL, LISTEN_ONLY)
+- Add mode enum (NORMAL, LISTENONLY)
 - Use TWAI_MODE_LISTEN_ONLY when configured
 - Prevent transmission in listen-only mode with warning
 - Follow same pattern as MCP2515 mode support"
@@ -133,7 +133,7 @@ Documents the new `mode` configuration option for the esp32_can component.
 
 ## Changes
 
-- Add `mode` option to Configuration Variables (NORMAL, LISTEN_ONLY)
+- Add `mode` option to Configuration Variables (NORMAL, LISTENONLY)
 - Add new "Listen-Only Mode" section with use cases and example
 - Consistent with MCP2515 mode documentation style
 

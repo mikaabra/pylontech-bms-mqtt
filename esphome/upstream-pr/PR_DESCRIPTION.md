@@ -16,7 +16,7 @@ Without listen-only mode, the ESP32 sends ACK signals on the CAN bus which can c
 
 ## Implementation
 
-- Adds `mode` configuration option with values `NORMAL` (default) and `LISTEN_ONLY`
+- Adds `mode` configuration option with values `NORMAL` (default) and `LISTENONLY`
 - Uses ESP-IDF's native `TWAI_MODE_LISTEN_ONLY` constant
 - Prevents transmission attempts in listen-only mode with a warning log
 - Follows the same pattern as the existing MCP2515 component's mode support
@@ -29,7 +29,7 @@ canbus:
     tx_pin: GPIO15
     rx_pin: GPIO16
     bit_rate: 500kbps
-    mode: LISTEN_ONLY  # New option - passive monitoring
+    mode: LISTENONLY  # New option - passive monitoring
     on_frame:
       - can_id: 0x355
         then:

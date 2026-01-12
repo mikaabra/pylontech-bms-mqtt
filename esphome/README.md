@@ -254,7 +254,7 @@ If one pair doesn't work, try the other.
 ### CAN not receiving data
 - Check CAN-H/CAN-L wiring (don't swap them)
 - Verify 500kbps baud rate matches BMS
-- Ensure you're using the custom `esp32_can_listen` component with `mode: LISTEN_ONLY`
+- Ensure you're using the custom `esp32_can_listen` component with `mode: LISTENONLY`
 - View logs for "CAN bus configured in LISTEN_ONLY mode" message
 
 ### RS485 not receiving data
