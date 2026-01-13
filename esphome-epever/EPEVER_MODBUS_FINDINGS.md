@@ -1,6 +1,6 @@
 # EPever Modbus BMS Protocol Findings
 
-## Session Dates: 2026-01-11, 2026-01-12
+## Session Dates: 2026-01-11, 2026-01-12, 2026-01-13
 
 ## Overview
 Attempting to bridge Pylontech CAN batteries to EPever UP5000 inverter via ESP32-S3 RS485.
@@ -237,4 +237,73 @@ Could potentially get this from Deye inverter Modbus if needed.
 - ESP32-S3-RS485-CAN (Waveshare)
 - CAN: GPIO15 TX, GPIO16 RX, 500kbps
 - RS485: GPIO17 TX, GPIO18 RX, GPIO21 flow control
-- Direct connection to EPever UP5000 inverter RS485 port
+- **Current topology**: Inverter <--> BMS-Link <--> ESP32 (Address 1, 9600 baud)
+- BMS-Link handles Address 3/4 complexity with inverter
+
+## Session 2026-01-13: CAN Flag Mapping Implementation
+
+### Problem Identified
+ESP32 was not transferring BMS protection states from CAN bus to Modbus status registers. This meant the inverter couldn't see when the BMS wanted to stop charging/discharging due to protection events.
+
+### Solution: CAN to Modbus Status Mapping
+
+**CAN Input:**
+- **0x35C** (Protocol V1.2) or **0x35F** (Protocol V1.3): Battery Charge Request Flags
+  - Bit 5: Charge enable (1=allowed, 0=forbidden)
+  - Bit 6: Discharge enable (1=allowed, 0=forbidden)
+
+**Modbus Output:**
+- **0x3111** (MOS Status):
+  - Bit 0 (D0): Discharge MOS state (1=on, 0=off)
+  - Bit 1 (D1): Charge MOS state (1=on, 0=off)
+
+- **0x3127** (BMS Status Bitfield):
+  - Bit 14 (D14): Stop discharge flag (0=enable, 1=stop) - **inverted logic!**
+  - Bit 15 (D15): Stop charge flag (0=enable, 1=stop) - **inverted logic!**
+
+### Implementation Details
+
+1. **Added CAN listeners** for both protocol versions (0x35C and 0x35F)
+2. **Store state in globals**: `can_charge_enabled` and `can_discharge_enabled` booleans
+3. **Dynamic register responses**:
+   - Register 0x3111 now reflects actual MOS states from CAN
+   - Register 0x3127 now reflects BMS protection state (with inverted logic)
+
+### Verification Results
+
+**Example from logs (98% SOC, BMS preventing charge):**
+```
+CAN: received can message std can_id=0x35c
+Modbus 0x3111 MOS status = 0x0001 (CHG=0 DIS=1)  // Discharge on, Charge off
+Modbus 0x3127 BMS status = 0x8000 (CHG_EN=0 DIS_EN=1)  // Stop charge bit set
+```
+
+**This correctly represents:**
+- BMS at 98% SOC refusing to charge (charge MOS off)
+- BMS allowing discharge (discharge MOS on)
+- Inverter receives this status and respects it ✓
+
+### Register Value Verification
+
+Full RS485 response payload (0x9000 range, 21 registers) verified:
+
+| Register | Hex Value | Decoded | Description | Notes |
+|----------|-----------|---------|-------------|-------|
+| 0x9009 | FC 18 | -1000 | -10°C | Charge Low Temp Protection (spec-compliant) |
+| 0x900B | F8 30 | -2000 | -20°C | Discharge Low Temp (intentional safe default) |
+| 0x900D | F8 30 | -2000 | -20°C | Cell Low Temp (intentional safe default) |
+| 0x900F | F8 30 | -2000 | -20°C | Equilibrium Low Temp (intentional safe default) |
+| 0x9011 | F8 30 | -2000 | -20°C | Environment Low Temp (intentional safe default) |
+| 0x9013 | F8 30 | -2000 | -20°C | MOS Low Temp (intentional safe default) |
+
+**Note:** Multiple 0xF830 (-20°C) values are **correct** - they represent conservative low-temperature protection thresholds for LiFePO4 batteries, not bugs or uninitialized values.
+
+### Benefits
+
+The inverter now receives **real-time BMS protection state** and can respond to:
+- ✅ Charge disable events (overvolt, high temp, 100% SOC)
+- ✅ Discharge disable events (undervolt, low temp, 0% SOC)
+- ✅ Dynamic MOS state changes
+- ✅ BMS safety interlocks
+
+This completes the critical safety integration between BMS and inverter!

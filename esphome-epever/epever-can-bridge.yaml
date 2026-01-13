@@ -238,6 +238,49 @@ canbus:
                 id(bms_cell_v_max) = vmax;
               }
 
+      # 0x35C: Battery Charge Request Flags (V1.2)
+      # 0x35F: Battery Charge Request Flags (V1.3)
+      - can_id: 0x35C
+        then:
+          - lambda: |-
+              id(last_can_rx) = millis();
+              if (id(can_stale)) { id(can_stale) = false; }
+
+              if (x.size() >= 2) {
+                uint8_t flags = x[0];
+                // Bit 5: Charge enable
+                // Bit 6: Discharge enable
+                bool charge_en = (flags & 0x20) != 0;
+                bool discharge_en = (flags & 0x40) != 0;
+
+                if (charge_en != id(can_charge_enabled) || discharge_en != id(can_discharge_enabled)) {
+                  id(can_charge_enabled) = charge_en;
+                  id(can_discharge_enabled) = discharge_en;
+                  ESP_LOGI("can", "BMS Control: Charge=%s Discharge=%s",
+                           charge_en ? "ON" : "OFF", discharge_en ? "ON" : "OFF");
+                }
+              }
+
+      - can_id: 0x35F
+        then:
+          - lambda: |-
+              id(last_can_rx) = millis();
+              if (id(can_stale)) { id(can_stale) = false; }
+
+              if (x.size() >= 2) {
+                uint8_t flags = x[0];
+                // V1.3 uses same bit positions as V1.2
+                bool charge_en = (flags & 0x20) != 0;
+                bool discharge_en = (flags & 0x40) != 0;
+
+                if (charge_en != id(can_charge_enabled) || discharge_en != id(can_discharge_enabled)) {
+                  id(can_charge_enabled) = charge_en;
+                  id(can_discharge_enabled) = discharge_en;
+                  ESP_LOGI("can", "BMS Control (V1.3): Charge=%s Discharge=%s",
+                           charge_en ? "ON" : "OFF", discharge_en ? "ON" : "OFF");
+                }
+              }
+
 # Global variables
 globals:
   # CAN mode tracking - always true now (NORMAL mode from start)
@@ -260,6 +303,14 @@ globals:
   - id: last_flags_publish
     type: uint32_t
     initial_value: '0'
+
+  # CAN charge/discharge enable flags (from 0x35C/0x35F)
+  - id: can_charge_enabled
+    type: bool
+    initial_value: 'true'  # Default to enabled
+  - id: can_discharge_enabled
+    type: bool
+    initial_value: 'true'  # Default to enabled
 
   # BMS data for RS485 responses
   - id: bms_soc
@@ -580,7 +631,12 @@ interval:
                   break;
 
                 case 0x3111: // A17: MOS status (D0=charging MOS on, D1=discharging MOS on)
-                  value = 0x0003;  // Both MOSFETs on (charging and discharging enabled)
+                  // Map from CAN charge/discharge enable flags (0x35C/0x35F)
+                  value = 0;
+                  if (id(can_discharge_enabled)) value |= 0x01;  // D0: Discharge MOS
+                  if (id(can_charge_enabled)) value |= 0x02;     // D1: Charge MOS
+                  ESP_LOGD("modbus", "0x3111 MOS status = 0x%04X (CHG=%d DIS=%d)",
+                           value, id(can_charge_enabled), id(can_discharge_enabled));
                   break;
 
                 case 0x3112: // A18: Cell temperature status
@@ -621,7 +677,12 @@ interval:
                   // D4: Charging over temp, D5: Discharging over temp
                   // D12: Full charge mark, D13: Force charge mark
                   // D14: 0=Enable discharge (1=stop), D15: 0=Enable charge (1=stop)
-                  value = 0x0000;  // All OK, charge+discharge enabled
+                  value = 0x0000;  // Start with all OK
+                  // Map from CAN flags - INVERTED logic (bit=1 means STOP, bit=0 means ENABLE)
+                  if (!id(can_discharge_enabled)) value |= 0x4000;  // D14: Stop discharge
+                  if (!id(can_charge_enabled)) value |= 0x8000;     // D15: Stop charge
+                  ESP_LOGD("modbus", "0x3127 BMS status = 0x%04X (CHG_EN=%d DIS_EN=%d)",
+                           value, id(can_charge_enabled), id(can_discharge_enabled));
                   break;
 
                 case 0x3128: // A40: Added function tags
@@ -700,14 +761,13 @@ interval:
                   value = 4500;  // 45°C
                   break;
 
-                case 0x9009:
-                  // Address 3 (BMS-Link): AC Frequency - handled above by stored config
-                  // Address 4 (Battery): Test theory - might be battery temperature!
-                  if (slave_addr == 4) {
-                    value = (uint16_t)(id(bms_temp_min) * 100.0f);
-                    ESP_LOGD("modbus", "Addr4 0x9009 (test batt temp) = %d (%.1f°C)", value, id(bms_temp_min));
+                case 0x9009: // C9: Charging Low Temperature Protection (°C * 100, int16)
+                  // Note: For Address 3 (BMS-Link), this is AC Frequency - handled above by stored config
+                  // For Address 1/4 (Battery), this is charging low temp protection per spec
+                  {
+                    int16_t t = -1000;  // -10°C typical LiFePO4 charging limit
+                    value = (uint16_t)t;
                   }
-                  // Note: Address 3 will never reach here due to continue above
                   break;
 
                 case 0x900A: // C10: Discharging High Temperature Protection (°C * 100, int16)
@@ -716,7 +776,7 @@ interval:
 
                 case 0x900B: // C11: Discharging Low Temperature Protection (°C * 100, int16)
                   {
-                    int16_t t = -2000;  // -20°C
+                    int16_t t = -2000;  // -20°C (0xF830) - intentional low-temp cutoff
                     value = (uint16_t)t;
                   }
                   break;
@@ -727,7 +787,7 @@ interval:
 
                 case 0x900D: // C13: Cell Low Temperature Protection (°C * 100, int16)
                   {
-                    int16_t t = -2000;  // -20°C
+                    int16_t t = -2000;  // -20°C (0xF830) - intentional low-temp cutoff
                     value = (uint16_t)t;
                   }
                   break;
@@ -736,9 +796,9 @@ interval:
                   value = 5500;  // 55°C
                   break;
 
-                case 0x900F: // C15: Equilibrium Low Temperature Protection (°C * 100)
+                case 0x900F: // C15: Equilibrium Low Temperature Protection (°C * 100, int16)
                   {
-                    int16_t t = -2000;  // -20°C
+                    int16_t t = -2000;  // -20°C (0xF830) - intentional low-temp cutoff
                     value = (uint16_t)t;
                   }
                   break;
@@ -747,9 +807,9 @@ interval:
                   value = 5500;  // 55°C
                   break;
 
-                case 0x9011: // C17: Environment Low Temperature Protection (°C * 100)
+                case 0x9011: // C17: Environment Low Temperature Protection (°C * 100, int16)
                   {
-                    int16_t t = -2000;  // -20°C
+                    int16_t t = -2000;  // -20°C (0xF830) - intentional low-temp cutoff
                     value = (uint16_t)t;
                   }
                   break;
@@ -758,9 +818,9 @@ interval:
                   value = 8000;  // 80°C
                   break;
 
-                case 0x9013: // C19: MOS Low Temperature Protection (°C * 100)
+                case 0x9013: // C19: MOS Low Temperature Protection (°C * 100, int16)
                   {
-                    int16_t t = -2000;  // -20°C
+                    int16_t t = -2000;  // -20°C (0xF830) - intentional low-temp cutoff
                     value = (uint16_t)t;
                   }
                   break;
@@ -857,7 +917,7 @@ interval:
           response.push_back(resp_crc & 0xFF);        // CRC low byte first
           response.push_back((resp_crc >> 8) & 0xFF); // CRC high byte
 
-          // Send response with hex dump for first request of each type
+          // Send response with FULL hex dump (no truncation) for periodic review
           static uint32_t last_dump_3100 = 0;
           static uint32_t last_dump_9000 = 0;
           bool do_dump = false;
@@ -872,12 +932,12 @@ interval:
           if (do_dump) {
             std::string hex_str;
             char hex[4];
-            for (size_t i = 0; i < response.size() && i < 50; i++) {
+            // Log FULL response without truncation for verification
+            for (size_t i = 0; i < response.size(); i++) {
               snprintf(hex, sizeof(hex), "%02X ", response[i]);
               hex_str += hex;
             }
-            if (response.size() > 50) hex_str += "...";
-            ESP_LOGW("modbus_tx", "TX 0x%04X: %s", start_reg, hex_str.c_str());
+            ESP_LOGW("modbus_tx", "TX 0x%04X (%d bytes): %s", start_reg, response.size(), hex_str.c_str());
           }
           ESP_LOGD("modbus", "TX %d bytes", response.size());
           id(rs485_uart).write_array(response.data(), response.size());
