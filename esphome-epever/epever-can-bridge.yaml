@@ -666,9 +666,10 @@ interval:
                   value = 4500;  // 45°C
                   break;
 
-                case 0x9009: // C9: Charging Low Temperature Protection (°C * 100, int16)
-                  value = 500;  // 5°C (minimum safe charging temperature for LiFePO4)
-                  break;
+                // case 0x9009: // C9: Charging Low Temperature Protection (°C * 100, int16)
+                  // NOTE: Epever interprets this as FREQUENCY! 500→5Hz, 1240→12.4Hz
+                  // Omitting this register (returning 0) to let Epever use its own frequency measurement
+                  // break;
 
                 case 0x900A: // C10: Discharging High Temperature Protection (°C * 100, int16)
                   value = 5500;  // 55°C

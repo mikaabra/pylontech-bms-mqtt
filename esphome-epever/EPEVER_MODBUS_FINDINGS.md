@@ -104,6 +104,38 @@ The inverter sends requests to two addresses with different register ranges:
 | 0x9018 | C24: Charge I Prot | Charging current protection | A * 10 | U16 |
 | 0x9019 | C25: Discharge I Prot | Discharging current protection | A * 10 | U16 |
 
+## Session 2026-01-13: Register Mapping Corrections
+
+### CRITICAL DISCOVERY: Documentation Errors in BMS-Link Protocol
+
+Through systematic testing, we discovered the BMS-Link Communication Address V1.6 PDF has **incorrect register mappings**:
+
+| Register | PDF Claims | Actual Epever Behavior | Test Results |
+|----------|-----------|------------------------|--------------|
+| **0x9009** | "Charging Low Temperature Protection (°C * 100)" | **AC Grid Frequency (Hz * 100)** | value=500 → 5Hz, value=1240 → 12.4Hz, value=0 → 0Hz |
+
+**Test methodology:**
+1. Set 0x9009 = 500 → Epever displayed "Load Frequency: 5Hz"
+2. Set 0x9009 = 1240 (actual battery temp 12.4°C) → Epever displayed "Load Frequency: 12Hz"
+3. Omitted 0x9009 (returns 0) → Epever displayed "Load Frequency: 0Hz"
+
+**Conclusion:** Register 0x9009 is NOT temperature - it's **frequency in Hz * 100**
+
+**Current implementation:** 0x9009 omitted (returns 0, displays 0Hz) to clearly indicate invalid/unknown value rather than faking data.
+
+### Outstanding Issues
+
+**Battery Temperature Display:**
+- Epever shows "Battery Temp: 0.0°C"
+- Real-time temp registers (0x3108, 0x3109) correctly send 1380 (13.8°C) and 1240 (12.4°C)
+- Epever may be reading temperature from a different register (0x900A candidate?)
+- **Status:** Not yet tested
+
+**Load Voltage Display:**
+- Epever shows "Load Voltage: 0V"
+- May be reading from an undocumented register
+- **Status:** Not yet investigated
+
 ## Current Implementation Status
 
 ### Working:
@@ -112,13 +144,16 @@ The inverter sends requests to two addresses with different register ranges:
 - Responding to addresses 3 and 4
 - Function codes: 01, 02, 03, 04, 05, 06, 10
 - Register data being sent correctly in logs
-- **Complete 0x3100-0x3130 register map (49 registers) per PDF spec**
-- **Complete 0x9000-0x9019 register map (26 registers) per PDF spec**
+- **BMS icon lit on Epever display** ✓
+- **Battery voltage displayed correctly** ✓
+- **Battery capacity (SOC%) displayed correctly** ✓
+- **Battery capacity (560Ah) displayed correctly** ✓
 
-### Not Working:
-- BMS icon not lighting up on inverter
-- Inverter not displaying correct voltage/SOC from our data
-- BCP error may still be present
+### Partially Working:
+- Battery temperature shows as 0°C (actual temp ~13°C being sent in 0x3108/0x3109)
+- Load frequency shows as 0Hz (0x9009 intentionally set to 0 - see discovery above)
+- Load voltage shows as 0V
+- Battery state shows as 0
 
 ## Possible Issues to Investigate
 
