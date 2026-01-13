@@ -24,8 +24,8 @@ substitutions:
   #   Option A: modbus_addr=1, modbus_baud=9600 (if inverter polls BMS directly)
   #   Option B: modbus_addr=4, modbus_baud=115200 (if inverter expects BMS-Link)
   #
-  modbus_addr: "4"
-  modbus_baud: "115200"
+  modbus_addr: "1"
+  modbus_baud: "9600"
 
 # External components: CAN listen-only mode
 external_components:
@@ -412,11 +412,12 @@ interval:
             return;
           }
 
-          // Respond to multiple addresses - inverter polls both 3 and 4
-          // Address 3: queries 0x3100 (41 regs), 0x9000 (32 regs)
-          // Address 4: queries 0x3100 (40 regs), 0x9000 (21 regs)
-          if (slave_addr != 3 && slave_addr != 4) {
-            ESP_LOGD("modbus", "Not our address (want 3 or 4, got %d)", slave_addr);
+          // Check if this is our Modbus address
+          // Address 1: BMS-Link battery side (9600 baud)
+          // Address 3/4: Direct to inverter (115200 baud)
+          const uint8_t our_addr = ${modbus_addr};
+          if (slave_addr != our_addr) {
+            ESP_LOGD("modbus", "Not our address (want %d, got %d)", our_addr, slave_addr);
             rx_buffer.clear();
             return;
           }
