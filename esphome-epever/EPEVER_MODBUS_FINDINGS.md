@@ -104,24 +104,44 @@ The inverter sends requests to two addresses with different register ranges:
 | 0x9018 | C24: Charge I Prot | Charging current protection | A * 10 | U16 |
 | 0x9019 | C25: Discharge I Prot | Discharging current protection | A * 10 | U16 |
 
-## Session 2026-01-13: Register Mapping Corrections
+## Session 2026-01-13: Address 3 vs Address 4 Discovery
 
-### CRITICAL DISCOVERY: Documentation Errors in BMS-Link Protocol
+### CRITICAL DISCOVERY: Two Separate Modbus Address Spaces
 
-Through systematic testing, we discovered the BMS-Link Communication Address V1.6 PDF has **incorrect register mappings**:
+The Epever inverter treats Address 3 and Address 4 as **completely different devices**:
 
-| Register | PDF Claims | Actual Epever Behavior | Test Results |
-|----------|-----------|------------------------|--------------|
-| **0x9009** | "Charging Low Temperature Protection (°C * 100)" | **AC Grid Frequency (Hz * 100)** | value=500 → 5Hz, value=1240 → 12.4Hz, value=0 → 0Hz |
+| Address | Role | Behavior | Purpose |
+|---------|------|----------|---------|
+| **Address 3** | BMS-Link Configuration Device | Read + **WRITE** | Stores inverter-written configuration (AC freq, limits, etc.) |
+| **Address 4** | Battery Real-Time Data | Read-only | Real-time battery data from CAN bus |
 
-**Test methodology:**
-1. Set 0x9009 = 500 → Epever displayed "Load Frequency: 5Hz"
-2. Set 0x9009 = 1240 (actual battery temp 12.4°C) → Epever displayed "Load Frequency: 12Hz"
-3. Omitted 0x9009 (returns 0) → Epever displayed "Load Frequency: 0Hz"
+### Address 3 (BMS-Link) Register 0x9009 = AC Frequency
 
-**Conclusion:** Register 0x9009 is NOT temperature - it's **frequency in Hz * 100**
+Through systematic testing:
 
-**Current implementation:** 0x9009 omitted (returns 0, displays 0Hz) to clearly indicate invalid/unknown value rather than faking data.
+| Test | Value Sent | Epever Display | Result |
+|------|-----------|----------------|--------|
+| Test 1 | 0x9009 = 500 | Load Freq: 5Hz | ✅ Confirms frequency |
+| Test 2 | 0x9009 = 1240 | Load Freq: 12Hz | ✅ Confirms Hz * 100 scaling |
+| Test 3 | 0x9009 = 0 | Load Freq: 0Hz | ✅ Confirms register usage |
+| **Phase 1** | **Store inverter write (5000)** | **Load Freq: 50Hz** | **✅ WORKING!** |
+
+**Conclusion:**
+- Address 3, register 0x9009 = **AC Grid Frequency (Hz * 100)**
+- NOT "Charging Low Temperature Protection" as per PDF
+- Inverter writes 5000 (50Hz) via Function 0x10, expects it echoed back
+
+### Address 4 (Battery) Register 0x9009 = Unknown
+
+Tested theory that Address 4's 0x9009 might be battery temperature:
+- Sent 1250 (12.5°C) in Address 4's 0x9009
+- Epever still shows "Battery Temp: 0.0°C"
+- **Conclusion:** Address 4's 0x9009 is NOT battery temperature
+
+**Current implementation (Phase 1):**
+- ✅ Address 3: Store configuration writes, echo back on reads
+- ✅ Load Frequency displays correctly (50Hz)
+- ❌ Battery Temp still shows 0°C (register unknown)
 
 ### Outstanding Issues
 
