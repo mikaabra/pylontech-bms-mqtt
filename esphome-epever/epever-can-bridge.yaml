@@ -286,6 +286,12 @@ globals:
     type: int
     initial_value: '0'
 
+  # Address 3 (BMS-Link) configuration storage - stores values written by inverter
+  # This is separate from Address 4 (Battery) which has real-time data
+  - id: addr3_config_0x9000
+    type: std::vector<uint16_t>
+    restore_value: no
+
 # Intervals
 interval:
   # CAN heartbeat - keep batteries awake by sending inverter-like frame
