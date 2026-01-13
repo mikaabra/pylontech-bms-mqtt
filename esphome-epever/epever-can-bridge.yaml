@@ -1,0 +1,995 @@
+# ESPHome CAN-to-RS485 Bridge for Epever Inverter
+#
+# Hardware: Waveshare ESP32-S3-RS485-CAN
+# CAN pins: TX=GPIO15, RX=GPIO16 (500kbps Pylontech protocol from batteries)
+# RS485 pins: TX=GPIO17, RX=GPIO18 (Modbus RTU to Epever inverter)
+#
+# Function: Reads battery data from CAN bus, responds to Epever RS485 Modbus queries
+# This bridges the protocol gap: batteries speak Pylontech CAN, Epever speaks Modbus RTU
+#
+# Protocol modes supported:
+# - Modbus RTU slave (Protocol 10 on Epever): 9600 baud, slave addr 1, function code 03/04
+# - Pylontech ASCII (Protocol 21 on Epever): 115200 baud - currently disabled
+
+substitutions:
+  device_name: epever-can-bridge
+  friendly_name: "Epever CAN Bridge"
+
+  # Modbus configuration for Protocol 10 (EPever BMS RS485 Modbus)
+  # Per BMS-Link Communication Address V1.6:
+  #   - BMS side: ID=1, 9600 bps (battery to BMS-Link)
+  #   - Header side: ID=4, 115200 bps (BMS-Link to inverter)
+  #
+  # When connecting directly to inverter (no BMS-Link), try:
+  #   Option A: modbus_addr=1, modbus_baud=9600 (if inverter polls BMS directly)
+  #   Option B: modbus_addr=4, modbus_baud=115200 (if inverter expects BMS-Link)
+  #
+  modbus_addr: "4"
+  modbus_baud: "115200"
+
+# External components: CAN listen-only mode
+external_components:
+  - source:
+      type: local
+      path: custom_components
+    components: [esp32_can_listen]
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  on_boot:
+    - priority: -100
+      then:
+        - logger.log: "CAN-to-RS485 bridge ready"
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG  # Change to WARN for production
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+
+  ap:
+    ssid: "${device_name}-fallback"
+    password: "fallback123"
+
+captive_portal:
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+web_server:
+  port: 80
+
+api:
+  encryption:
+    key: !secret api_key
+
+# UART for RS485 Modbus to Epever
+uart:
+  id: rs485_uart
+  tx_pin: GPIO17
+  rx_pin: GPIO18
+  baud_rate: ${modbus_baud}
+  data_bits: 8
+  stop_bits: 1
+  parity: NONE
+  rx_buffer_size: 256
+  # Flow control pin for half-duplex RS485 direction control
+  # GPIO21 is connected to DE/RE pins on the Waveshare board's RS485 transceiver
+  # HIGH = transmit mode, LOW = receive mode (ESPHome handles this automatically)
+  # This is CRITICAL for RS485 to work - without it the transceiver stays in TX mode
+  # and can't receive data from the Epever inverter
+  flow_control_pin: GPIO21
+
+# CAN bus configuration - NORMAL mode to allow heartbeat transmission
+canbus:
+  - platform: esp32_can_listen
+    id: can_bus
+    tx_pin: GPIO15
+    rx_pin: GPIO16
+    can_id: 0
+    bit_rate: 500kbps
+    mode: NORMAL
+
+    on_frame:
+      # 0x351: Voltage/current limits
+      - can_id: 0x351
+        then:
+          - lambda: |-
+              id(last_can_rx) = millis();
+              if (id(can_stale)) { id(can_stale) = false; }
+
+              if (x.size() != 8) return;
+              auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
+
+              float v_charge_max = le_u16(x[0], x[1]) / 10.0f;
+              float i_charge_lim = le_u16(x[2], x[3]) / 10.0f;
+              float i_dis_lim = le_u16(x[4], x[5]) / 10.0f;
+              float v_low_lim = le_u16(x[6], x[7]) / 10.0f;
+
+              // Sanity checks
+              if (v_charge_max >= 30.0f && v_charge_max <= 65.0f &&
+                  v_low_lim >= 30.0f && v_low_lim <= 65.0f &&
+                  i_charge_lim >= 0.0f && i_charge_lim <= 500.0f &&
+                  i_dis_lim >= 0.0f && i_dis_lim <= 500.0f) {
+                id(sensor_v_charge_max).publish_state(v_charge_max);
+                id(sensor_v_low).publish_state(v_low_lim);
+                id(sensor_i_charge).publish_state(i_charge_lim);
+                id(sensor_i_discharge).publish_state(i_dis_lim);
+
+                // Store for RS485 responses
+                id(bms_v_charge_max) = v_charge_max;
+                id(bms_v_low_limit) = v_low_lim;
+                id(bms_i_charge_limit) = i_charge_lim;
+                id(bms_i_discharge_limit) = i_dis_lim;
+              }
+
+      # 0x355: SOC/SOH
+      - can_id: 0x355
+        then:
+          - lambda: |-
+              id(last_can_rx) = millis();
+              if (id(can_stale)) { id(can_stale) = false; }
+
+              if (x.size() != 8) return;
+              auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
+
+              uint16_t soc = le_u16(x[0], x[1]);
+              uint16_t soh = le_u16(x[2], x[3]);
+
+              if (soc <= 100 && soh <= 100) {
+                id(sensor_soc).publish_state(soc);
+                id(sensor_soh).publish_state(soh);
+                id(bms_soc) = soc;
+                id(bms_soh) = soh;
+              }
+
+      # 0x359: Flags
+      - can_id: 0x359
+        then:
+          - lambda: |-
+              id(last_can_rx) = millis();
+              if (id(can_stale)) { id(can_stale) = false; }
+
+              if (x.size() != 8) return;
+              uint64_t flags = 0;
+              for (int i = 7; i >= 0; i--) {
+                flags = (flags << 8) | x[i];
+              }
+
+              // Hysteresis: only publish if flags changed OR 60s passed
+              uint32_t now = millis();
+              bool changed = (flags != id(last_flags_value));
+              bool heartbeat = (now - id(last_flags_publish) >= 60000);
+
+              if (changed || heartbeat) {
+                char buf[32];
+                snprintf(buf, sizeof(buf), "0x%016llX", flags);
+                id(sensor_flags).publish_state(buf);
+                id(last_flags_value) = flags;
+                id(last_flags_publish) = now;
+              }
+
+      # 0x370: Temperature and cell voltage extremes
+      - can_id: 0x370
+        then:
+          - lambda: |-
+              id(last_can_rx) = millis();
+              if (id(can_stale)) { id(can_stale) = false; }
+
+              if (x.size() != 8) return;
+              auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
+
+              float t1 = le_u16(x[0], x[1]) / 10.0f;
+              float t2 = le_u16(x[2], x[3]) / 10.0f;
+              float tmin = (t1 <= t2) ? t1 : t2;
+              float tmax = (t1 > t2) ? t1 : t2;
+
+              float v1 = le_u16(x[4], x[5]) / 1000.0f;
+              float v2 = le_u16(x[6], x[7]) / 1000.0f;
+
+              if (tmin >= -10.0f && tmax <= 50.0f) {
+                id(sensor_temp_min).publish_state(tmin);
+                id(sensor_temp_max).publish_state(tmax);
+                id(bms_temp_min) = tmin;
+                id(bms_temp_max) = tmax;
+              }
+
+              float vmin = 0, vmax = 0;
+              bool v1_valid = (v1 >= 2.0f && v1 <= 4.5f);
+              bool v2_valid = (v2 >= 2.0f && v2 <= 4.5f);
+
+              if (v1_valid && v2_valid) {
+                vmin = (v1 < v2) ? v1 : v2;
+                vmax = (v1 > v2) ? v1 : v2;
+              } else if (v1_valid) {
+                vmin = vmax = v1;
+              } else if (v2_valid) {
+                vmin = vmax = v2;
+              }
+
+              if (vmin > 0) {
+                id(sensor_cell_v_min).publish_state(vmin);
+                id(sensor_cell_v_max).publish_state(vmax);
+                id(sensor_cell_v_delta).publish_state(vmax - vmin);
+                id(bms_cell_v_min) = vmin;
+                id(bms_cell_v_max) = vmax;
+              }
+
+# Global variables
+globals:
+  # CAN mode tracking - always true now (NORMAL mode from start)
+  - id: can_normal_mode
+    type: bool
+    initial_value: 'true'
+
+  # CAN stale detection
+  - id: last_can_rx
+    type: uint32_t
+    initial_value: '0'
+  - id: can_stale
+    type: bool
+    initial_value: 'true'
+
+  # Flags hysteresis
+  - id: last_flags_value
+    type: uint64_t
+    initial_value: '0'
+  - id: last_flags_publish
+    type: uint32_t
+    initial_value: '0'
+
+  # BMS data for RS485 responses
+  - id: bms_soc
+    type: int
+    initial_value: '50'
+  - id: bms_soh
+    type: int
+    initial_value: '100'
+  - id: bms_v_charge_max
+    type: float
+    initial_value: '54.0'
+  - id: bms_v_low_limit
+    type: float
+    initial_value: '48.0'
+  - id: bms_i_charge_limit
+    type: float
+    initial_value: '100.0'
+  - id: bms_i_discharge_limit
+    type: float
+    initial_value: '100.0'
+  - id: bms_cell_v_min
+    type: float
+    initial_value: '3.30'
+  - id: bms_cell_v_max
+    type: float
+    initial_value: '3.35'
+  - id: bms_temp_min
+    type: float
+    initial_value: '25.0'
+  - id: bms_temp_max
+    type: float
+    initial_value: '25.0'
+
+  # RS485 responder state
+  - id: rs485_buffer
+    type: std::string
+    restore_value: no
+  - id: rs485_request_count
+    type: int
+    initial_value: '0'
+
+# Intervals
+interval:
+  # CAN heartbeat - keep batteries awake by sending inverter-like frame
+  # Only send when in NORMAL mode (after boot delay)
+  - interval: 1s
+    then:
+      - if:
+          condition:
+            lambda: 'return id(can_normal_mode);'
+          then:
+            - canbus.send:
+                canbus_id: can_bus
+                can_id: 0x305
+                data: [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00]
+
+  # CAN stale detection
+  - interval: 5s
+    then:
+      - lambda: |-
+          uint32_t now = millis();
+          uint32_t elapsed = now - id(last_can_rx);
+          if (elapsed > 30000 && !id(can_stale) && id(last_can_rx) > 0) {
+            id(can_stale) = true;
+            ESP_LOGW("can", "No CAN data for 30s, marking stale");
+          }
+
+  # Modbus RTU responder - responds to inverter read requests
+  # Protocol: Modbus RTU, slave address 1, 9600 baud, 8N1
+  # Function codes supported: 03 (read holding registers), 04 (read input registers)
+  - interval: 5ms
+    then:
+      - lambda: |-
+          static std::vector<uint8_t> rx_buffer;
+          static uint32_t last_rx_time = 0;
+          static uint32_t last_debug_time = 0;
+
+          // Read all available bytes
+          while (id(rs485_uart).available()) {
+            uint8_t c;
+            id(rs485_uart).read_byte(&c);
+            rx_buffer.push_back(c);
+            last_rx_time = millis();
+          }
+
+          // Periodic debug: show buffer state
+          if (millis() - last_debug_time > 2000) {
+            last_debug_time = millis();
+            if (!rx_buffer.empty()) {
+              ESP_LOGW("modbus_dbg", "Buffer has %d bytes, last_rx=%dms ago",
+                       rx_buffer.size(), millis() - last_rx_time);
+            }
+          }
+
+          // Process frame after 5ms silence (Modbus inter-frame gap at 9600 = ~4ms)
+          if (rx_buffer.empty() || (millis() - last_rx_time < 5)) return;
+
+          // Minimum Modbus request: addr(1) + func(1) + start(2) + count(2) + crc(2) = 8 bytes
+          if (rx_buffer.size() < 8) {
+            ESP_LOGW("modbus_raw", "Frame too short: %d bytes", rx_buffer.size());
+            rx_buffer.clear();
+            return;
+          }
+
+          // Raw debug: dump received bytes as hex
+          std::string hex_str;
+          char hex[4];
+          for (uint8_t b : rx_buffer) {
+            snprintf(hex, sizeof(hex), "%02X ", b);
+            hex_str += hex;
+          }
+          ESP_LOGW("modbus_raw", "RX %d bytes: %s", rx_buffer.size(), hex_str.c_str());
+
+          // Parse Modbus RTU request
+          uint8_t slave_addr = rx_buffer[0];
+          uint8_t func_code = rx_buffer[1];
+          uint16_t start_reg = (rx_buffer[2] << 8) | rx_buffer[3];
+          uint16_t reg_count = (rx_buffer[4] << 8) | rx_buffer[5];
+          uint16_t rx_crc = rx_buffer[rx_buffer.size()-1] << 8 | rx_buffer[rx_buffer.size()-2];
+
+          ESP_LOGD("modbus", "RX: addr=%d func=%02X start=%d count=%d",
+                   slave_addr, func_code, start_reg, reg_count);
+
+          // Calculate CRC16 to verify request
+          auto calc_crc16 = [](const uint8_t* data, size_t len) -> uint16_t {
+            uint16_t crc = 0xFFFF;
+            for (size_t i = 0; i < len; i++) {
+              crc ^= data[i];
+              for (int j = 0; j < 8; j++) {
+                if (crc & 0x0001) {
+                  crc = (crc >> 1) ^ 0xA001;
+                } else {
+                  crc >>= 1;
+                }
+              }
+            }
+            return crc;
+          };
+
+          uint16_t calc_crc = calc_crc16(rx_buffer.data(), rx_buffer.size() - 2);
+          if (calc_crc != rx_crc) {
+            ESP_LOGW("modbus", "CRC mismatch: calc=%04X rx=%04X", calc_crc, rx_crc);
+            rx_buffer.clear();
+            return;
+          }
+
+          // Respond to multiple addresses - inverter polls both 3 and 4
+          // Address 3: queries 0x3100 (41 regs), 0x9000 (32 regs)
+          // Address 4: queries 0x3100 (40 regs), 0x9000 (21 regs)
+          if (slave_addr != 3 && slave_addr != 4) {
+            ESP_LOGD("modbus", "Not our address (want 3 or 4, got %d)", slave_addr);
+            rx_buffer.clear();
+            return;
+          }
+
+          id(rs485_request_count)++;
+
+          // Build response based on function code
+          std::vector<uint8_t> response;
+          response.push_back(slave_addr);
+          response.push_back(func_code);
+
+          if (func_code == 0x01) {
+            // Read coils - return all OFF (0)
+            // Response: addr + func + byte_count + coil_data
+            uint8_t byte_count = (reg_count + 7) / 8;  // Round up to bytes
+            response.push_back(byte_count);
+            for (int i = 0; i < byte_count; i++) {
+              response.push_back(0x00);  // All coils off
+            }
+            ESP_LOGD("modbus", "Read coils: start=%d count=%d -> %d bytes", start_reg, reg_count, byte_count);
+          } else if (func_code == 0x02) {
+            // Read discrete inputs - return status bits
+            // 0x2000 range might be alarm/status bits
+            uint8_t byte_count = (reg_count + 7) / 8;
+            response.push_back(byte_count);
+            for (int i = 0; i < byte_count; i++) {
+              response.push_back(0x00);  // All inputs normal (no alarms)
+            }
+            ESP_LOGD("modbus", "Read inputs: start=0x%04X count=%d -> %d bytes", start_reg, reg_count, byte_count);
+          } else if (func_code == 0x03 || func_code == 0x04) {
+            // Read holding registers (03) or input registers (04)
+            // Response: addr + func + byte_count + data + crc
+            uint8_t byte_count = reg_count * 2;
+            response.push_back(byte_count);
+
+            // ============================================================
+            // EPever BMS-Link Communication Address V1.6 Register Map
+            // ============================================================
+            // 0x3100-0x3130 = Input registers (real-time data, read with FC 0x04)
+            // 0x9000-0x9019 = Holding registers (configuration, read with FC 0x03)
+            //
+            // All values per PDF specification with correct scaling factors
+            // ============================================================
+            for (uint16_t r = start_reg; r < start_reg + reg_count; r++) {
+              uint16_t value = 0;
+              float avg_cell = (id(bms_cell_v_min) + id(bms_cell_v_max)) / 2.0f;
+              float pack_v = avg_cell * 16.0f;
+              float avg_temp = (id(bms_temp_min) + id(bms_temp_max)) / 2.0f;
+
+              switch (r) {
+                // ============================================================
+                // 0x3100 Range: Real-time Parameters (Read-only, FC 0x04)
+                // Per BMS-Link Communication Address V1.6 PDF
+                // ============================================================
+
+                case 0x30FF: // BMS communication status (polled to check if BMS alive)
+                  value = 0x0001;  // Non-zero = BMS online
+                  break;
+
+                case 0x3100: // A0: Cell number - number of cells in battery
+                  value = 16;  // 16S LiFePO4
+                  break;
+
+                case 0x3101: // A1: Battery voltage (V * 100)
+                  value = (uint16_t)(pack_v * 100.0f);
+                  ESP_LOGD("modbus", "0x3101 Batt V = %d (%.2fV)", value, pack_v);
+                  break;
+
+                case 0x3102: // A2: Battery current (A * 100, int16, +charge/-discharge)
+                  value = 0;  // No current data from CAN
+                  break;
+
+                case 0x3103: // A3: Battery power L (W * 100, low word of 32-bit)
+                  value = 0;  // No power data
+                  break;
+
+                case 0x3104: // A4: Battery power H (W * 100, high word of 32-bit)
+                  value = 0;
+                  break;
+
+                case 0x3105: // A5: Battery full capacity (Ah)
+                  value = 560;  // 2x 280Ah batteries in parallel
+                  break;
+
+                case 0x3106: // A6: SOC - Percentage of surplus battery capacity (%)
+                  value = id(bms_soc);
+                  ESP_LOGD("modbus", "0x3106 SOC = %d%%", value);
+                  break;
+
+                case 0x3107: // A7: Battery surplus working time (minutes)
+                  value = 0;  // Unknown
+                  break;
+
+                case 0x3108: // A8: Maximum cell temperature (°C * 100, int16)
+                  {
+                    int16_t t = (int16_t)(id(bms_temp_max) * 100.0f);
+                    value = (uint16_t)t;
+                    ESP_LOGD("modbus", "0x3108 Temp Max = %d (%.1f°C)", t, id(bms_temp_max));
+                  }
+                  break;
+
+                case 0x3109: // A9: Minimum cell temperature (°C * 100, int16)
+                  {
+                    int16_t t = (int16_t)(id(bms_temp_min) * 100.0f);
+                    value = (uint16_t)t;
+                    ESP_LOGD("modbus", "0x3109 Temp Min = %d (%.1f°C)", t, id(bms_temp_min));
+                  }
+                  break;
+
+                case 0x310A: // A10: Equilibrium (balancing) temperature (°C * 100, int16)
+                  {
+                    int16_t t = (int16_t)(avg_temp * 100.0f);
+                    value = (uint16_t)t;
+                  }
+                  break;
+
+                case 0x310B: // A11: Environment temperature (°C * 100, int16)
+                  {
+                    int16_t t = (int16_t)(avg_temp * 100.0f);
+                    value = (uint16_t)t;
+                  }
+                  break;
+
+                case 0x310C: // A12: MOS temperature (°C * 100, int16)
+                  {
+                    int16_t t = (int16_t)(avg_temp * 100.0f);
+                    value = (uint16_t)t;
+                  }
+                  break;
+
+                case 0x310D: // A13: Cycle index (charge/discharge cycles)
+                  value = 0;  // Unknown from CAN
+                  break;
+
+                case 0x310E: // A14: Equilibrium flag (0=disabled, 1=enabled/balancing)
+                  value = 0;  // Not balancing (or unknown)
+                  break;
+
+                case 0x310F: // A15: Voltage status
+                  // 0=Normal, 1=UV Warning, 2=OV Warning, 0xF1=UV Protection, 0xF2=OV Protection
+                  value = 0;  // Normal
+                  break;
+
+                case 0x3110: // A16: Current status
+                  // 0=Normal, 1=Over Discharge Warning, 2=Over Charge Warning
+                  // 0xF1=Over Discharge Protection, 0xF2=Over Charge Protection
+                  value = 0;  // Normal
+                  break;
+
+                case 0x3111: // A17: MOS status (D0=charging MOS on, D1=discharging MOS on)
+                  value = 0x0003;  // Both MOSFETs on (charging and discharging enabled)
+                  break;
+
+                case 0x3112: // A18: Cell temperature status
+                  // 0=Normal, 1=Low Temp Warning, 2=Over Temp Warning
+                  // 0xF0=NTC error, 0xF1=Low Temp Protection, 0xF2=Over Temp Protection
+                  value = 0;  // Normal
+                  break;
+
+                case 0x3113: // A19: Equilibrium temperature status
+                  value = 0;  // Normal
+                  break;
+
+                case 0x3114: // A20: Environment temperature status
+                  value = 0;  // Normal
+                  break;
+
+                case 0x3115: // A21: MOS temperature status
+                  value = 0;  // Normal
+                  break;
+
+                // A22-A37 (0x3116-0x3125): Cell 1-16 status
+                // 0x00=Normal, 0x01=UV Warning, 0x02=OV Warning
+                // 0xF0=Cell detection, 0xF1=UV Protection, 0xF2=OV Protection
+                case 0x3116: case 0x3117: case 0x3118: case 0x3119:
+                case 0x311A: case 0x311B: case 0x311C: case 0x311D:
+                case 0x311E: case 0x311F: case 0x3120: case 0x3121:
+                case 0x3122: case 0x3123: case 0x3124: case 0x3125:
+                  value = 0;  // All cells normal
+                  break;
+
+                case 0x3126: // A38: Lithium battery protocol type
+                  value = 10;  // Protocol 10 = EPever BMS RS485 Modbus
+                  break;
+
+                case 0x3127: // A39: Lithium battery BMS status (bitfield)
+                  // D0: Charging protection, D1: Discharging protection
+                  // D2: Communication fault, D3: Other protection
+                  // D4: Charging over temp, D5: Discharging over temp
+                  // D12: Full charge mark, D13: Force charge mark
+                  // D14: 0=Enable discharge (1=stop), D15: 0=Enable charge (1=stop)
+                  value = 0x0000;  // All OK, charge+discharge enabled
+                  break;
+
+                case 0x3128: // A40: Added function tags
+                  // 0 = battery pack paralleling not supported
+                  // 0xACF1 = paralleling supported
+                  value = 0;  // No parallel support
+                  break;
+
+                case 0x3129: // A41: Real-time battery pack voltage (V * 10)
+                  value = (uint16_t)(pack_v * 10.0f);
+                  ESP_LOGD("modbus", "0x3129 Pack V = %d (%.1fV)", value, pack_v);
+                  break;
+
+                case 0x312A: // A42: Real-time battery pack current (A * 10, int16)
+                  value = 0;  // No current data
+                  break;
+
+                // A43-A48 (0x312B-0x3130): Reserved
+                case 0x312B: case 0x312C: case 0x312D:
+                case 0x312E: case 0x312F: case 0x3130:
+                  value = 0;
+                  break;
+
+                // ============================================================
+                // 0x9000 Range: Setting Parameters (Read/Write, FC 0x03/0x10)
+                // Per BMS-Link Communication Address V1.6 PDF
+                // ============================================================
+
+                case 0x9000: // C0: Under Voltage Warning (V * 100)
+                  value = (uint16_t)(id(bms_v_low_limit) * 100.0f);
+                  ESP_LOGD("modbus", "0x9000 UV Warn = %d (%.2fV)", value, id(bms_v_low_limit));
+                  break;
+
+                case 0x9001: // C1: Low Voltage Protection (V * 100)
+                  // Set slightly below warning voltage
+                  value = (uint16_t)((id(bms_v_low_limit) - 1.0f) * 100.0f);
+                  break;
+
+                case 0x9002: // C2: Over Voltage Warning (V * 100)
+                  // Set slightly below protection voltage
+                  value = (uint16_t)((id(bms_v_charge_max) - 0.5f) * 100.0f);
+                  break;
+
+                case 0x9003: // C3: Over Voltage Protection (V * 100)
+                  value = (uint16_t)(id(bms_v_charge_max) * 100.0f);
+                  ESP_LOGD("modbus", "0x9003 OV Prot = %d (%.2fV)", value, id(bms_v_charge_max));
+                  break;
+
+                case 0x9004: // C4: Charging Current Rated (A * 100) - battery max capacity
+                  value = 10000;  // 100A rated max
+                  break;
+
+                case 0x9005: // C5: Charging Current Limit (A * 100) - dynamic BMS limit
+                  {
+                    float lim = id(bms_i_charge_limit);
+                    if (lim < 1.0f) lim = 1.0f;  // Min 1A to avoid inverter issues
+                    value = (uint16_t)(lim * 100.0f);
+                    ESP_LOGD("modbus", "0x9005 Chg I Lim = %d (%.1fA)", value, lim);
+                  }
+                  break;
+
+                case 0x9006: // C6: Discharging Current Rated (A * 100) - battery max capacity
+                  value = 20000;  // 200A rated max
+                  break;
+
+                case 0x9007: // C7: Discharging Current Limit (A * 100) - dynamic BMS limit
+                  {
+                    float lim = id(bms_i_discharge_limit);
+                    if (lim < 1.0f) lim = 1.0f;
+                    value = (uint16_t)(lim * 100.0f);
+                    ESP_LOGD("modbus", "0x9007 Dis I Lim = %d (%.1fA)", value, lim);
+                  }
+                  break;
+
+                case 0x9008: // C8: Charging High Temperature Protection (°C * 100, int16)
+                  value = 4500;  // 45°C
+                  break;
+
+                case 0x9009: // C9: Charging Low Temperature Protection (°C * 100, int16)
+                  value = 500;  // 5°C (minimum safe charging temperature for LiFePO4)
+                  break;
+
+                case 0x900A: // C10: Discharging High Temperature Protection (°C * 100, int16)
+                  value = 5500;  // 55°C
+                  break;
+
+                case 0x900B: // C11: Discharging Low Temperature Protection (°C * 100, int16)
+                  {
+                    int16_t t = -2000;  // -20°C
+                    value = (uint16_t)t;
+                  }
+                  break;
+
+                case 0x900C: // C12: Cell High Temperature Protection (°C * 100, int16)
+                  value = 5500;  // 55°C
+                  break;
+
+                case 0x900D: // C13: Cell Low Temperature Protection (°C * 100, int16)
+                  {
+                    int16_t t = -2000;  // -20°C
+                    value = (uint16_t)t;
+                  }
+                  break;
+
+                case 0x900E: // C14: Equilibrium High Temperature Protection (°C * 100)
+                  value = 5500;  // 55°C
+                  break;
+
+                case 0x900F: // C15: Equilibrium Low Temperature Protection (°C * 100)
+                  {
+                    int16_t t = -2000;  // -20°C
+                    value = (uint16_t)t;
+                  }
+                  break;
+
+                case 0x9010: // C16: Environment High Temperature Protection (°C * 100)
+                  value = 5500;  // 55°C
+                  break;
+
+                case 0x9011: // C17: Environment Low Temperature Protection (°C * 100)
+                  {
+                    int16_t t = -2000;  // -20°C
+                    value = (uint16_t)t;
+                  }
+                  break;
+
+                case 0x9012: // C18: MOS High Temperature Protection (°C * 100)
+                  value = 8000;  // 80°C
+                  break;
+
+                case 0x9013: // C19: MOS Low Temperature Protection (°C * 100)
+                  {
+                    int16_t t = -2000;  // -20°C
+                    value = (uint16_t)t;
+                  }
+                  break;
+
+                case 0x9014: // C20: Protocol Type (default 10)
+                  value = 10;  // EPever BMS RS485 Modbus protocol
+                  break;
+
+                case 0x9015: // C21: Reserved
+                  value = 0;
+                  break;
+
+                case 0x9016: // C22: Low Voltage Protection (V * 10) - alternate scale
+                  value = (uint16_t)((id(bms_v_low_limit) - 1.0f) * 10.0f);
+                  break;
+
+                case 0x9017: // C23: Over Voltage Warning (V * 10) - alternate scale
+                  value = (uint16_t)((id(bms_v_charge_max) - 0.5f) * 10.0f);
+                  break;
+
+                case 0x9018: // C24: Charging Current Protection (A * 10)
+                  value = (uint16_t)(id(bms_i_charge_limit) * 10.0f);
+                  break;
+
+                case 0x9019: // C25: Discharging Current Protection (A * 10)
+                  value = (uint16_t)(id(bms_i_discharge_limit) * 10.0f);
+                  break;
+
+                default:
+                  // Unknown register - return 0
+                  value = 0;
+                  break;
+              }
+
+              // Add register value (big-endian)
+              response.push_back((value >> 8) & 0xFF);
+              response.push_back(value & 0xFF);
+            }
+          } else if (func_code == 0x05) {
+            // Write single coil - just echo back the request (acknowledge)
+            // Format: addr + func + coil_addr(2) + value(2)
+            ESP_LOGD("modbus", "Write coil: addr=0x%04X value=0x%04X", start_reg, reg_count);
+            response.push_back((start_reg >> 8) & 0xFF);
+            response.push_back(start_reg & 0xFF);
+            response.push_back((reg_count >> 8) & 0xFF);
+            response.push_back(reg_count & 0xFF);
+          } else if (func_code == 0x06) {
+            // Write single register - just echo back the request (acknowledge)
+            ESP_LOGD("modbus", "Write register: addr=0x%04X value=0x%04X", start_reg, reg_count);
+            response.push_back((start_reg >> 8) & 0xFF);
+            response.push_back(start_reg & 0xFF);
+            response.push_back((reg_count >> 8) & 0xFF);
+            response.push_back(reg_count & 0xFF);
+          } else if (func_code == 0x10) {
+            // Write multiple registers - acknowledge with start addr and count
+            // Request format: addr + func + start(2) + count(2) + bytes(1) + data...
+            ESP_LOGD("modbus", "Write multiple regs: addr=0x%04X count=%d", start_reg, reg_count);
+            response.push_back((start_reg >> 8) & 0xFF);
+            response.push_back(start_reg & 0xFF);
+            response.push_back((reg_count >> 8) & 0xFF);
+            response.push_back(reg_count & 0xFF);
+          } else {
+            // Unsupported function code - return exception
+            ESP_LOGW("modbus", "Unsupported function code: 0x%02X", func_code);
+            response[1] = func_code | 0x80;  // Exception response
+            response.push_back(0x01);  // Illegal function
+          }
+
+          // Calculate and append CRC
+          uint16_t resp_crc = calc_crc16(response.data(), response.size());
+          response.push_back(resp_crc & 0xFF);        // CRC low byte first
+          response.push_back((resp_crc >> 8) & 0xFF); // CRC high byte
+
+          // Send response with hex dump for first request of each type
+          static uint32_t last_dump_3100 = 0;
+          static uint32_t last_dump_9000 = 0;
+          bool do_dump = false;
+          if (start_reg == 0x3100 && millis() - last_dump_3100 > 5000) {
+            last_dump_3100 = millis();
+            do_dump = true;
+          }
+          if (start_reg == 0x9000 && millis() - last_dump_9000 > 5000) {
+            last_dump_9000 = millis();
+            do_dump = true;
+          }
+          if (do_dump) {
+            std::string hex_str;
+            char hex[4];
+            for (size_t i = 0; i < response.size() && i < 50; i++) {
+              snprintf(hex, sizeof(hex), "%02X ", response[i]);
+              hex_str += hex;
+            }
+            if (response.size() > 50) hex_str += "...";
+            ESP_LOGW("modbus_tx", "TX 0x%04X: %s", start_reg, hex_str.c_str());
+          }
+          ESP_LOGD("modbus", "TX %d bytes", response.size());
+          id(rs485_uart).write_array(response.data(), response.size());
+          id(rs485_uart).flush();
+
+          // Clear RX buffer
+          rx_buffer.clear();
+
+          // Small delay then clear any echo
+          delay(5);
+          while (id(rs485_uart).available()) {
+            uint8_t dummy;
+            id(rs485_uart).read_byte(&dummy);
+          }
+
+# CAN sensors with filtering (from working deye-bms-can.yaml)
+sensor:
+  - platform: template
+    id: sensor_soc
+    name: "BMS SOC"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    icon: "mdi:battery"
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 1.0
+
+  - platform: template
+    id: sensor_soh
+    name: "BMS SOH"
+    unit_of_measurement: "%"
+    accuracy_decimals: 0
+    icon: "mdi:battery-heart"
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 1.0
+
+  - platform: template
+    id: sensor_v_charge_max
+    name: "Charge Voltage Limit"
+    unit_of_measurement: "V"
+    device_class: voltage
+    accuracy_decimals: 1
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.1
+
+  - platform: template
+    id: sensor_v_low
+    name: "Discharge Voltage Limit"
+    unit_of_measurement: "V"
+    device_class: voltage
+    accuracy_decimals: 1
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.1
+
+  - platform: template
+    id: sensor_i_charge
+    name: "Charge Current Limit"
+    unit_of_measurement: "A"
+    device_class: current
+    accuracy_decimals: 1
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 1.0
+
+  - platform: template
+    id: sensor_i_discharge
+    name: "Discharge Current Limit"
+    unit_of_measurement: "A"
+    device_class: current
+    accuracy_decimals: 1
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 1.0
+
+  - platform: template
+    id: sensor_cell_v_min
+    name: "Cell V Min"
+    unit_of_measurement: "V"
+    device_class: voltage
+    accuracy_decimals: 3
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.005
+
+  - platform: template
+    id: sensor_cell_v_max
+    name: "Cell V Max"
+    unit_of_measurement: "V"
+    device_class: voltage
+    accuracy_decimals: 3
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.005
+
+  - platform: template
+    id: sensor_cell_v_delta
+    name: "Cell V Delta"
+    unit_of_measurement: "V"
+    accuracy_decimals: 3
+    icon: "mdi:chart-bell-curve-cumulative"
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.002
+
+  - platform: template
+    id: sensor_temp_min
+    name: "Temperature Min"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    accuracy_decimals: 1
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.5
+
+  - platform: template
+    id: sensor_temp_max
+    name: "Temperature Max"
+    unit_of_measurement: "°C"
+    device_class: temperature
+    accuracy_decimals: 1
+    filters:
+      - or:
+        - heartbeat: 60s
+        - delta: 0.5
+
+  - platform: template
+    name: "Pack Voltage"
+    unit_of_measurement: "V"
+    accuracy_decimals: 1
+    icon: "mdi:lightning-bolt"
+    lambda: 'return (id(bms_cell_v_min) + id(bms_cell_v_max)) / 2.0f * 16.0f;'
+    update_interval: 5s
+
+  - platform: template
+    name: "RS485 Requests"
+    accuracy_decimals: 0
+    icon: "mdi:counter"
+    lambda: 'return id(rs485_request_count);'
+    update_interval: 10s
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+
+text_sensor:
+  - platform: template
+    id: sensor_flags
+    name: "BMS Flags"
+    icon: "mdi:flag"
+
+  - platform: version
+    name: "ESPHome Version"
+
+binary_sensor:
+  - platform: template
+    name: "CAN Data Stale"
+    lambda: 'return id(can_stale);'
+    device_class: problem
+
+button:
+  - platform: restart
+    name: "Restart"
