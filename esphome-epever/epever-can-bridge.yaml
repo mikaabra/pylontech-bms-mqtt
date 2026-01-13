@@ -40,6 +40,21 @@ esphome:
   on_boot:
     - priority: -100
       then:
+        - lambda: |-
+            // Initialize Address 3 (BMS-Link) configuration storage
+            id(addr3_config_0x9000).resize(32, 0);
+            // Set sensible defaults (will be overwritten by inverter writes)
+            id(addr3_config_0x9000)[0] = 5460;   // 0x9000: UV Warning 54.6V
+            id(addr3_config_0x9000)[1] = 4800;   // 0x9001: LV Protection 48V
+            id(addr3_config_0x9000)[2] = 5620;   // 0x9002: OV Warning 56.2V
+            id(addr3_config_0x9000)[3] = 5500;   // 0x9003: OV Protection 55V
+            id(addr3_config_0x9000)[4] = 10000;  // 0x9004: Charge Rated 100A
+            id(addr3_config_0x9000)[5] = 10000;  // 0x9005: Charge Limit 100A
+            id(addr3_config_0x9000)[6] = 20000;  // 0x9006: Discharge Rated 200A
+            id(addr3_config_0x9000)[7] = 20000;  // 0x9007: Discharge Limit 200A
+            id(addr3_config_0x9000)[8] = 4500;   // 0x9008: Charge High Temp 45°C
+            id(addr3_config_0x9000)[9] = 0;      // 0x9009: AC Frequency (inverter will write)
+            ESP_LOGI("main", "Address 3 config storage initialized (32 registers)");
         - logger.log: "CAN-to-RS485 bridge ready"
 
 esp32:
@@ -451,6 +466,18 @@ interval:
               float pack_v = avg_cell * 16.0f;
               float avg_temp = (id(bms_temp_min) + id(bms_temp_max)) / 2.0f;
 
+              // Address 3 (BMS-Link): Echo stored configuration for 0x9000 range
+              if (slave_addr == 3 && r >= 0x9000 && r < 0x9020) {
+                uint16_t offset = r - 0x9000;
+                if (offset < id(addr3_config_0x9000).size()) {
+                  value = id(addr3_config_0x9000)[offset];
+                }
+                // Add to response and continue to next register
+                response.push_back((value >> 8) & 0xFF);
+                response.push_back(value & 0xFF);
+                continue;
+              }
+
               switch (r) {
                 // ============================================================
                 // 0x3100 Range: Real-time Parameters (Read-only, FC 0x04)
@@ -672,10 +699,15 @@ interval:
                   value = 4500;  // 45°C
                   break;
 
-                // case 0x9009: // C9: Charging Low Temperature Protection (°C * 100, int16)
-                  // NOTE: Epever interprets this as FREQUENCY! 500→5Hz, 1240→12.4Hz
-                  // Omitting this register (returning 0) to let Epever use its own frequency measurement
-                  // break;
+                case 0x9009:
+                  // Address 3 (BMS-Link): AC Frequency - handled above by stored config
+                  // Address 4 (Battery): Test theory - might be battery temperature!
+                  if (slave_addr == 4) {
+                    value = (uint16_t)(id(bms_temp_min) * 100.0f);
+                    ESP_LOGD("modbus", "Addr4 0x9009 (test batt temp) = %d (%.1f°C)", value, id(bms_temp_min));
+                  }
+                  // Note: Address 3 will never reach here due to continue above
+                  break;
 
                 case 0x900A: // C10: Discharging High Temperature Protection (°C * 100, int16)
                   value = 5500;  // 55°C
@@ -784,7 +816,30 @@ interval:
           } else if (func_code == 0x10) {
             // Write multiple registers - acknowledge with start addr and count
             // Request format: addr + func + start(2) + count(2) + bytes(1) + data...
-            ESP_LOGD("modbus", "Write multiple regs: addr=0x%04X count=%d", start_reg, reg_count);
+            ESP_LOGD("modbus", "Write multiple regs: slave=%d addr=0x%04X count=%d", slave_addr, start_reg, reg_count);
+
+            // Address 3 (BMS-Link): Store configuration writes
+            if (slave_addr == 3 && start_reg == 0x9000 && rx_buffer.size() >= 7) {
+              uint8_t byte_count = rx_buffer[6];
+              if (byte_count == reg_count * 2 && rx_buffer.size() >= (7 + byte_count)) {
+                // Parse and store written values
+                for (uint16_t i = 0; i < reg_count && i < 32; i++) {
+                  uint8_t hi = rx_buffer[7 + i*2];
+                  uint8_t lo = rx_buffer[7 + i*2 + 1];
+                  uint16_t value = (hi << 8) | lo;
+                  id(addr3_config_0x9000)[i] = value;
+                }
+                ESP_LOGI("modbus", "Addr3: Stored %d config regs to 0x9000", reg_count);
+
+                // Log key values
+                if (id(addr3_config_0x9000)[9] > 0) {
+                  ESP_LOGI("modbus", "Addr3: AC Freq = %.1fHz (reg 0x9009 = %d)",
+                           id(addr3_config_0x9000)[9] / 100.0f, id(addr3_config_0x9000)[9]);
+                }
+              }
+            }
+
+            // Send acknowledgment
             response.push_back((start_reg >> 8) & 0xFF);
             response.push_back(start_reg & 0xFF);
             response.push_back((reg_count >> 8) & 0xFF);
