@@ -63,7 +63,12 @@ esp32:
     type: esp-idf
 
 logger:
-  level: DEBUG  # Change to WARN for production
+  level: WARN  # WARN for production, DEBUG for troubleshooting
+  logs:
+    # canbus: ERROR  # Uncomment to suppress per-frame CAN logs
+    # modbus: ERROR  # Uncomment to suppress per-request modbus logs
+    modbus_raw: ERROR  # Suppress RX hex dumps (use DEBUG level to enable)
+    modbus_tx: ERROR  # Suppress TX hex dumps (use DEBUG level to enable)
 
 wifi:
   ssid: !secret wifi_ssid
@@ -118,10 +123,14 @@ canbus:
       - can_id: 0x351
         then:
           - lambda: |-
+              id(can_frame_count)++;
               id(last_can_rx) = millis();
               if (id(can_stale)) { id(can_stale) = false; }
 
-              if (x.size() != 8) return;
+              if (x.size() != 8) {
+                id(can_error_count)++;
+                return;
+              }
               auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
 
               float v_charge_max = le_u16(x[0], x[1]) / 10.0f;
@@ -150,10 +159,14 @@ canbus:
       - can_id: 0x355
         then:
           - lambda: |-
+              id(can_frame_count)++;
               id(last_can_rx) = millis();
               if (id(can_stale)) { id(can_stale) = false; }
 
-              if (x.size() != 8) return;
+              if (x.size() != 8) {
+                id(can_error_count)++;
+                return;
+              }
               auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
 
               uint16_t soc = le_u16(x[0], x[1]);
@@ -170,10 +183,14 @@ canbus:
       - can_id: 0x359
         then:
           - lambda: |-
+              id(can_frame_count)++;
               id(last_can_rx) = millis();
               if (id(can_stale)) { id(can_stale) = false; }
 
-              if (x.size() != 8) return;
+              if (x.size() != 8) {
+                id(can_error_count)++;
+                return;
+              }
               uint64_t flags = 0;
               for (int i = 7; i >= 0; i--) {
                 flags = (flags << 8) | x[i];
@@ -196,10 +213,14 @@ canbus:
       - can_id: 0x370
         then:
           - lambda: |-
+              id(can_frame_count)++;
               id(last_can_rx) = millis();
               if (id(can_stale)) { id(can_stale) = false; }
 
-              if (x.size() != 8) return;
+              if (x.size() != 8) {
+                id(can_error_count)++;
+                return;
+              }
               auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
 
               float t1 = le_u16(x[0], x[1]) / 10.0f;
@@ -243,10 +264,15 @@ canbus:
       - can_id: 0x35C
         then:
           - lambda: |-
+              id(can_frame_count)++;
               id(last_can_rx) = millis();
               if (id(can_stale)) { id(can_stale) = false; }
 
-              if (x.size() >= 2) {
+              if (x.size() < 2) {
+                id(can_error_count)++;
+                return;
+              }
+              {
                 uint8_t flags = x[0];
                 // Bit 5: Charge enable
                 // Bit 6: Discharge enable
@@ -264,10 +290,15 @@ canbus:
       - can_id: 0x35F
         then:
           - lambda: |-
+              id(can_frame_count)++;
               id(last_can_rx) = millis();
               if (id(can_stale)) { id(can_stale) = false; }
 
-              if (x.size() >= 2) {
+              if (x.size() < 2) {
+                id(can_error_count)++;
+                return;
+              }
+              {
                 uint8_t flags = x[0];
                 // V1.3 uses same bit positions as V1.2
                 bool charge_en = (flags & 0x20) != 0;
@@ -351,6 +382,17 @@ globals:
   - id: rs485_request_count
     type: int
     initial_value: '0'
+  - id: rs485_error_count
+    type: int
+    initial_value: '0'
+
+  # CAN bus statistics
+  - id: can_frame_count
+    type: int
+    initial_value: '0'
+  - id: can_error_count
+    type: int
+    initial_value: '0'
 
   # Address 3 (BMS-Link) configuration storage - stores values written by inverter
   # This is separate from Address 4 (Battery) which has real-time data
@@ -384,6 +426,22 @@ interval:
             ESP_LOGW("can", "No CAN data for 30s, marking stale");
           }
 
+  # Periodic CAN health summary (replaces per-frame logging)
+  - interval: 10s
+    then:
+      - lambda: |-
+          static uint32_t last_rx_check = 0;
+          uint32_t now = millis();
+          uint32_t elapsed = now - id(last_can_rx);
+          if (last_rx_check == 0) last_rx_check = now;
+
+          // Only log if we've received CAN data recently (healthy)
+          if (elapsed < 30000 && (now - last_rx_check) >= 10000) {
+            ESP_LOGI("can", "CAN OK (SOC=%d%%, V=%.1fV, last_rx=%dms ago)",
+                     id(bms_soc), id(bms_v_charge_max), elapsed);
+            last_rx_check = now;
+          }
+
   # Modbus RTU responder - responds to inverter read requests
   # Protocol: Modbus RTU, slave address 1, 9600 baud, 8N1
   # Function codes supported: 03 (read holding registers), 04 (read input registers)
@@ -406,8 +464,7 @@ interval:
           if (millis() - last_debug_time > 2000) {
             last_debug_time = millis();
             if (!rx_buffer.empty()) {
-              ESP_LOGW("modbus_dbg", "Buffer has %d bytes, last_rx=%dms ago",
-                       rx_buffer.size(), millis() - last_rx_time);
+              // Buffer status logging disabled to reduce memory pressure
             }
           }
 
@@ -416,19 +473,25 @@ interval:
 
           // Minimum Modbus request: addr(1) + func(1) + start(2) + count(2) + crc(2) = 8 bytes
           if (rx_buffer.size() < 8) {
-            ESP_LOGW("modbus_raw", "Frame too short: %d bytes", rx_buffer.size());
+            id(rs485_error_count)++;
+            ESP_LOGW("modbus", "Frame too short: %d bytes", rx_buffer.size());
             rx_buffer.clear();
             return;
           }
 
-          // Raw debug: dump received bytes as hex
-          std::string hex_str;
-          char hex[4];
-          for (uint8_t b : rx_buffer) {
-            snprintf(hex, sizeof(hex), "%02X ", b);
-            hex_str += hex;
+          // Debug: Log RX frames (only when logger level is DEBUG)
+          #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
+          {
+            std::string hex_str;
+            char hex[4];
+            for (size_t i = 0; i < rx_buffer.size() && i < 20; i++) {
+              snprintf(hex, sizeof(hex), "%02X ", rx_buffer[i]);
+              hex_str += hex;
+            }
+            if (rx_buffer.size() > 20) hex_str += "...";
+            ESP_LOGD("modbus_raw", "RX %d bytes: %s", rx_buffer.size(), hex_str.c_str());
           }
-          ESP_LOGW("modbus_raw", "RX %d bytes: %s", rx_buffer.size(), hex_str.c_str());
+          #endif
 
           // Parse Modbus RTU request
           uint8_t slave_addr = rx_buffer[0];
@@ -458,7 +521,15 @@ interval:
 
           uint16_t calc_crc = calc_crc16(rx_buffer.data(), rx_buffer.size() - 2);
           if (calc_crc != rx_crc) {
-            ESP_LOGW("modbus", "CRC mismatch: calc=%04X rx=%04X", calc_crc, rx_crc);
+            id(rs485_error_count)++;
+            // Log with hex dump to debug RS485 issues
+            std::string hex_str;
+            char hex[4];
+            for (size_t i = 0; i < rx_buffer.size() && i < 16; i++) {
+              snprintf(hex, sizeof(hex), "%02X ", rx_buffer[i]);
+              hex_str += hex;
+            }
+            ESP_LOGW("modbus", "CRC mismatch: calc=%04X rx=%04X, data: %s", calc_crc, rx_crc, hex_str.c_str());
             rx_buffer.clear();
             return;
           }
@@ -578,7 +649,6 @@ interval:
                   {
                     int16_t t = (int16_t)(id(bms_temp_max) * 100.0f);
                     value = (uint16_t)t;
-                    ESP_LOGD("modbus", "0x3108 Temp Max = %d (%.1f°C)", t, id(bms_temp_max));
                   }
                   break;
 
@@ -586,7 +656,6 @@ interval:
                   {
                     int16_t t = (int16_t)(id(bms_temp_min) * 100.0f);
                     value = (uint16_t)t;
-                    ESP_LOGD("modbus", "0x3109 Temp Min = %d (%.1f°C)", t, id(bms_temp_min));
                   }
                   break;
 
@@ -635,8 +704,6 @@ interval:
                   value = 0;
                   if (id(can_discharge_enabled)) value |= 0x01;  // D0: Discharge MOS
                   if (id(can_charge_enabled)) value |= 0x02;     // D1: Charge MOS
-                  ESP_LOGD("modbus", "0x3111 MOS status = 0x%04X (CHG=%d DIS=%d)",
-                           value, id(can_charge_enabled), id(can_discharge_enabled));
                   break;
 
                 case 0x3112: // A18: Cell temperature status
@@ -681,8 +748,6 @@ interval:
                   // Map from CAN flags - INVERTED logic (bit=1 means STOP, bit=0 means ENABLE)
                   if (!id(can_discharge_enabled)) value |= 0x4000;  // D14: Stop discharge
                   if (!id(can_charge_enabled)) value |= 0x8000;     // D15: Stop charge
-                  ESP_LOGD("modbus", "0x3127 BMS status = 0x%04X (CHG_EN=%d DIS_EN=%d)",
-                           value, id(can_charge_enabled), id(can_discharge_enabled));
                   break;
 
                 case 0x3128: // A40: Added function tags
@@ -693,7 +758,6 @@ interval:
 
                 case 0x3129: // A41: Real-time battery pack voltage (V * 10)
                   value = (uint16_t)(pack_v * 10.0f);
-                  ESP_LOGD("modbus", "0x3129 Pack V = %d (%.1fV)", value, pack_v);
                   break;
 
                 case 0x312A: // A42: Real-time battery pack current (A * 10, int16)
@@ -713,7 +777,6 @@ interval:
 
                 case 0x9000: // C0: Under Voltage Warning (V * 100)
                   value = (uint16_t)(id(bms_v_low_limit) * 100.0f);
-                  ESP_LOGD("modbus", "0x9000 UV Warn = %d (%.2fV)", value, id(bms_v_low_limit));
                   break;
 
                 case 0x9001: // C1: Low Voltage Protection (V * 100)
@@ -728,7 +791,6 @@ interval:
 
                 case 0x9003: // C3: Over Voltage Protection (V * 100)
                   value = (uint16_t)(id(bms_v_charge_max) * 100.0f);
-                  ESP_LOGD("modbus", "0x9003 OV Prot = %d (%.2fV)", value, id(bms_v_charge_max));
                   break;
 
                 case 0x9004: // C4: Charging Current Rated (A * 100) - battery max capacity
@@ -740,7 +802,6 @@ interval:
                     float lim = id(bms_i_charge_limit);
                     if (lim < 1.0f) lim = 1.0f;  // Min 1A to avoid inverter issues
                     value = (uint16_t)(lim * 100.0f);
-                    ESP_LOGD("modbus", "0x9005 Chg I Lim = %d (%.1fA)", value, lim);
                   }
                   break;
 
@@ -753,7 +814,6 @@ interval:
                     float lim = id(bms_i_discharge_limit);
                     if (lim < 1.0f) lim = 1.0f;
                     value = (uint16_t)(lim * 100.0f);
-                    ESP_LOGD("modbus", "0x9007 Dis I Lim = %d (%.1fA)", value, lim);
                   }
                   break;
 
@@ -907,7 +967,7 @@ interval:
             response.push_back(reg_count & 0xFF);
           } else {
             // Unsupported function code - return exception
-            ESP_LOGW("modbus", "Unsupported function code: 0x%02X", func_code);
+            // Unsupported function code - silently ignore
             response[1] = func_code | 0x80;  // Exception response
             response.push_back(0x01);  // Illegal function
           }
@@ -917,29 +977,23 @@ interval:
           response.push_back(resp_crc & 0xFF);        // CRC low byte first
           response.push_back((resp_crc >> 8) & 0xFF); // CRC high byte
 
-          // Send response with FULL hex dump (no truncation) for periodic review
-          static uint32_t last_dump_3100 = 0;
-          static uint32_t last_dump_9000 = 0;
-          bool do_dump = false;
-          if (start_reg == 0x3100 && millis() - last_dump_3100 > 5000) {
-            last_dump_3100 = millis();
-            do_dump = true;
-          }
-          if (start_reg == 0x9000 && millis() - last_dump_9000 > 5000) {
-            last_dump_9000 = millis();
-            do_dump = true;
-          }
-          if (do_dump) {
+          // Debug: Log TX frames (only when logger level is DEBUG)
+          ESP_LOGD("modbus", "TX %d bytes", response.size());
+
+          #if ESPHOME_LOG_LEVEL >= ESPHOME_LOG_LEVEL_DEBUG
+          static uint32_t last_tx_dump = 0;
+          if (millis() - last_tx_dump > 5000) {
+            last_tx_dump = millis();
             std::string hex_str;
             char hex[4];
-            // Log FULL response without truncation for verification
-            for (size_t i = 0; i < response.size(); i++) {
+            for (size_t i = 0; i < response.size() && i < 40; i++) {
               snprintf(hex, sizeof(hex), "%02X ", response[i]);
               hex_str += hex;
             }
-            ESP_LOGW("modbus_tx", "TX 0x%04X (%d bytes): %s", start_reg, response.size(), hex_str.c_str());
+            if (response.size() > 40) hex_str += "...";
+            ESP_LOGD("modbus_tx", "TX sample: %s", hex_str.c_str());
           }
-          ESP_LOGD("modbus", "TX %d bytes", response.size());
+          #endif
           id(rs485_uart).write_array(response.data(), response.size());
           id(rs485_uart).flush();
 
@@ -1089,6 +1143,27 @@ sensor:
     accuracy_decimals: 0
     icon: "mdi:counter"
     lambda: 'return id(rs485_request_count);'
+    update_interval: 10s
+
+  - platform: template
+    name: "RS485 Errors"
+    accuracy_decimals: 0
+    icon: "mdi:alert-circle"
+    lambda: 'return id(rs485_error_count);'
+    update_interval: 10s
+
+  - platform: template
+    name: "CAN Frames"
+    accuracy_decimals: 0
+    icon: "mdi:counter"
+    lambda: 'return id(can_frame_count);'
+    update_interval: 10s
+
+  - platform: template
+    name: "CAN Errors"
+    accuracy_decimals: 0
+    icon: "mdi:alert-circle"
+    lambda: 'return id(can_error_count);'
     update_interval: 10s
 
   - platform: wifi_signal
