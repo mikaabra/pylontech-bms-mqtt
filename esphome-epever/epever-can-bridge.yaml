@@ -90,6 +90,7 @@ web_server:
 api:
   encryption:
     key: !secret api_key
+  reboot_timeout: 0s  # Disable watchdog - don't reboot when no clients connected
 
 # UART for RS485 Modbus to Epever
 uart:
