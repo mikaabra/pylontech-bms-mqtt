@@ -299,25 +299,42 @@ sudo journalctl -u pylon-rs485-mqtt -f
 
 ## Protocol Reference
 
-### CAN Bus (500kbps)
+See [docs/PROTOCOL_REFERENCE.md](docs/PROTOCOL_REFERENCE.md) for comprehensive protocol documentation including:
+- Pylontech CAN bus protocol (0x351, 0x355, 0x359, 0x35C, 0x370)
+- RS485 command/response protocol with checksums
+- EPever BMS-Link Modbus protocol (registers 0x3100-0x3127, 0x9000-0x9019)
+- Deye inverter Modbus-TCP registers
 
-| Arbitration ID | Content |
-|----------------|---------|
-| 0x351 | Voltage/current limits (charge max, charge current, discharge current, low voltage) |
-| 0x355 | SOC/SOH percentages |
-| 0x359 | Status flags (protection states) |
-| 0x370 | Cell voltage extremes and temperatures |
+## ESPHome Implementations
 
-### RS485 (9600 baud)
+This project includes two separate ESPHome implementations for different use cases:
 
-| Command | CID2 | Response |
-|---------|------|----------|
-| Analog Data | 0x42 | Cell voltages, temps, current, capacity, cycles |
-| Alarm Info | 0x44 | Cell alarms, balancing flags, protection status |
+### CAN-to-Modbus Bridge for EPever (esphome-epever/)
 
-## ESPHome (Optional)
+ESP32-based gateway for **EPever inverter sites** that translates Pylontech CAN to EPever BMS-Link Modbus protocol:
 
-The `esphome/` directory contains configuration for a Waveshare ESP32-S3-RS485-CAN board to replace the Pi-based bridge. See `esphome/README.md` for details.
+- **Hardware**: Waveshare ESP32-S3-RS485-CAN board
+- **Use Case**: Pylontech batteries + EPever UP5000 inverter
+- **Protocol**: CAN (500kbps) → Modbus RTU (9600 baud)
+- **Key Features**:
+  - SOC-based battery reserve control (configurable UPS reserve)
+  - Manual charge/discharge control via web UI
+  - NVRAM persistence for all settings
+  - Real-time BMS protection flag mapping
+- **Documentation**: [esphome-epever/HLD.md](esphome-epever/HLD.md) and [esphome-epever/LLD.md](esphome-epever/LLD.md)
+
+### CAN-to-MQTT Bridge for Deye (esphome/)
+
+ESP32-based gateway for **Deye/generic sites** that publishes battery data to MQTT:
+
+- **Hardware**: Waveshare ESP32-S3-RS485-CAN board
+- **Use Case**: Pylontech batteries + Home Assistant MQTT integration
+- **Protocol**: CAN (500kbps) → MQTT (WiFi)
+- **Key Features**:
+  - Home Assistant auto-discovery
+  - Low power alternative to Raspberry Pi
+  - Native ESPHome integration
+- **Documentation**: See [esphome/README.md](esphome/README.md)
 
 ## Troubleshooting
 
