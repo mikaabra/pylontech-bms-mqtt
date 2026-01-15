@@ -6,6 +6,11 @@ __pycache__/
 # ESPHome
 esphome/.esphome/
 esphome/secrets.yaml
+esphome-epever/.esphome/
+*.bin
+*.elf
+*.ota
+*.factory
 
 # Logs
 *.log
