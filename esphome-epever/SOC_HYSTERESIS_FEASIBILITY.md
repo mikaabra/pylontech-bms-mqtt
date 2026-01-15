@@ -463,6 +463,62 @@ User confirmed: _"looks good, seems to work so far"_
 - No complex algorithms
 - Clear separation of concerns
 
+## How the Anti-Cycling Mechanism Works
+
+### The Problem: Potential Cycling Without Gap
+
+If force charge OFF threshold equals discharge allow threshold (e.g., both at 50%):
+```
+1. Battery charges to 50% → Force charge clears
+2. Discharge immediately allowed at 50%
+3. Battery discharges to 49%
+4. Force charge activates again
+5. Cycle repeats: 49% ↔ 50% ↔ 49% (oscillation)
+```
+
+### The Solution: 5% Safety Buffer (50-55%)
+
+**Implementation uses separate thresholds:**
+- Force charge OFF threshold: 50%
+- Discharge allow threshold: 55% (5% higher)
+
+**How it prevents cycling:**
+
+1. **Force charge clears at 50%**: When battery reaches 50%, force charge flag is cleared
+2. **Discharge remains BLOCKED from 50-55%**: Critical feature - discharge block doesn't clear until 56%
+3. **Battery cannot discharge**: Inverter cannot use battery during 50-55% range
+4. **Natural charging continues**: With PV or grid, battery continues charging beyond 50%
+5. **Discharge allowed at 56%**: Only after crossing 55% threshold is discharge unblocked
+
+**Example with Default Thresholds (50%/55%):**
+
+```
+SOC    Force Charge    Discharge Block    What Happens
+----   -------------   ----------------   ----------------------------------
+49%    ✓ Active        ✓ Blocked          Battery idle, waiting for charge
+50%    ✗ CLEARED       ✓ Still BLOCKED    Charging from PV (no cycling!)
+52%    ✗ Off           ✓ Still BLOCKED    Charging continues
+54%    ✗ Off           ✓ Still BLOCKED    Charging continues
+56%    ✗ Off           ✗ ALLOWED          Battery available for discharge
+```
+
+**Key Insight:** The 5% gap where discharge remains blocked is what prevents cycling. The battery **cannot discharge back to 49%** during the 50-55% range because discharge is blocked. This forces the battery to naturally charge up to 56% before it becomes available for use.
+
+**Code Implementation:**
+```cpp
+// Force charge clears at 50%
+if (soc >= id(soc_force_charge_off_threshold) && id(soc_force_charge_active)) {
+  id(soc_force_charge_active) = false;  // Clears at 50%
+}
+
+// Discharge block clears at 55% (NOT 50%!)
+if (soc > id(soc_discharge_allow_threshold) && id(soc_discharge_blocked)) {
+  id(soc_discharge_blocked) = false;  // Clears at 56% (above 55%)
+}
+```
+
+The separation of these two thresholds (50% vs 55%) is the fundamental anti-cycling mechanism.
+
 ## Lessons Learned
 
 1. **Web UI configuration > hardcoded**: User appreciated ability to adjust thresholds
@@ -470,6 +526,7 @@ User confirmed: _"looks good, seems to work so far"_
 3. **Binary sensors are useful**: Real-time status visibility without log diving
 4. **Layered control works well**: SOC adds restrictions without interfering with BMS/manual controls
 5. **5% increments are sufficient**: Provides flexibility without overwhelming choices
+6. **Gap between thresholds prevents cycling**: The 5% safety buffer (50-55%) is critical to prevent oscillation - force charge clears at lower threshold while discharge block persists until upper threshold
 
 ## Future Enhancements (Optional)
 
