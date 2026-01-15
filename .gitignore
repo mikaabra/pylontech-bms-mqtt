@@ -32,6 +32,7 @@ esphome-epever/.esphome/
 
 # System files
 .DS_Store
+._*
 .bash_history
 .bashrc
 .profile
