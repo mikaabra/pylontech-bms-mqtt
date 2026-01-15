@@ -540,6 +540,30 @@ From original Phase 3 design:
 
 ## Conclusion
 
-The SOC reserve control feature was **successfully implemented** following the feasibility analysis design. The implementation is **working correctly** and provides **exactly the UPS reserve behavior** the user requested. The web UI configuration makes it **user-friendly** and the safety features ensure **BMS protection is never compromised**.
+The SOC reserve control feature was **successfully implemented** following the feasibility analysis design. The implementation is **working correctly** from a technical perspective and the web UI configuration makes it **user-friendly** while safety features ensure **BMS protection is never compromised**.
 
-**Status:** Production-ready ✅
+**Status:** ⚠️ **KNOWN LIMITATION DISCOVERED**
+
+## Critical Limitation Discovered (2026-01-15)
+
+**Issue**: EPever inverter respects the "Stop Discharge" flag (D14) in ALL operating modes, including island mode (power outages).
+
+**Impact**:
+- The SOC reserve control does NOT provide "UPS reserve" functionality as originally intended
+- When discharge is blocked below 50%, the battery cannot be used even during blackouts
+- The reserved capacity (50%) is inaccessible when you need it most (power outages)
+
+**Root Cause**: The inverter treats D14 as an absolute prohibition, with no distinction between grid-tied and island mode operation.
+
+**Current Recommendation**:
+- **Disable SOC Reserve Control** for systems requiring backup power functionality
+- Use inverter's voltage-based discharge cutoff instead (e.g., 48V for ~50% SOC)
+- This allows natural battery discharge during power outages while still protecting from over-discharge
+
+**Alternative Use Case**:
+The feature can still be useful for:
+- Systems that don't require backup power (grid-tied only)
+- Preventing deep discharge during normal operation
+- Battery longevity optimization (not UPS functionality)
+
+**See**: [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for complete documentation, testing results, and potential future solutions.

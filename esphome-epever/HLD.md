@@ -274,18 +274,31 @@ D15 Stop Charge Control: Auto (CAN)
 - **SOC_HYSTERESIS_FEASIBILITY.md**: SOC control design and implementation report
 - **docs/PROTOCOL_REFERENCE.md**: Complete protocol specifications
 
+## Known Limitations
+
+### ⚠️ Critical: Discharge Flag Blocks Island Mode Operation
+
+**Issue**: When the "Stop Discharge" flag (D14) is set, the EPever inverter will NOT discharge the battery even in island mode (during power outages).
+
+**Impact**: The SOC Reserve Control feature cannot serve as a true "UPS reserve" because the reserved capacity is inaccessible during blackouts.
+
+**Workaround**: Disable SOC Reserve Control and use the inverter's built-in voltage-based discharge cutoff settings instead.
+
+**Details**: See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for complete analysis, testing results, and potential solutions.
+
 ## Future Enhancements
 
 Potential features not currently implemented:
 
-1. **Time-based overrides**: Disable reserve during peak PV hours
-2. **Weather integration**: Adjust reserve based on forecast
-3. **Home Assistant automation**: Expose thresholds as number entities
-4. **Seasonal adjustment**: Higher reserve in winter, lower in summer
-5. **Battery balancing control**: Trigger BMS balancing via CAN
-6. **Multi-battery support**: Handle multiple battery banks
-7. **Logging to SD card**: Historical data logging
-8. **MQTT publishing**: Parallel MQTT output for Home Assistant integration
+1. **Grid detection for conditional discharge blocking**: Add GPIO input to detect island mode and automatically clear D14 flag during power outages
+2. **Time-based overrides**: Disable reserve during peak PV hours
+3. **Weather integration**: Adjust reserve based on forecast
+4. **Home Assistant automation**: Expose thresholds as number entities
+5. **Seasonal adjustment**: Higher reserve in winter, lower in summer
+6. **Battery balancing control**: Trigger BMS balancing via CAN
+7. **Multi-battery support**: Handle multiple battery banks
+8. **Logging to SD card**: Historical data logging
+9. **MQTT publishing**: Parallel MQTT output for Home Assistant integration
 
 ## Acknowledgments
 

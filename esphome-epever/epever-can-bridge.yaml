@@ -74,6 +74,13 @@ wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
 
+  # Static IP configuration (comment out for DHCP)
+  manual_ip:
+    static_ip: !secret static_ip
+    gateway: !secret gateway
+    subnet: !secret subnet
+    # dns1: !secret dns1  # Optional: custom DNS server
+
   ap:
     ssid: "${device_name}-fallback"
     password: "fallback123"
