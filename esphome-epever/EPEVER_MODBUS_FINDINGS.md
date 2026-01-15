@@ -248,9 +248,13 @@ ESP32 was not transferring BMS protection states from CAN bus to Modbus status r
 ### Solution: CAN to Modbus Status Mapping
 
 **CAN Input:**
-- **0x35C** (Protocol V1.2) or **0x35F** (Protocol V1.3): Battery Charge Request Flags
-  - Bit 5: Charge enable (1=allowed, 0=forbidden)
-  - Bit 6: Discharge enable (1=allowed, 0=forbidden)
+- **0x35C** (Protocol V1.2): Battery Charge Request Flags
+  - **Bit 7 (0x80)**: Charge enable (1=allowed, 0=forbidden)
+  - **Bit 6 (0x40)**: Discharge enable (1=allowed, 0=forbidden)
+  - **Bit 5 (0x20)**: Force charge level 1 (1=request immediate charge)
+  - **Bit 4 (0x10)**: Force charge level 2 (urgent charge request)
+
+- **Note:** 0x35F in V1.3 is battery information (type, version, capacity), NOT charge request flags
 
 **Modbus Output:**
 - **0x3111** (MOS Status):

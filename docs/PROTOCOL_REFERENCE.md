@@ -77,18 +77,33 @@ Bitfield indicating various protection and alarm states. This message is depreca
 **Note:** V1.3 replaces 0x359 with 0x35A for compatibility with SMA/Victron protocols.
 
 #### 0x35C - Battery Charge Request Flags (V1.2)
-**Length:** 2 bytes
+**Length:** 1-2 bytes (only byte 0 is used)
 
-| Byte | Bit | Meaning |
-|------|-----|---------|
-| 0 | 7 | Force charge request |
-| 0 | 6 | Discharge enable |
-| 0 | 5 | Charge enable |
-| 0 | 4 | Force charge request II |
+**Byte 0 bit mapping (verified against [Setfire Labs documentation](https://www.setfirelabs.com/energy-monitoring/pylontech-battery-can-comms-v1-2-vs-v1-3)):**
 
-**Example:** `C0 00` → Charge enabled, Discharge enabled
+| Bit | Mask | Field Name | Meaning |
+|-----|------|------------|---------|
+| 7 | 0x80 | RCE | **Charge Enable** - Battery accepts charging |
+| 6 | 0x40 | RDE | **Discharge Enable** - Battery allows discharge |
+| 5 | 0x20 | CI1 | **Force Charge Level 1** - Request immediate charge |
+| 4 | 0x10 | CI2 | **Force Charge Level 2** - Urgent charge request |
+| 3 | 0x08 | RFC | **Request Full Charge** - Request 100% charge |
+| 2-0 | 0x07 | - | Reserved/unused |
 
-**Note:** V1.3 replaces 0x35C with 0x35F.
+**Common Values:**
+- `0xC0` (11000000) → Charge enabled, Discharge enabled (normal operation)
+- `0xE0` (11100000) → Charge enabled, Discharge enabled, Force charge level 1 (low SOC)
+- `0x40` (01000000) → Discharge only (charge disabled, e.g., high SOC/overvolt protection)
+- `0x80` (10000000) → Charge only (discharge disabled, e.g., low SOC/undervolt protection)
+
+**Critical Implementation Note:** Bits 7 and 6 control charge/discharge enable. Bit 5 is NOT charge enable - it's a force charge request flag that may be set simultaneously with bit 7. Always check bit 7 for charge enable status.
+
+**Typical Behavior:**
+- At 14% SOC: `0x20` (00100000) - Force charge active, charge/discharge both disabled (protection)
+- At 50% SOC: `0xC0` (11000000) - Normal operation, both enabled
+- At 98% SOC: `0x40` (01000000) - Charge disabled (approaching full)
+
+**Note:** V1.3 protocol drops 0x35C entirely. In V1.3, 0x35F contains battery information (type, version, capacity), not charge request flags.
 
 #### 0x35E - Manufacturer Identification
 **Length:** 8 bytes (ASCII)

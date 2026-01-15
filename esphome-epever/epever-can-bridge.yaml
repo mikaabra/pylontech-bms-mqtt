@@ -269,25 +269,39 @@ canbus:
               id(last_can_rx) = millis();
               if (id(can_stale)) { id(can_stale) = false; }
 
-              if (x.size() < 2) {
+              if (x.size() < 1) {
                 id(can_error_count)++;
                 return;
               }
               {
                 uint8_t flags = x[0];
-                // Bit 5: Charge enable
-                // Bit 6: Discharge enable
-                bool charge_en = (flags & 0x20) != 0;
-                bool discharge_en = (flags & 0x40) != 0;
+                // CORRECTED bit mapping per Pylontech CAN V1.2 spec:
+                // Bit 7 (0x80): Charge enable (RCE)
+                // Bit 6 (0x40): Discharge enable (RDE)
+                // Bit 5 (0x20): Force charge level 1
+                // Bit 4 (0x10): Force charge level 2
+                // Bit 3 (0x08): Request full charge
+                bool charge_en = (flags & 0x80) != 0;       // FIXED: bit 7
+                bool discharge_en = (flags & 0x40) != 0;    // correct
+                bool force_chg = (flags & 0x20) != 0;       // NEW: detect force charge
 
-                if (charge_en != id(can_charge_enabled) || discharge_en != id(can_discharge_enabled)) {
+                bool changed = (charge_en != id(can_charge_enabled)) ||
+                               (discharge_en != id(can_discharge_enabled)) ||
+                               (force_chg != id(can_force_charge_request));
+
+                if (changed) {
                   id(can_charge_enabled) = charge_en;
                   id(can_discharge_enabled) = discharge_en;
-                  ESP_LOGI("can", "BMS Control: Charge=%s Discharge=%s",
-                           charge_en ? "ON" : "OFF", discharge_en ? "ON" : "OFF");
+                  id(can_force_charge_request) = force_chg;
+                  ESP_LOGI("can", "0x35C: Charge=%s Discharge=%s ForceChg=%s (0x%02X)",
+                           charge_en ? "EN" : "DIS", discharge_en ? "EN" : "DIS",
+                           force_chg ? "YES" : "NO", flags);
                 }
               }
 
+      # NOTE: 0x35F in V1.3 is "battery information" (type, version, capacity)
+      # not charge/discharge control. Keeping this handler for backwards compat
+      # but it may produce incorrect readings on V1.3 batteries.
       - can_id: 0x35F
         then:
           - lambda: |-
@@ -295,23 +309,13 @@ canbus:
               id(last_can_rx) = millis();
               if (id(can_stale)) { id(can_stale) = false; }
 
-              if (x.size() < 2) {
+              if (x.size() < 1) {
                 id(can_error_count)++;
                 return;
               }
-              {
-                uint8_t flags = x[0];
-                // V1.3 uses same bit positions as V1.2
-                bool charge_en = (flags & 0x20) != 0;
-                bool discharge_en = (flags & 0x40) != 0;
-
-                if (charge_en != id(can_charge_enabled) || discharge_en != id(can_discharge_enabled)) {
-                  id(can_charge_enabled) = charge_en;
-                  id(can_discharge_enabled) = discharge_en;
-                  ESP_LOGI("can", "BMS Control (V1.3): Charge=%s Discharge=%s",
-                           charge_en ? "ON" : "OFF", discharge_en ? "ON" : "OFF");
-                }
-              }
+              // WARNING: This frame is battery info in V1.3, not control flags!
+              // Only process if your battery is V1.2 or older
+              ESP_LOGW("can", "0x35F received (V1.3 battery info, not control flags) - ignoring");
 
 # Global variables
 globals:
@@ -336,13 +340,32 @@ globals:
     type: uint32_t
     initial_value: '0'
 
-  # CAN charge/discharge enable flags (from 0x35C/0x35F)
+  # CAN charge/discharge enable flags (from 0x35C)
   - id: can_charge_enabled
     type: bool
     initial_value: 'true'  # Default to enabled
   - id: can_discharge_enabled
     type: bool
     initial_value: 'true'  # Default to enabled
+  - id: can_force_charge_request
+    type: bool
+    initial_value: 'false'  # BMS requesting force charge
+
+  # Manual control modes: 0=Auto(CAN), 1=Force Off, 2=Force On
+  - id: manual_mode_d13_force_charge
+    type: int
+    initial_value: '0'  # Auto
+  - id: manual_mode_d14_stop_discharge
+    type: int
+    initial_value: '0'  # Auto
+  - id: manual_mode_d15_stop_charge
+    type: int
+    initial_value: '0'  # Auto
+
+  # Last transmitted Modbus 0x3127 value for display
+  - id: last_modbus_0x3127
+    type: uint16_t
+    initial_value: '0'
 
   # BMS data for RS485 responses
   - id: bms_soc
@@ -745,10 +768,56 @@ interval:
                   // D4: Charging over temp, D5: Discharging over temp
                   // D12: Full charge mark, D13: Force charge mark
                   // D14: 0=Enable discharge (1=stop), D15: 0=Enable charge (1=stop)
-                  value = 0x0000;  // Start with all OK
-                  // Map from CAN flags - INVERTED logic (bit=1 means STOP, bit=0 means ENABLE)
-                  if (!id(can_discharge_enabled)) value |= 0x4000;  // D14: Stop discharge
-                  if (!id(can_charge_enabled)) value |= 0x8000;     // D15: Stop charge
+                  {
+                    value = 0x0000;  // Start with all OK
+
+                    // Determine D13 (Force Charge) based on manual mode
+                    bool d13_force_charge = false;
+                    if (id(manual_mode_d13_force_charge) == 0) {
+                      // Auto: use CAN force charge request
+                      d13_force_charge = id(can_force_charge_request);
+                    } else if (id(manual_mode_d13_force_charge) == 2) {
+                      // Force On
+                      d13_force_charge = true;
+                    }
+                    // else: Force Off (false)
+
+                    // Determine D14 (Stop Discharge) based on manual mode
+                    bool d14_stop_discharge = false;
+                    if (id(manual_mode_d14_stop_discharge) == 0) {
+                      // Auto: use inverted CAN discharge enable
+                      d14_stop_discharge = !id(can_discharge_enabled);
+                    } else if (id(manual_mode_d14_stop_discharge) == 2) {
+                      // Force On (stop discharge)
+                      d14_stop_discharge = true;
+                    }
+                    // else: Force Off (allow discharge)
+
+                    // Determine D15 (Stop Charge) based on manual mode
+                    bool d15_stop_charge = false;
+                    if (id(manual_mode_d15_stop_charge) == 0) {
+                      // Auto: use inverted CAN charge enable
+                      d15_stop_charge = !id(can_charge_enabled);
+                    } else if (id(manual_mode_d15_stop_charge) == 2) {
+                      // Force On (stop charge)
+                      d15_stop_charge = true;
+                    }
+                    // else: Force Off (allow charge)
+
+                    // Set Modbus flags
+                    if (d13_force_charge) value |= 0x2000;   // D13: Force charge mark
+                    if (d14_stop_discharge) value |= 0x4000; // D14: Stop discharge
+                    if (d15_stop_charge) value |= 0x8000;    // D15: Stop charge
+
+                    // Store for display on web UI
+                    id(last_modbus_0x3127) = value;
+
+                    ESP_LOGD("modbus", "0x3127 = 0x%04X (D13:%s D14:%s D15:%s)",
+                             value,
+                             d13_force_charge ? "ForceChg" : "-",
+                             d14_stop_discharge ? "StopDis" : "-",
+                             d15_stop_charge ? "StopChg" : "-");
+                  }
                   break;
 
                 case 0x3128: // A40: Added function tags
@@ -1180,6 +1249,20 @@ text_sensor:
     name: "BMS Flags"
     icon: "mdi:flag"
 
+  - platform: template
+    name: "Modbus Status (0x3127)"
+    icon: "mdi:swap-horizontal"
+    update_interval: 5s
+    lambda: |-
+      uint16_t val = id(last_modbus_0x3127);
+      char buf[80];
+      snprintf(buf, sizeof(buf), "0x%04X (D13:%s D14:%s D15:%s)",
+               val,
+               (val & 0x2000) ? "ForceChg" : "-",
+               (val & 0x4000) ? "StopDis" : "-",
+               (val & 0x8000) ? "StopChg" : "-");
+      return std::string(buf);
+
   - platform: version
     name: "ESPHome Version"
 
@@ -1188,6 +1271,88 @@ binary_sensor:
     name: "CAN Data Stale"
     lambda: 'return id(can_stale);'
     device_class: problem
+
+  - platform: template
+    name: "CAN Charge Enabled"
+    icon: "mdi:battery-charging"
+    lambda: 'return id(can_charge_enabled);'
+
+  - platform: template
+    name: "CAN Discharge Enabled"
+    icon: "mdi:battery-minus"
+    lambda: 'return id(can_discharge_enabled);'
+
+  - platform: template
+    name: "CAN Force Charge Request"
+    icon: "mdi:battery-alert"
+    lambda: 'return id(can_force_charge_request);'
+
+select:
+  - platform: template
+    name: "D13 Force Charge Control"
+    icon: "mdi:battery-charging-100"
+    optimistic: true
+    options:
+      - "Auto (CAN)"
+      - "Force Off"
+      - "Force On"
+    initial_option: "Auto (CAN)"
+    on_value:
+      - lambda: |-
+          if (x == "Auto (CAN)") {
+            id(manual_mode_d13_force_charge) = 0;
+            ESP_LOGI("manual", "D13 Force Charge: Auto (using CAN)");
+          } else if (x == "Force Off") {
+            id(manual_mode_d13_force_charge) = 1;
+            ESP_LOGI("manual", "D13 Force Charge: Force Off");
+          } else if (x == "Force On") {
+            id(manual_mode_d13_force_charge) = 2;
+            ESP_LOGI("manual", "D13 Force Charge: Force On");
+          }
+
+  - platform: template
+    name: "D14 Stop Discharge Control"
+    icon: "mdi:battery-lock"
+    optimistic: true
+    options:
+      - "Auto (CAN)"
+      - "Force Off (Allow Discharge)"
+      - "Force On (Block Discharge)"
+    initial_option: "Auto (CAN)"
+    on_value:
+      - lambda: |-
+          if (x == "Auto (CAN)") {
+            id(manual_mode_d14_stop_discharge) = 0;
+            ESP_LOGI("manual", "D14 Stop Discharge: Auto (using CAN)");
+          } else if (x == "Force Off (Allow Discharge)") {
+            id(manual_mode_d14_stop_discharge) = 1;
+            ESP_LOGI("manual", "D14 Stop Discharge: Force Off (Allow Discharge)");
+          } else if (x == "Force On (Block Discharge)") {
+            id(manual_mode_d14_stop_discharge) = 2;
+            ESP_LOGI("manual", "D14 Stop Discharge: Force On (Block Discharge)");
+          }
+
+  - platform: template
+    name: "D15 Stop Charge Control"
+    icon: "mdi:battery-off"
+    optimistic: true
+    options:
+      - "Auto (CAN)"
+      - "Force Off (Allow Charge)"
+      - "Force On (Block Charge)"
+    initial_option: "Auto (CAN)"
+    on_value:
+      - lambda: |-
+          if (x == "Auto (CAN)") {
+            id(manual_mode_d15_stop_charge) = 0;
+            ESP_LOGI("manual", "D15 Stop Charge: Auto (using CAN)");
+          } else if (x == "Force Off (Allow Charge)") {
+            id(manual_mode_d15_stop_charge) = 1;
+            ESP_LOGI("manual", "D15 Stop Charge: Force Off (Allow Charge)");
+          } else if (x == "Force On (Block Charge)") {
+            id(manual_mode_d15_stop_charge) = 2;
+            ESP_LOGI("manual", "D15 Stop Charge: Force On (Block Charge)");
+          }
 
 button:
   - platform: restart
