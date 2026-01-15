@@ -1361,6 +1361,7 @@ select:
     name: "D13 Force Charge Control"
     icon: "mdi:battery-charging-100"
     optimistic: true
+    restore_value: true
     options:
       - "Auto (CAN)"
       - "Force Off"
@@ -1383,6 +1384,7 @@ select:
     name: "D14 Stop Discharge Control"
     icon: "mdi:battery-lock"
     optimistic: true
+    restore_value: true
     options:
       - "Auto (CAN)"
       - "Force Off (Allow Discharge)"
@@ -1405,6 +1407,7 @@ select:
     name: "D15 Stop Charge Control"
     icon: "mdi:battery-off"
     optimistic: true
+    restore_value: true
     options:
       - "Auto (CAN)"
       - "Force Off (Allow Charge)"
@@ -1427,6 +1430,7 @@ select:
     name: "SOC Discharge Control"
     icon: "mdi:battery-arrow-down"
     optimistic: true
+    restore_value: true
     options:
       - "40% / 45%"
       - "45% / 50%"
@@ -1462,6 +1466,7 @@ select:
     name: "SOC Force Charge Control"
     icon: "mdi:battery-arrow-up"
     optimistic: true
+    restore_value: true
     options:
       - "35% / 40%"
       - "40% / 45%"
@@ -1498,7 +1503,6 @@ switch:
     name: "Enable SOC Reserve Control"
     icon: "mdi:battery-heart"
     optimistic: true
-    restore_mode: RESTORE_DEFAULT_OFF
     turn_on_action:
       - lambda: |-
           id(soc_control_enabled) = true;
