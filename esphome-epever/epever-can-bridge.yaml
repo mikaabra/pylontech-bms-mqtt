@@ -178,6 +178,33 @@ canbus:
                 id(sensor_soh).publish_state(soh);
                 id(bms_soc) = soc;
                 id(bms_soh) = soh;
+
+                // SOC-based hysteresis control (if enabled)
+                if (id(soc_control_enabled)) {
+                  // Discharge blocking hysteresis
+                  if (soc < id(soc_discharge_block_threshold) && !id(soc_discharge_blocked)) {
+                    id(soc_discharge_blocked) = true;
+                    ESP_LOGI("soc_control", "Discharge BLOCKED at %d%% (threshold: %d%%)",
+                             soc, id(soc_discharge_block_threshold));
+                  }
+                  if (soc > id(soc_discharge_allow_threshold) && id(soc_discharge_blocked)) {
+                    id(soc_discharge_blocked) = false;
+                    ESP_LOGI("soc_control", "Discharge ALLOWED at %d%% (threshold: %d%%)",
+                             soc, id(soc_discharge_allow_threshold));
+                  }
+
+                  // Force charge hysteresis
+                  if (soc < id(soc_force_charge_on_threshold) && !id(soc_force_charge_active)) {
+                    id(soc_force_charge_active) = true;
+                    ESP_LOGI("soc_control", "Force charge ON at %d%% (threshold: %d%%)",
+                             soc, id(soc_force_charge_on_threshold));
+                  }
+                  if (soc >= id(soc_force_charge_off_threshold) && id(soc_force_charge_active)) {
+                    id(soc_force_charge_active) = false;
+                    ESP_LOGI("soc_control", "Force charge OFF at %d%% (threshold: %d%%)",
+                             soc, id(soc_force_charge_off_threshold));
+                  }
+                }
               }
 
       # 0x359: Flags
@@ -366,6 +393,35 @@ globals:
   - id: last_modbus_0x3127
     type: uint16_t
     initial_value: '0'
+
+  # SOC-based hysteresis control
+  - id: soc_control_enabled
+    type: bool
+    initial_value: 'false'  # Disabled by default
+
+  # Discharge control thresholds
+  - id: soc_discharge_block_threshold
+    type: int
+    initial_value: '50'  # Block discharge below this
+  - id: soc_discharge_allow_threshold
+    type: int
+    initial_value: '55'  # Allow discharge above this
+
+  # Force charge control thresholds
+  - id: soc_force_charge_on_threshold
+    type: int
+    initial_value: '45'  # Activate force charge below this
+  - id: soc_force_charge_off_threshold
+    type: int
+    initial_value: '50'  # Clear force charge above this
+
+  # Hysteresis state tracking
+  - id: soc_discharge_blocked
+    type: bool
+    initial_value: 'false'
+  - id: soc_force_charge_active
+    type: bool
+    initial_value: 'false'
 
   # BMS data for RS485 responses
   - id: bms_soc
@@ -771,38 +827,41 @@ interval:
                   {
                     value = 0x0000;  // Start with all OK
 
-                    // Determine D13 (Force Charge) based on manual mode
+                    // Determine D13 (Force Charge) - layered priority
                     bool d13_force_charge = false;
                     if (id(manual_mode_d13_force_charge) == 0) {
-                      // Auto: use CAN force charge request
-                      d13_force_charge = id(can_force_charge_request);
+                      // Auto mode: Layer SOC control over CAN
+                      if (id(soc_control_enabled) && id(soc_force_charge_active)) {
+                        d13_force_charge = true;  // SOC control activates force charge
+                      } else {
+                        d13_force_charge = id(can_force_charge_request);  // Use CAN value
+                      }
                     } else if (id(manual_mode_d13_force_charge) == 2) {
-                      // Force On
-                      d13_force_charge = true;
+                      d13_force_charge = true;  // Manual override: Force On
                     }
-                    // else: Force Off (false)
+                    // else: Manual override: Force Off (false)
 
-                    // Determine D14 (Stop Discharge) based on manual mode
+                    // Determine D14 (Stop Discharge) - layered priority
                     bool d14_stop_discharge = false;
                     if (id(manual_mode_d14_stop_discharge) == 0) {
-                      // Auto: use inverted CAN discharge enable
-                      d14_stop_discharge = !id(can_discharge_enabled);
+                      // Auto mode: Layer SOC control over CAN
+                      bool bms_blocks = !id(can_discharge_enabled);  // BMS blocks discharge
+                      bool soc_blocks = id(soc_control_enabled) && id(soc_discharge_blocked);
+                      d14_stop_discharge = bms_blocks || soc_blocks;  // Either can block
                     } else if (id(manual_mode_d14_stop_discharge) == 2) {
-                      // Force On (stop discharge)
-                      d14_stop_discharge = true;
+                      d14_stop_discharge = true;  // Manual override: Force On (stop discharge)
                     }
-                    // else: Force Off (allow discharge)
+                    // else: Manual override: Force Off (allow discharge)
 
-                    // Determine D15 (Stop Charge) based on manual mode
+                    // Determine D15 (Stop Charge) - BMS only (SOC doesn't block charge)
                     bool d15_stop_charge = false;
                     if (id(manual_mode_d15_stop_charge) == 0) {
-                      // Auto: use inverted CAN charge enable
+                      // Auto mode: use inverted CAN charge enable
                       d15_stop_charge = !id(can_charge_enabled);
                     } else if (id(manual_mode_d15_stop_charge) == 2) {
-                      // Force On (stop charge)
-                      d15_stop_charge = true;
+                      d15_stop_charge = true;  // Manual override: Force On (stop charge)
                     }
-                    // else: Force Off (allow charge)
+                    // else: Manual override: Force Off (allow charge)
 
                     // Set Modbus flags
                     if (d13_force_charge) value |= 0x2000;   // D13: Force charge mark
@@ -1287,6 +1346,16 @@ binary_sensor:
     icon: "mdi:battery-alert"
     lambda: 'return id(can_force_charge_request);'
 
+  - platform: template
+    name: "SOC Discharge Blocked"
+    icon: "mdi:battery-lock"
+    lambda: 'return id(soc_control_enabled) && id(soc_discharge_blocked);'
+
+  - platform: template
+    name: "SOC Force Charge Active"
+    icon: "mdi:battery-charging-100"
+    lambda: 'return id(soc_control_enabled) && id(soc_force_charge_active);'
+
 select:
   - platform: template
     name: "D13 Force Charge Control"
@@ -1353,6 +1422,97 @@ select:
             id(manual_mode_d15_stop_charge) = 2;
             ESP_LOGI("manual", "D15 Stop Charge: Force On (Block Charge)");
           }
+
+  - platform: template
+    name: "SOC Discharge Control"
+    icon: "mdi:battery-arrow-down"
+    optimistic: true
+    options:
+      - "40% / 45%"
+      - "45% / 50%"
+      - "50% / 55%"
+      - "55% / 60%"
+      - "60% / 65%"
+    initial_option: "50% / 55%"
+    on_value:
+      - lambda: |-
+          if (x == "40% / 45%") {
+            id(soc_discharge_block_threshold) = 40;
+            id(soc_discharge_allow_threshold) = 45;
+            ESP_LOGI("soc_config", "Discharge: Block at 40%%, Allow at 45%%");
+          } else if (x == "45% / 50%") {
+            id(soc_discharge_block_threshold) = 45;
+            id(soc_discharge_allow_threshold) = 50;
+            ESP_LOGI("soc_config", "Discharge: Block at 45%%, Allow at 50%%");
+          } else if (x == "50% / 55%") {
+            id(soc_discharge_block_threshold) = 50;
+            id(soc_discharge_allow_threshold) = 55;
+            ESP_LOGI("soc_config", "Discharge: Block at 50%%, Allow at 55%%");
+          } else if (x == "55% / 60%") {
+            id(soc_discharge_block_threshold) = 55;
+            id(soc_discharge_allow_threshold) = 60;
+            ESP_LOGI("soc_config", "Discharge: Block at 55%%, Allow at 60%%");
+          } else if (x == "60% / 65%") {
+            id(soc_discharge_block_threshold) = 60;
+            id(soc_discharge_allow_threshold) = 65;
+            ESP_LOGI("soc_config", "Discharge: Block at 60%%, Allow at 65%%");
+          }
+
+  - platform: template
+    name: "SOC Force Charge Control"
+    icon: "mdi:battery-arrow-up"
+    optimistic: true
+    options:
+      - "35% / 40%"
+      - "40% / 45%"
+      - "45% / 50%"
+      - "50% / 55%"
+      - "55% / 60%"
+    initial_option: "45% / 50%"
+    on_value:
+      - lambda: |-
+          if (x == "35% / 40%") {
+            id(soc_force_charge_on_threshold) = 35;
+            id(soc_force_charge_off_threshold) = 40;
+            ESP_LOGI("soc_config", "Force Charge: ON at 35%%, OFF at 40%%");
+          } else if (x == "40% / 45%") {
+            id(soc_force_charge_on_threshold) = 40;
+            id(soc_force_charge_off_threshold) = 45;
+            ESP_LOGI("soc_config", "Force Charge: ON at 40%%, OFF at 45%%");
+          } else if (x == "45% / 50%") {
+            id(soc_force_charge_on_threshold) = 45;
+            id(soc_force_charge_off_threshold) = 50;
+            ESP_LOGI("soc_config", "Force Charge: ON at 45%%, OFF at 50%%");
+          } else if (x == "50% / 55%") {
+            id(soc_force_charge_on_threshold) = 50;
+            id(soc_force_charge_off_threshold) = 55;
+            ESP_LOGI("soc_config", "Force Charge: ON at 50%%, OFF at 55%%");
+          } else if (x == "55% / 60%") {
+            id(soc_force_charge_on_threshold) = 55;
+            id(soc_force_charge_off_threshold) = 60;
+            ESP_LOGI("soc_config", "Force Charge: ON at 55%%, OFF at 60%%");
+          }
+
+switch:
+  - platform: template
+    name: "Enable SOC Reserve Control"
+    icon: "mdi:battery-heart"
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    turn_on_action:
+      - lambda: |-
+          id(soc_control_enabled) = true;
+          ESP_LOGI("soc_control", "SOC Reserve Control ENABLED");
+          ESP_LOGI("soc_control", "  Discharge: Block <%d%%, Allow >%d%%",
+                   id(soc_discharge_block_threshold), id(soc_discharge_allow_threshold));
+          ESP_LOGI("soc_control", "  Force Charge: ON <%d%%, OFF >=%d%%",
+                   id(soc_force_charge_on_threshold), id(soc_force_charge_off_threshold));
+    turn_off_action:
+      - lambda: |-
+          id(soc_control_enabled) = false;
+          id(soc_discharge_blocked) = false;
+          id(soc_force_charge_active) = false;
+          ESP_LOGI("soc_control", "SOC Reserve Control DISABLED");
 
 button:
   - platform: restart
