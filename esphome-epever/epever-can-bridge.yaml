@@ -590,23 +590,26 @@ interval:
                      id(inverter_priority_mode), desired_mode, soc);
 
             // Build Modbus RTU write request
-            // Function 0x06 (Write Single Register)
-            // Register 0x9608, Value 0x0000 or 0x0001
+            // Function 0x10 (Write Multiple Registers) - required by EPever inverter
+            // Register 0x9608, 1 register, Value 0x0000 or 0x0001
             const uint8_t slave_id = ${inverter_slave};
             const char* inv_host = "${inverter_host}";
             const int inv_port = ${inverter_port};
 
-            uint8_t modbus_cmd[8];
-            modbus_cmd[0] = slave_id;  // Slave address
-            modbus_cmd[1] = 0x06;  // Function code: Write Single Register
-            modbus_cmd[2] = 0x96;  // Register high byte (0x9608)
-            modbus_cmd[3] = 0x08;  // Register low byte
-            modbus_cmd[4] = 0x00;  // Value high byte
-            modbus_cmd[5] = desired_mode;  // Value low byte (0 or 1)
+            uint8_t modbus_cmd[11];
+            modbus_cmd[0] = slave_id;     // Slave address
+            modbus_cmd[1] = 0x10;         // Function code: Write Multiple Registers
+            modbus_cmd[2] = 0x96;         // Register high byte (0x9608)
+            modbus_cmd[3] = 0x08;         // Register low byte
+            modbus_cmd[4] = 0x00;         // Quantity high byte
+            modbus_cmd[5] = 0x01;         // Quantity low byte (1 register)
+            modbus_cmd[6] = 0x02;         // Byte count (1 register = 2 bytes)
+            modbus_cmd[7] = 0x00;         // Value high byte
+            modbus_cmd[8] = desired_mode; // Value low byte (0 or 1)
 
             // Calculate CRC16-Modbus
             uint16_t crc = 0xFFFF;
-            for (int i = 0; i < 6; i++) {
+            for (int i = 0; i < 9; i++) {
               crc ^= modbus_cmd[i];
               for (int j = 0; j < 8; j++) {
                 if (crc & 0x0001) {
@@ -616,12 +619,12 @@ interval:
                 }
               }
             }
-            modbus_cmd[6] = crc & 0xFF;         // CRC low
-            modbus_cmd[7] = (crc >> 8) & 0xFF;  // CRC high
+            modbus_cmd[9] = crc & 0xFF;         // CRC low
+            modbus_cmd[10] = (crc >> 8) & 0xFF; // CRC high
 
-            ESP_LOGI("inverter_priority", "Modbus WRITE cmd: %02X %02X %02X %02X %02X %02X %02X %02X",
-                     modbus_cmd[0], modbus_cmd[1], modbus_cmd[2], modbus_cmd[3],
-                     modbus_cmd[4], modbus_cmd[5], modbus_cmd[6], modbus_cmd[7]);
+            ESP_LOGI("inverter_priority", "Modbus WRITE cmd: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                     modbus_cmd[0], modbus_cmd[1], modbus_cmd[2], modbus_cmd[3], modbus_cmd[4],
+                     modbus_cmd[5], modbus_cmd[6], modbus_cmd[7], modbus_cmd[8], modbus_cmd[9], modbus_cmd[10]);
 
             // Send via TCP to inverter (use lwIP sockets with explicit namespace)
             struct sockaddr_in dest_addr;
@@ -639,10 +642,10 @@ interval:
 
               int conn_result = ::connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
               if (conn_result == 0) {
-                // Send Modbus command
-                int written = ::send(sock, modbus_cmd, 8, 0);
-                if (written == 8) {
-                  // Read response
+                // Send Modbus command (function 0x10 = 11 bytes)
+                int written = ::send(sock, modbus_cmd, 11, 0);
+                if (written == 11) {
+                  // Read response (function 0x10 response = 8 bytes)
                   uint8_t response[8];
                   int len = ::recv(sock, response, 8, 0);
 
@@ -663,7 +666,7 @@ interval:
 
                     ESP_LOGE("inverter_priority", "Modbus Exception: %s (code %d)", exception_msg, exception_code);
                     ESP_LOGE("inverter_priority", "Register 0x9608 may be READ-ONLY or require different write method");
-                  } else if (len == 8 && response[0] == slave_id && response[1] == 0x06) {
+                  } else if (len == 8 && response[0] == slave_id && response[1] == 0x10) {
                     id(inverter_priority_mode) = desired_mode;
                     const char* mode_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
                     ESP_LOGI("inverter_priority", "✓ Mode changed successfully to %s (%d)",
@@ -673,7 +676,7 @@ interval:
                              len, response[0], response[1]);
                   }
                 } else {
-                  ESP_LOGW("inverter_priority", "Failed to send command (wrote %d bytes, errno=%d)", written, errno);
+                  ESP_LOGW("inverter_priority", "Failed to send command (wrote %d bytes, expected 11, errno=%d)", written, errno);
                 }
                 ::close(sock);
               } else {
@@ -1845,18 +1848,21 @@ button:
                     // Close read socket before writing
                     ::close(sock);
 
-                    // Build write command
-                    uint8_t write_cmd[8];
+                    // Build write command (function 0x10 - Write Multiple Registers)
+                    uint8_t write_cmd[11];
                     write_cmd[0] = slave_id;
-                    write_cmd[1] = 0x06;  // Function code: Write Single Register
+                    write_cmd[1] = 0x10;  // Function code: Write Multiple Registers
                     write_cmd[2] = 0x96;
                     write_cmd[3] = 0x08;
-                    write_cmd[4] = 0x00;
-                    write_cmd[5] = desired_mode;
+                    write_cmd[4] = 0x00;  // Quantity high byte
+                    write_cmd[5] = 0x01;  // Quantity low byte (1 register)
+                    write_cmd[6] = 0x02;  // Byte count (2 bytes)
+                    write_cmd[7] = 0x00;  // Value high byte
+                    write_cmd[8] = desired_mode;  // Value low byte
 
                     // Calculate CRC for write
                     crc = 0xFFFF;
-                    for (int i = 0; i < 6; i++) {
+                    for (int i = 0; i < 9; i++) {
                       crc ^= write_cmd[i];
                       for (int j = 0; j < 8; j++) {
                         if (crc & 0x0001) {
@@ -1866,13 +1872,13 @@ button:
                         }
                       }
                     }
-                    write_cmd[6] = crc & 0xFF;
-                    write_cmd[7] = (crc >> 8) & 0xFF;
+                    write_cmd[9] = crc & 0xFF;
+                    write_cmd[10] = (crc >> 8) & 0xFF;
 
                     // Reconnect and write
-                    ESP_LOGI("inverter_priority", "Modbus WRITE cmd: %02X %02X %02X %02X %02X %02X %02X %02X",
-                             write_cmd[0], write_cmd[1], write_cmd[2], write_cmd[3],
-                             write_cmd[4], write_cmd[5], write_cmd[6], write_cmd[7]);
+                    ESP_LOGI("inverter_priority", "Modbus WRITE cmd: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                             write_cmd[0], write_cmd[1], write_cmd[2], write_cmd[3], write_cmd[4],
+                             write_cmd[5], write_cmd[6], write_cmd[7], write_cmd[8], write_cmd[9], write_cmd[10]);
 
                     ESP_LOGI("inverter_priority", "Creating new socket for write...");
                     sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
@@ -1885,10 +1891,10 @@ button:
 
                       if (conn_result == 0) {
                         ESP_LOGI("inverter_priority", "Connected! Sending WRITE command...");
-                        written = ::send(sock, write_cmd, 8, 0);
-                        ESP_LOGI("inverter_priority", "Write sent %d bytes (expected 8)", written);
+                        written = ::send(sock, write_cmd, 11, 0);
+                        ESP_LOGI("inverter_priority", "Write sent %d bytes (expected 11)", written);
 
-                        if (written == 8) {
+                        if (written == 11) {
                           ESP_LOGI("inverter_priority", "Waiting for write response...");
                           uint8_t write_response[8];
                           len = ::recv(sock, write_response, 8, 0);
@@ -1911,7 +1917,7 @@ button:
 
                             ESP_LOGE("inverter_priority", "Modbus Exception: %s (code %d)", exception_msg, exception_code);
                             ESP_LOGE("inverter_priority", "Register 0x9608 may be READ-ONLY or require different write method");
-                          } else if (len == 8 && write_response[0] == slave_id && write_response[1] == 0x06) {
+                          } else if (len == 8 && write_response[0] == slave_id && write_response[1] == 0x10) {
                             id(inverter_priority_mode) = desired_mode;
                             ESP_LOGI("inverter_priority", "✓ Mode updated successfully to %s (%d)",
                                      desired_str, desired_mode);
