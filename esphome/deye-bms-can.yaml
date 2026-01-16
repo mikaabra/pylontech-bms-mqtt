@@ -268,6 +268,44 @@ mqtt:
 
         ESP_LOGI("mqtt", "Published HA discovery configs for %d batteries", ${num_batteries});
 
+        // CAN bus device - separate from RS485 batteries
+        const char* can_device_json = R"("device":{"identifiers":["deye_bms_can"],"name":"Deye BMS CAN","manufacturer":"Pylontech","model":"BMS CAN"})";
+        const char* can_avail_json = R"("availability_topic":"${can_prefix}/status","payload_available":"online","payload_not_available":"offline")";
+
+        // CAN binary sensors (charge/discharge control from 0x35C)
+        snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_charge_enabled/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"CAN Charge Enabled","state_topic":"${can_prefix}/can/charge_enabled","unique_id":"deye_bms_can_charge_enabled","payload_on":"1","payload_off":"0","icon":"mdi:battery-charging",%s,%s})",
+          can_avail_json, can_device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_discharge_enabled/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"CAN Discharge Enabled","state_topic":"${can_prefix}/can/discharge_enabled","unique_id":"deye_bms_can_discharge_enabled","payload_on":"1","payload_off":"0","icon":"mdi:battery-minus",%s,%s})",
+          can_avail_json, can_device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_force_charge/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"CAN Force Charge Request","state_topic":"${can_prefix}/can/force_charge","unique_id":"deye_bms_can_force_charge","payload_on":"1","payload_off":"0","icon":"mdi:battery-alert",%s,%s})",
+          can_avail_json, can_device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        // CAN diagnostic sensors
+        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_frame_count/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"CAN Frame Count","state_topic":"${can_prefix}/diag/frame_count","unique_id":"deye_bms_can_frame_count","icon":"mdi:counter","entity_category":"diagnostic",%s,%s})",
+          can_avail_json, can_device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_error_count/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"CAN Error Count","state_topic":"${can_prefix}/diag/error_count","unique_id":"deye_bms_can_error_count","icon":"mdi:alert-circle","entity_category":"diagnostic",%s,%s})",
+          can_avail_json, can_device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        ESP_LOGI("mqtt", "Published HA discovery configs for CAN sensors");
+
 ota:
   - platform: esphome
     password: !secret ota_password
@@ -305,10 +343,11 @@ canbus:
       - can_id: 0x351
         then:
           - lambda: |-
+              id(can_frame_count)++;
               id(last_can_rx) = millis();
               if (id(can_stale)) { id(can_stale) = false; }
 
-              if (x.size() != 8) return;
+              if (x.size() != 8) { id(can_error_count)++; return; }
               auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
 
               float v_charge_max = le_u16(x[0], x[1]) / 10.0f;
@@ -331,10 +370,11 @@ canbus:
       - can_id: 0x355
         then:
           - lambda: |-
+              id(can_frame_count)++;
               id(last_can_rx) = millis();
               if (id(can_stale)) { id(can_stale) = false; }
 
-              if (x.size() != 8) return;
+              if (x.size() != 8) { id(can_error_count)++; return; }
               auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
 
               uint16_t soc = le_u16(x[0], x[1]);
@@ -349,10 +389,11 @@ canbus:
       - can_id: 0x359
         then:
           - lambda: |-
+              id(can_frame_count)++;
               id(last_can_rx) = millis();
               if (id(can_stale)) { id(can_stale) = false; }
 
-              if (x.size() != 8) return;
+              if (x.size() != 8) { id(can_error_count)++; return; }
               uint64_t flags = 0;
               for (int i = 7; i >= 0; i--) {
                 flags = (flags << 8) | x[i];
@@ -375,10 +416,11 @@ canbus:
       - can_id: 0x370
         then:
           - lambda: |-
+              id(can_frame_count)++;
               id(last_can_rx) = millis();
               if (id(can_stale)) { id(can_stale) = false; }
 
-              if (x.size() != 8) return;
+              if (x.size() != 8) { id(can_error_count)++; return; }
               auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
 
               float t1 = le_u16(x[0], x[1]) / 10.0f;
@@ -413,6 +455,38 @@ canbus:
                 id(sensor_cell_v_delta).publish_state(vmax - vmin);
               }
 
+      # 0x35C: Battery Charge Request Flags (V1.2)
+      # Bit 7 (0x80): Charge Enable (RCE)
+      # Bit 6 (0x40): Discharge Enable (RDE)
+      # Bit 5 (0x20): Force Charge Level 1
+      - can_id: 0x35C
+        then:
+          - lambda: |-
+              id(can_frame_count)++;
+              id(last_can_rx) = millis();
+              if (id(can_stale)) { id(can_stale) = false; }
+
+              if (x.size() < 1) { id(can_error_count)++; return; }
+              uint8_t flags = x[0];
+
+              // Correct bit mapping per Pylontech CAN V1.2 spec
+              bool charge_en = (flags & 0x80) != 0;
+              bool discharge_en = (flags & 0x40) != 0;
+              bool force_chg = (flags & 0x20) != 0;
+
+              bool changed = (charge_en != id(can_charge_enabled)) ||
+                             (discharge_en != id(can_discharge_enabled)) ||
+                             (force_chg != id(can_force_charge_request));
+
+              if (changed) {
+                id(can_charge_enabled) = charge_en;
+                id(can_discharge_enabled) = discharge_en;
+                id(can_force_charge_request) = force_chg;
+                ESP_LOGI("can", "0x35C: Charge=%s Discharge=%s ForceChg=%s (0x%02X)",
+                         charge_en ? "EN" : "DIS", discharge_en ? "EN" : "DIS",
+                         force_chg ? "YES" : "NO", flags);
+              }
+
 # Global variables
 globals:
   # CAN stale detection
@@ -429,6 +503,25 @@ globals:
     initial_value: '0'
   - id: last_flags_publish
     type: uint32_t
+    initial_value: '0'
+
+  # CAN charge/discharge enable flags (from 0x35C)
+  - id: can_charge_enabled
+    type: bool
+    initial_value: 'true'
+  - id: can_discharge_enabled
+    type: bool
+    initial_value: 'true'
+  - id: can_force_charge_request
+    type: bool
+    initial_value: 'false'
+
+  # CAN bus statistics
+  - id: can_frame_count
+    type: int
+    initial_value: '0'
+  - id: can_error_count
+    type: int
     initial_value: '0'
 
   # RS485 stale detection
@@ -555,6 +648,26 @@ interval:
             ESP_LOGW("can", "No CAN data for 30s, marking stale");
             id(mqtt_client).publish(std::string("${can_prefix}/status"), std::string("offline"), (uint8_t)0, true);
           }
+
+  # CAN charge/discharge flags and diagnostics publishing
+  - interval: 10s
+    then:
+      - lambda: |-
+          char payload[16];
+
+          // Publish charge/discharge enable flags from 0x35C
+          id(mqtt_client).publish(std::string("${can_prefix}/can/charge_enabled"),
+              id(can_charge_enabled) ? std::string("1") : std::string("0"));
+          id(mqtt_client).publish(std::string("${can_prefix}/can/discharge_enabled"),
+              id(can_discharge_enabled) ? std::string("1") : std::string("0"));
+          id(mqtt_client).publish(std::string("${can_prefix}/can/force_charge"),
+              id(can_force_charge_request) ? std::string("1") : std::string("0"));
+
+          // Publish diagnostic counters
+          snprintf(payload, sizeof(payload), "%d", id(can_frame_count));
+          id(mqtt_client).publish(std::string("${can_prefix}/diag/frame_count"), std::string(payload));
+          snprintf(payload, sizeof(payload), "%d", id(can_error_count));
+          id(mqtt_client).publish(std::string("${can_prefix}/diag/error_count"), std::string(payload));
 
   # RS485 stale detection and availability
   - interval: 30s
@@ -1563,6 +1676,23 @@ sensor:
     update_interval: 60s
     lambda: 'return heap_caps_get_free_size(MALLOC_CAP_INTERNAL);'
 
+  # CAN bus diagnostic counters
+  - platform: template
+    name: "CAN Frame Count"
+    id: sensor_can_frame_count
+    icon: "mdi:counter"
+    entity_category: diagnostic
+    update_interval: 10s
+    lambda: 'return id(can_frame_count);'
+
+  - platform: template
+    name: "CAN Error Count"
+    id: sensor_can_error_count
+    icon: "mdi:alert-circle"
+    entity_category: diagnostic
+    update_interval: 10s
+    lambda: 'return id(can_error_count);'
+
 text_sensor:
   - platform: template
     id: sensor_flags
@@ -1578,6 +1708,32 @@ binary_sensor:
     name: "CAN Data Stale"
     lambda: 'return id(can_stale);'
     device_class: problem
+
+  # MQTT connection status
+  - platform: template
+    name: "MQTT Connected"
+    id: mqtt_connected
+    icon: "mdi:cloud-check"
+    lambda: 'return id(mqtt_client).is_connected();'
+
+  # CAN charge/discharge control flags (from 0x35C)
+  - platform: template
+    name: "CAN Charge Enabled"
+    id: bs_can_charge_enabled
+    icon: "mdi:battery-charging"
+    lambda: 'return id(can_charge_enabled);'
+
+  - platform: template
+    name: "CAN Discharge Enabled"
+    id: bs_can_discharge_enabled
+    icon: "mdi:battery-minus"
+    lambda: 'return id(can_discharge_enabled);'
+
+  - platform: template
+    name: "CAN Force Charge Request"
+    id: bs_can_force_charge
+    icon: "mdi:battery-alert"
+    lambda: 'return id(can_force_charge_request);'
 
   # Per-battery poll alarms (10 consecutive failures)
   - platform: template
