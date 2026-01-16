@@ -1818,11 +1818,22 @@ button:
               ESP_LOGI("inverter_priority", "Sent %d bytes (expected 8)", written);
 
               if (written == 8) {
+                // Give inverter time to process (Modbus RTU timing)
+                delay(100);
+
                 ESP_LOGI("inverter_priority", "Waiting for response...");
                 // Read response: [slave][func][byte_count][data_high][data_low][crc_low][crc_high]
                 uint8_t response[7];
                 int len = ::recv(sock, response, 7, 0);
                 ESP_LOGI("inverter_priority", "Received %d bytes (expected 7)", len);
+
+                // Retry once if timeout
+                if (len < 0) {
+                  ESP_LOGW("inverter_priority", "Read timeout, retrying...");
+                  delay(200);
+                  len = ::recv(sock, response, 7, 0);
+                  ESP_LOGI("inverter_priority", "Retry received %d bytes", len);
+                }
 
                 if (len > 0) {
                   ESP_LOGI("inverter_priority", "Response: %02X %02X %02X %02X %02X %02X %02X",
@@ -1875,6 +1886,9 @@ button:
                     write_cmd[9] = crc & 0xFF;
                     write_cmd[10] = (crc >> 8) & 0xFF;
 
+                    // Wait a bit before reconnecting
+                    delay(500);
+
                     // Reconnect and write
                     ESP_LOGI("inverter_priority", "Modbus WRITE cmd: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
                              write_cmd[0], write_cmd[1], write_cmd[2], write_cmd[3], write_cmd[4],
@@ -1895,10 +1909,21 @@ button:
                         ESP_LOGI("inverter_priority", "Write sent %d bytes (expected 11)", written);
 
                         if (written == 11) {
+                          // Give inverter time to process write
+                          delay(100);
+
                           ESP_LOGI("inverter_priority", "Waiting for write response...");
                           uint8_t write_response[8];
                           len = ::recv(sock, write_response, 8, 0);
                           ESP_LOGI("inverter_priority", "Write received %d bytes (expected 8)", len);
+
+                          // Retry once if timeout
+                          if (len < 0) {
+                            ESP_LOGW("inverter_priority", "Write timeout, retrying...");
+                            delay(200);
+                            len = ::recv(sock, write_response, 8, 0);
+                            ESP_LOGI("inverter_priority", "Write retry received %d bytes", len);
+                          }
 
                           if (len > 0) {
                             ESP_LOGI("inverter_priority", "Write response: %02X %02X %02X %02X %02X %02X %02X %02X",
