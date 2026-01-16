@@ -652,18 +652,25 @@ interval:
                              response[4], response[5], response[6], response[7]);
                   }
 
-                  if (len == 8) {
-                    // Verify response (should echo our command)
-                    if (response[0] == slave_id && response[1] == 0x06) {
-                      id(inverter_priority_mode) = desired_mode;
-                      const char* mode_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
-                      ESP_LOGI("inverter_priority", "✓ Mode changed successfully to %s (%d)",
-                               mode_str, desired_mode);
-                    } else {
-                      ESP_LOGW("inverter_priority", "Unexpected response (slave=%d, func=%d)", response[0], response[1]);
-                    }
+                  // Check for Modbus exception response
+                  if (len >= 5 && response[0] == slave_id && (response[1] & 0x80)) {
+                    uint8_t exception_code = response[2];
+                    const char* exception_msg = "Unknown";
+                    if (exception_code == 1) exception_msg = "Illegal Function";
+                    else if (exception_code == 2) exception_msg = "Illegal Data Address";
+                    else if (exception_code == 3) exception_msg = "Illegal Data Value";
+                    else if (exception_code == 4) exception_msg = "Slave Device Failure";
+
+                    ESP_LOGE("inverter_priority", "Modbus Exception: %s (code %d)", exception_msg, exception_code);
+                    ESP_LOGE("inverter_priority", "Register 0x9608 may be READ-ONLY or require different write method");
+                  } else if (len == 8 && response[0] == slave_id && response[1] == 0x06) {
+                    id(inverter_priority_mode) = desired_mode;
+                    const char* mode_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
+                    ESP_LOGI("inverter_priority", "✓ Mode changed successfully to %s (%d)",
+                             mode_str, desired_mode);
                   } else {
-                    ESP_LOGW("inverter_priority", "No/incomplete response (got %d bytes, expected 8)", len);
+                    ESP_LOGW("inverter_priority", "Unexpected response (len=%d, slave=%d, func=%02X)",
+                             len, response[0], response[1]);
                   }
                 } else {
                   ESP_LOGW("inverter_priority", "Failed to send command (wrote %d bytes, errno=%d)", written, errno);
@@ -1893,12 +1900,24 @@ button:
                                      write_response[4], write_response[5], write_response[6], write_response[7]);
                           }
 
-                          if (len == 8 && write_response[0] == slave_id && write_response[1] == 0x06) {
+                          // Check for Modbus exception response (5 bytes: slave, func|0x80, exception_code, crc_low, crc_high)
+                          if (len >= 5 && write_response[0] == slave_id && (write_response[1] & 0x80)) {
+                            uint8_t exception_code = write_response[2];
+                            const char* exception_msg = "Unknown";
+                            if (exception_code == 1) exception_msg = "Illegal Function";
+                            else if (exception_code == 2) exception_msg = "Illegal Data Address";
+                            else if (exception_code == 3) exception_msg = "Illegal Data Value";
+                            else if (exception_code == 4) exception_msg = "Slave Device Failure";
+
+                            ESP_LOGE("inverter_priority", "Modbus Exception: %s (code %d)", exception_msg, exception_code);
+                            ESP_LOGE("inverter_priority", "Register 0x9608 may be READ-ONLY or require different write method");
+                          } else if (len == 8 && write_response[0] == slave_id && write_response[1] == 0x06) {
                             id(inverter_priority_mode) = desired_mode;
                             ESP_LOGI("inverter_priority", "✓ Mode updated successfully to %s (%d)",
                                      desired_str, desired_mode);
                           } else {
-                            ESP_LOGE("inverter_priority", "Write failed - unexpected response");
+                            ESP_LOGE("inverter_priority", "Write failed - unexpected response (len=%d, slave=%d, func=%02X)",
+                                     len, write_response[0], write_response[1]);
                           }
                         } else {
                           ESP_LOGE("inverter_priority", "Write failed - send error (errno=%d)", errno);
