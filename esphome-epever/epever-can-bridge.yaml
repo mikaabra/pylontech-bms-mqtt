@@ -27,6 +27,12 @@ substitutions:
   modbus_addr: "1"
   modbus_baud: "9600"
 
+  # Inverter Modbus TCP configuration
+  inverter_host: !secret inverter_host
+  inverter_port: !secret inverter_port
+  inverter_slave: !secret inverter_slave
+  inverter_priority_update_interval: !secret inverter_priority_update_interval
+
 # External components: CAN listen-only mode
 external_components:
   - source:
@@ -188,15 +194,17 @@ canbus:
 
                 // SOC-based hysteresis control (if enabled)
                 if (id(soc_control_enabled)) {
-                  // Discharge blocking hysteresis
+                  // Discharge blocking hysteresis - controls inverter priority mode
+                  // When blocked: inverter switches to Utility priority (grid)
+                  // When allowed: inverter switches to Inverter priority (battery)
                   if (soc < id(soc_discharge_block_threshold) && !id(soc_discharge_blocked)) {
                     id(soc_discharge_blocked) = true;
-                    ESP_LOGI("soc_control", "Discharge BLOCKED at %d%% (threshold: %d%%)",
+                    ESP_LOGI("soc_control", "Discharge BLOCKED at %d%% (threshold: %d%%) - will switch to Utility priority",
                              soc, id(soc_discharge_block_threshold));
                   }
                   if (soc > id(soc_discharge_allow_threshold) && id(soc_discharge_blocked)) {
                     id(soc_discharge_blocked) = false;
-                    ESP_LOGI("soc_control", "Discharge ALLOWED at %d%% (threshold: %d%%)",
+                    ESP_LOGI("soc_control", "Discharge ALLOWED at %d%% (threshold: %d%%) - will switch to Inverter priority",
                              soc, id(soc_discharge_allow_threshold));
                   }
 
@@ -430,6 +438,17 @@ globals:
     type: bool
     initial_value: 'false'
 
+  # Inverter output priority control (register 0x9608)
+  # 0 = Inverter priority (battery/PV preferred)
+  # 1 = Utility priority (grid/bypass preferred)
+  # Uses soc_discharge_blocked flag for Auto mode (no separate thresholds needed)
+  - id: inverter_priority_mode
+    type: int
+    initial_value: '0'  # Current mode from inverter
+  - id: inverter_priority_control_mode
+    type: int
+    initial_value: '0'  # 0=Auto(SOC-based), 1=Force Inverter, 2=Force Utility
+
   # BMS data for RS485 responses
   - id: bms_soc
     type: int
@@ -527,6 +546,119 @@ interval:
             ESP_LOGI("can", "CAN OK (SOC=%d%%, V=%.1fV, last_rx=%dms ago)",
                      id(bms_soc), id(bms_v_charge_max), elapsed);
             last_rx_check = now;
+          }
+
+  # Inverter output priority control via Modbus RTU over TCP
+  # Updates every 3 hours (configurable) but only sends Modbus command when mode changes
+  - interval: ${inverter_priority_update_interval}s
+    then:
+      - lambda: |-
+          // Only run if WiFi is connected
+          // (WiFi component automatically available)
+
+          int soc = id(bms_soc);
+          int desired_mode = id(inverter_priority_mode);  // Current mode
+
+          // Determine desired mode based on control setting
+          if (id(inverter_priority_control_mode) == 0) {
+            // Auto mode: Use SOC discharge blocking flag to control inverter priority
+            // When SOC control blocks discharge → switch to Utility priority (grid)
+            // When SOC control allows discharge → switch to Inverter priority (battery)
+            if (id(soc_control_enabled)) {
+              if (id(soc_discharge_blocked)) {
+                desired_mode = 1;  // Utility priority (prevent battery discharge at low SOC)
+              } else {
+                desired_mode = 0;  // Inverter priority (use battery at high SOC)
+              }
+            }
+            // If SOC control disabled: maintain current mode
+          } else if (id(inverter_priority_control_mode) == 1) {
+            desired_mode = 0;  // Force Inverter priority
+          } else if (id(inverter_priority_control_mode) == 2) {
+            desired_mode = 1;  // Force Utility priority
+          }
+
+          // Only send Modbus command if mode actually needs to change
+          // (No force updates - be quiet on Modbus to avoid conflicts)
+          if (desired_mode != id(inverter_priority_mode)) {
+            ESP_LOGI("inverter_priority", "Changing mode: %d -> %d (SOC=%d%%)",
+                     id(inverter_priority_mode), desired_mode, soc);
+
+            // Build Modbus RTU write request
+            // Function 0x06 (Write Single Register)
+            // Register 0x9608, Value 0x0000 or 0x0001
+            const uint8_t slave_id = ${inverter_slave};
+            const char* inv_host = "${inverter_host}";
+            const int inv_port = ${inverter_port};
+
+            uint8_t modbus_cmd[8];
+            modbus_cmd[0] = slave_id;  // Slave address
+            modbus_cmd[1] = 0x06;  // Function code: Write Single Register
+            modbus_cmd[2] = 0x96;  // Register high byte (0x9608)
+            modbus_cmd[3] = 0x08;  // Register low byte
+            modbus_cmd[4] = 0x00;  // Value high byte
+            modbus_cmd[5] = desired_mode;  // Value low byte (0 or 1)
+
+            // Calculate CRC16-Modbus
+            uint16_t crc = 0xFFFF;
+            for (int i = 0; i < 6; i++) {
+              crc ^= modbus_cmd[i];
+              for (int j = 0; j < 8; j++) {
+                if (crc & 0x0001) {
+                  crc = (crc >> 1) ^ 0xA001;
+                } else {
+                  crc = crc >> 1;
+                }
+              }
+            }
+            modbus_cmd[6] = crc & 0xFF;         // CRC low
+            modbus_cmd[7] = (crc >> 8) & 0xFF;  // CRC high
+
+            // Send via TCP to inverter (use lwIP sockets with explicit namespace)
+            struct sockaddr_in dest_addr;
+            dest_addr.sin_addr.s_addr = ::inet_addr(inv_host);
+            dest_addr.sin_family = AF_INET;
+            dest_addr.sin_port = ::htons(inv_port);
+
+            int sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+            if (sock >= 0) {
+              // Set socket timeout
+              struct timeval timeout;
+              timeout.tv_sec = 1;
+              timeout.tv_usec = 0;
+              ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+              if (::connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) == 0) {
+                // Send Modbus command
+                int written = ::send(sock, modbus_cmd, 8, 0);
+                if (written == 8) {
+                  // Read response
+                  uint8_t response[8];
+                  int len = ::recv(sock, response, 8, 0);
+
+                  if (len == 8) {
+                    // Verify response (should echo our command)
+                    if (response[0] == slave_id && response[1] == 0x06) {
+                      id(inverter_priority_mode) = desired_mode;
+                      ESP_LOGI("inverter_priority", "Mode changed successfully to %d",
+                               desired_mode);
+                    } else {
+                      ESP_LOGW("inverter_priority", "Unexpected response");
+                    }
+                  } else {
+                    ESP_LOGW("inverter_priority", "No/incomplete response from inverter");
+                  }
+                } else {
+                  ESP_LOGW("inverter_priority", "Failed to send command");
+                }
+                ::close(sock);
+              } else {
+                ESP_LOGE("inverter_priority", "Failed to connect to inverter TCP");
+                ::close(sock);
+              }
+            } else {
+              ESP_LOGE("inverter_priority", "Failed to create socket");
+            }
           }
 
   # Modbus RTU responder - responds to inverter read requests
@@ -848,13 +980,11 @@ interval:
                     }
                     // else: Manual override: Force Off (false)
 
-                    // Determine D14 (Stop Discharge) - layered priority
+                    // Determine D14 (Stop Discharge) - BMS protection only
                     bool d14_stop_discharge = false;
                     if (id(manual_mode_d14_stop_discharge) == 0) {
-                      // Auto mode: Layer SOC control over CAN
-                      bool bms_blocks = !id(can_discharge_enabled);  // BMS blocks discharge
-                      bool soc_blocks = id(soc_control_enabled) && id(soc_discharge_blocked);
-                      d14_stop_discharge = bms_blocks || soc_blocks;  // Either can block
+                      // Auto mode: Use BMS protection only (SOC control now uses inverter priority)
+                      d14_stop_discharge = !id(can_discharge_enabled);  // BMS blocks discharge
                     } else if (id(manual_mode_d14_stop_discharge) == 2) {
                       d14_stop_discharge = true;  // Manual override: Force On (stop discharge)
                     }
@@ -1332,6 +1462,17 @@ text_sensor:
   - platform: version
     name: "ESPHome Version"
 
+  - platform: template
+    name: "Inverter Output Priority Mode"
+    icon: "mdi:swap-horizontal"
+    update_interval: 10s
+    lambda: |-
+      if (id(inverter_priority_mode) == 0) {
+        return std::string("Inverter Priority (Battery/PV)");
+      } else {
+        return std::string("Utility Priority (Grid)");
+      }
+
 binary_sensor:
   - platform: template
     name: "CAN Data Stale"
@@ -1505,6 +1646,29 @@ select:
             ESP_LOGI("soc_config", "Force Charge: ON at 55%%, OFF at 60%%");
           }
 
+  - platform: template
+    name: "Inverter Output Priority Control"
+    icon: "mdi:swap-horizontal"
+    optimistic: true
+    restore_value: true
+    options:
+      - "Auto (SOC-based)"
+      - "Force Inverter Priority"
+      - "Force Utility Priority"
+    initial_option: "Auto (SOC-based)"
+    on_value:
+      - lambda: |-
+          if (x == "Auto (SOC-based)") {
+            id(inverter_priority_control_mode) = 0;
+            ESP_LOGI("inverter_priority", "Control: Auto (SOC-based switching)");
+          } else if (x == "Force Inverter Priority") {
+            id(inverter_priority_control_mode) = 1;
+            ESP_LOGI("inverter_priority", "Control: Force Inverter Priority (battery/PV preferred)");
+          } else if (x == "Force Utility Priority") {
+            id(inverter_priority_control_mode) = 2;
+            ESP_LOGI("inverter_priority", "Control: Force Utility Priority (grid preferred)");
+          }
+
 switch:
   - platform: template
     name: "Enable SOC Reserve Control"
@@ -1528,3 +1692,164 @@ switch:
 button:
   - platform: restart
     name: "Restart"
+
+  - platform: template
+    name: "Refresh Inverter Priority"
+    icon: "mdi:refresh"
+    on_press:
+      - lambda: |-
+          // Read current inverter priority mode from register 0x9608 and update if needed
+          const uint8_t slave_id = ${inverter_slave};
+          const char* inv_host = "${inverter_host}";
+          const int inv_port = ${inverter_port};
+
+          int soc = id(bms_soc);
+          int desired_mode = id(inverter_priority_mode);  // Start with current cached value
+
+          // Determine desired mode based on control setting
+          if (id(inverter_priority_control_mode) == 0) {
+            // Auto mode: Use SOC discharge blocking flag
+            if (id(soc_control_enabled)) {
+              if (id(soc_discharge_blocked)) {
+                desired_mode = 1;  // Utility priority
+              } else {
+                desired_mode = 0;  // Inverter priority
+              }
+            }
+          } else if (id(inverter_priority_control_mode) == 1) {
+            desired_mode = 0;  // Force Inverter priority
+          } else if (id(inverter_priority_control_mode) == 2) {
+            desired_mode = 1;  // Force Utility priority
+          }
+
+          ESP_LOGI("inverter_priority", "Refresh requested: desired mode = %d (SOC=%d%%)", desired_mode, soc);
+
+          // Build Modbus RTU read request for register 0x9608
+          // Function 0x03 (Read Holding Registers), starting at 0x9608, count 1
+          uint8_t read_cmd[8];
+          read_cmd[0] = slave_id;
+          read_cmd[1] = 0x03;  // Function code: Read Holding Registers
+          read_cmd[2] = 0x96;  // Register high byte
+          read_cmd[3] = 0x08;  // Register low byte
+          read_cmd[4] = 0x00;  // Quantity high byte
+          read_cmd[5] = 0x01;  // Quantity low byte (read 1 register)
+
+          // Calculate CRC16-Modbus
+          uint16_t crc = 0xFFFF;
+          for (int i = 0; i < 6; i++) {
+            crc ^= read_cmd[i];
+            for (int j = 0; j < 8; j++) {
+              if (crc & 0x0001) {
+                crc = (crc >> 1) ^ 0xA001;
+              } else {
+                crc = crc >> 1;
+              }
+            }
+          }
+          read_cmd[6] = crc & 0xFF;
+          read_cmd[7] = (crc >> 8) & 0xFF;
+
+          // Connect and read
+          struct sockaddr_in dest_addr;
+          dest_addr.sin_addr.s_addr = ::inet_addr(inv_host);
+          dest_addr.sin_family = AF_INET;
+          dest_addr.sin_port = ::htons(inv_port);
+
+          int sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+          if (sock >= 0) {
+            struct timeval timeout;
+            timeout.tv_sec = 2;
+            timeout.tv_usec = 0;
+            ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+            if (::connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) == 0) {
+              // Send read command
+              int written = ::send(sock, read_cmd, 8, 0);
+              if (written == 8) {
+                // Read response: [slave][func][byte_count][data_high][data_low][crc_low][crc_high]
+                uint8_t response[7];
+                int len = ::recv(sock, response, 7, 0);
+
+                if (len == 7 && response[0] == slave_id && response[1] == 0x03 && response[2] == 2) {
+                  // Extract current mode from response
+                  int current_mode = (response[3] << 8) | response[4];
+                  id(inverter_priority_mode) = current_mode;
+
+                  // Log comparison
+                  const char* current_str = (current_mode == 0) ? "Inverter Priority" : "Utility Priority";
+                  const char* desired_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
+
+                  if (current_mode == desired_mode) {
+                    ESP_LOGI("inverter_priority", "Current mode is CORRECT: %s (%d)", current_str, current_mode);
+                  } else {
+                    ESP_LOGW("inverter_priority", "Mode MISMATCH: current=%s (%d), desired=%s (%d) - updating...",
+                             current_str, current_mode, desired_str, desired_mode);
+
+                    // Close read socket before writing
+                    ::close(sock);
+
+                    // Build write command
+                    uint8_t write_cmd[8];
+                    write_cmd[0] = slave_id;
+                    write_cmd[1] = 0x06;  // Function code: Write Single Register
+                    write_cmd[2] = 0x96;
+                    write_cmd[3] = 0x08;
+                    write_cmd[4] = 0x00;
+                    write_cmd[5] = desired_mode;
+
+                    // Calculate CRC for write
+                    crc = 0xFFFF;
+                    for (int i = 0; i < 6; i++) {
+                      crc ^= write_cmd[i];
+                      for (int j = 0; j < 8; j++) {
+                        if (crc & 0x0001) {
+                          crc = (crc >> 1) ^ 0xA001;
+                        } else {
+                          crc = crc >> 1;
+                        }
+                      }
+                    }
+                    write_cmd[6] = crc & 0xFF;
+                    write_cmd[7] = (crc >> 8) & 0xFF;
+
+                    // Reconnect and write
+                    sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+                    if (sock >= 0) {
+                      ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+                      if (::connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr)) == 0) {
+                        written = ::send(sock, write_cmd, 8, 0);
+                        if (written == 8) {
+                          uint8_t write_response[8];
+                          len = ::recv(sock, write_response, 8, 0);
+
+                          if (len == 8 && write_response[0] == slave_id && write_response[1] == 0x06) {
+                            id(inverter_priority_mode) = desired_mode;
+                            ESP_LOGI("inverter_priority", "Mode updated successfully to %s (%d)",
+                                     desired_str, desired_mode);
+                          } else {
+                            ESP_LOGE("inverter_priority", "Write failed - unexpected response");
+                          }
+                        }
+                        ::close(sock);
+                      } else {
+                        ESP_LOGE("inverter_priority", "Write failed - connection error");
+                        ::close(sock);
+                      }
+                    }
+                    return;  // Exit after write attempt
+                  }
+                } else {
+                  ESP_LOGE("inverter_priority", "Read failed - invalid response (len=%d)", len);
+                }
+              } else {
+                ESP_LOGE("inverter_priority", "Read failed - send error");
+              }
+              ::close(sock);
+            } else {
+              ESP_LOGE("inverter_priority", "Connection failed");
+              ::close(sock);
+            }
+          } else {
+            ESP_LOGE("inverter_priority", "Socket creation failed");
+          }
