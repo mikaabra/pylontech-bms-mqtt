@@ -177,6 +177,53 @@ baf7cec - Add comprehensive debug logging for inverter priority control
 7d5c9fa - 🎉 Fix inverter priority write - use function 0x10 instead of 0x06
 ```
 
+## Latest Updates (2026-01-16)
+
+### Statistics and Monitoring
+- **Success/Failure Counters**: Added web UI sensors for tracking Modbus write attempts, successes, failures, and success rate
+- **Debug Level Control**: Three-level logging system:
+  - **Minimal**: Only Modbus READ/WRITE commands and responses
+  - **Normal**: Adds success/failure messages and status updates
+  - **Verbose**: Full debug including socket operations, connections, timing
+- All counters persist across reboots via NVRAM
+
+### Improved Reliability
+- **Function 0x04 Support**: EPever inverter sometimes responds with function 0x04 (Read Input) instead of 0x03 (Read Holding). Firmware now accepts both response types.
+- **Retry Logic**: Automatic retry on Modbus timeouts to handle single-client gateway conflicts with Home Assistant
+- **State Persistence**: SOC Reserve Control switch state now persists across reboots
+
+### Instant Response to Changes
+The system now immediately updates inverter priority (within 1 second) when:
+1. **SOC crosses thresholds**: When discharge blocked/allowed state changes
+2. **Controls are changed**: When user modifies any SOC or priority control (5 second delay)
+
+This eliminates the need to wait for the 3-hour automatic interval or press the refresh button manually.
+
+### How It Works
+```
+SOC crosses 55% (going up):
+  └─> soc_discharge_blocked = false
+  └─> Flag set: inverter_priority_update_requested = true
+  └─> Within 1 second: Fast interval checks flag
+  └─> Calculates desired mode (0 = Inverter Priority)
+  └─> Sends Modbus WRITE: 0A 10 96 08 00 01 02 00 00 [CRC]
+  └─> Response: 0A 10 96 08 00 01 AC F8
+  └─> Success! Inverter switches to battery mode
+```
+
+### Configuration Summary
+All settings accessible via web UI:
+- **SOC Reserve Control**: Master enable switch (persists across reboots)
+- **SOC Discharge Thresholds**: 40%/45%, 45%/50%, 50%/55%, 55%/60%, 60%/65%
+- **SOC Force Charge Thresholds**: 35%/40%, 40%/45%, 45%/50%, 50%/55%, 55%/60%
+- **Inverter Priority Control**: Auto (SOC-based) / Force Inverter / Force Utility
+- **Debug Level**: Minimal / Normal / Verbose
+- **Modbus Update Interval**: Configurable in secrets.yaml (default: 3 hours)
+
+### Firmware Size
+- **Current**: 956KB (52.1% of flash)
+- **RAM**: 37KB (11.3%)
+
 ## Acknowledgments
 
 This was a great debugging session! Key lessons learned:
@@ -184,5 +231,7 @@ This was a great debugging session! Key lessons learned:
 2. Some devices only support function 0x10 even for single registers
 3. Modbus RTU over TCP != Modbus TCP (different framing)
 4. Python's socket library + manual RTU framing = excellent debugging tool
+5. EPever inverters may respond with function 0x04 instead of 0x03 - handle both
+6. Immediate state machine response is critical for user experience
 
-The system is now ready to automatically manage inverter priority based on battery SOC! 🚀
+The system is now production-ready with comprehensive monitoring, instant response to SOC changes, and robust error handling! 🚀

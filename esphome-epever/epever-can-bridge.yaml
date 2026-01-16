@@ -203,11 +203,15 @@ canbus:
                     id(soc_discharge_blocked) = true;
                     ESP_LOGI("soc_control", "Discharge BLOCKED at %d%% (threshold: %d%%) - will switch to Utility priority",
                              soc, id(soc_discharge_block_threshold));
+                    // Trigger immediate inverter priority update
+                    id(inverter_priority_update_requested) = true;
                   }
                   if (soc > id(soc_discharge_allow_threshold) && id(soc_discharge_blocked)) {
                     id(soc_discharge_blocked) = false;
                     ESP_LOGI("soc_control", "Discharge ALLOWED at %d%% (threshold: %d%%) - will switch to Inverter priority",
                              soc, id(soc_discharge_allow_threshold));
+                    // Trigger immediate inverter priority update
+                    id(inverter_priority_update_requested) = true;
                   }
 
                   // Force charge hysteresis
@@ -337,9 +341,11 @@ canbus:
                   id(can_charge_enabled) = charge_en;
                   id(can_discharge_enabled) = discharge_en;
                   id(can_force_charge_request) = force_chg;
-                  ESP_LOGI("can", "0x35C: Charge=%s Discharge=%s ForceChg=%s (0x%02X)",
-                           charge_en ? "EN" : "DIS", discharge_en ? "EN" : "DIS",
-                           force_chg ? "YES" : "NO", flags);
+                  if (id(inverter_priority_debug_level) >= 1) {
+                    ESP_LOGI("can", "0x35C: Charge=%s Discharge=%s ForceChg=%s (0x%02X)",
+                             charge_en ? "EN" : "DIS", discharge_en ? "EN" : "DIS",
+                             force_chg ? "YES" : "NO", flags);
+                  }
                 }
               }
 
@@ -451,6 +457,31 @@ globals:
     type: int
     initial_value: '0'  # 0=Auto(SOC-based), 1=Force Inverter, 2=Force Utility
 
+  # Statistics counters for inverter priority changes
+  - id: inverter_priority_attempts
+    type: int
+    restore_value: true
+    initial_value: '0'
+  - id: inverter_priority_successes
+    type: int
+    restore_value: true
+    initial_value: '0'
+  - id: inverter_priority_failures
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+  # Debug logging level: 0=Minimal(Modbus only), 1=Normal, 2=Verbose
+  - id: inverter_priority_debug_level
+    type: int
+    restore_value: true
+    initial_value: '0'
+
+  # Flag to trigger immediate inverter priority update (set by control changes)
+  - id: inverter_priority_update_requested
+    type: bool
+    initial_value: 'false'
+
   # BMS data for RS485 responses
   - id: bms_soc
     type: int
@@ -545,8 +576,10 @@ interval:
 
           // Only log if we've received CAN data recently (healthy)
           if (elapsed < 30000 && (now - last_rx_check) >= 10000) {
-            ESP_LOGI("can", "CAN OK (SOC=%d%%, V=%.1fV, last_rx=%dms ago)",
-                     id(bms_soc), id(bms_v_charge_max), elapsed);
+            if (id(inverter_priority_debug_level) >= 1) {
+              ESP_LOGI("can", "CAN OK (SOC=%d%%, V=%.1fV, last_rx=%dms ago)",
+                       id(bms_soc), id(bms_v_charge_max), elapsed);
+            }
             last_rx_check = now;
           }
 
@@ -580,14 +613,18 @@ interval:
             desired_mode = 1;  // Force Utility priority
           }
 
-          ESP_LOGI("inverter_priority", "Auto check: current=%d, desired=%d (SOC=%d%%, soc_control=%d, discharge_blocked=%d)",
-                   id(inverter_priority_mode), desired_mode, soc, id(soc_control_enabled), id(soc_discharge_blocked));
+          if (id(inverter_priority_debug_level) >= 1) {
+            ESP_LOGI("inverter_priority", "Auto check: current=%d, desired=%d (SOC=%d%%, soc_control=%d, discharge_blocked=%d)",
+                     id(inverter_priority_mode), desired_mode, soc, id(soc_control_enabled), id(soc_discharge_blocked));
+          }
 
           // Only send Modbus command if mode actually needs to change
           // (No force updates - be quiet on Modbus to avoid conflicts)
           if (desired_mode != id(inverter_priority_mode)) {
-            ESP_LOGI("inverter_priority", "Mode change needed: %d -> %d (SOC=%d%%)",
-                     id(inverter_priority_mode), desired_mode, soc);
+            if (id(inverter_priority_debug_level) >= 1) {
+              ESP_LOGI("inverter_priority", "Mode change needed: %d -> %d (SOC=%d%%)",
+                       id(inverter_priority_mode), desired_mode, soc);
+            }
 
             // Build Modbus RTU write request
             // Function 0x10 (Write Multiple Registers) - required by EPever inverter
@@ -634,6 +671,10 @@ interval:
 
             int sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
             if (sock >= 0) {
+              if (id(inverter_priority_debug_level) >= 2) {
+                ESP_LOGI("inverter_priority", "Socket created (fd=%d)", sock);
+              }
+
               // Set socket timeout
               struct timeval timeout;
               timeout.tv_sec = 1;
@@ -642,6 +683,13 @@ interval:
 
               int conn_result = ::connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
               if (conn_result == 0) {
+                if (id(inverter_priority_debug_level) >= 2) {
+                  ESP_LOGI("inverter_priority", "Connected to %s:%d", inv_host, inv_port);
+                }
+
+                // Increment attempt counter
+                id(inverter_priority_attempts)++;
+
                 // Send Modbus command (function 0x10 = 11 bytes)
                 int written = ::send(sock, modbus_cmd, 11, 0);
                 if (written == 11) {
@@ -665,29 +713,216 @@ interval:
                     else if (exception_code == 4) exception_msg = "Slave Device Failure";
 
                     ESP_LOGE("inverter_priority", "Modbus Exception: %s (code %d)", exception_msg, exception_code);
-                    ESP_LOGE("inverter_priority", "Register 0x9608 may be READ-ONLY or require different write method");
+                    if (id(inverter_priority_debug_level) >= 1) {
+                      ESP_LOGE("inverter_priority", "Register 0x9608 may be READ-ONLY or require different write method");
+                    }
+                    id(inverter_priority_failures)++;
                   } else if (len == 8 && response[0] == slave_id && response[1] == 0x10) {
                     id(inverter_priority_mode) = desired_mode;
-                    const char* mode_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
-                    ESP_LOGI("inverter_priority", "✓ Mode changed successfully to %s (%d)",
-                             mode_str, desired_mode);
+                    id(inverter_priority_successes)++;
+                    if (id(inverter_priority_debug_level) >= 1) {
+                      const char* mode_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
+                      ESP_LOGI("inverter_priority", "✓ Mode changed successfully to %s (%d)",
+                               mode_str, desired_mode);
+                    }
                   } else {
-                    ESP_LOGW("inverter_priority", "Unexpected response (len=%d, slave=%d, func=%02X)",
-                             len, response[0], response[1]);
+                    if (id(inverter_priority_debug_level) >= 1) {
+                      ESP_LOGW("inverter_priority", "Unexpected response (len=%d, slave=%d, func=%02X)",
+                               len, response[0], response[1]);
+                    }
+                    id(inverter_priority_failures)++;
                   }
                 } else {
-                  ESP_LOGW("inverter_priority", "Failed to send command (wrote %d bytes, expected 11, errno=%d)", written, errno);
+                  if (id(inverter_priority_debug_level) >= 1) {
+                    ESP_LOGW("inverter_priority", "Failed to send command (wrote %d bytes, expected 11, errno=%d)", written, errno);
+                  }
+                  id(inverter_priority_failures)++;
                 }
                 ::close(sock);
               } else {
-                ESP_LOGE("inverter_priority", "Failed to connect (errno=%d: %s)", errno, strerror(errno));
+                if (id(inverter_priority_debug_level) >= 1) {
+                  ESP_LOGE("inverter_priority", "Failed to connect (errno=%d: %s)", errno, strerror(errno));
+                }
+                id(inverter_priority_failures)++;
                 ::close(sock);
               }
             } else {
-              ESP_LOGE("inverter_priority", "Failed to create socket (errno=%d: %s)", errno, strerror(errno));
+              if (id(inverter_priority_debug_level) >= 1) {
+                ESP_LOGE("inverter_priority", "Failed to create socket (errno=%d: %s)", errno, strerror(errno));
+              }
+              id(inverter_priority_failures)++;
             }
           } else {
-            ESP_LOGI("inverter_priority", "Mode already correct, no update needed");
+            if (id(inverter_priority_debug_level) >= 1) {
+              ESP_LOGI("inverter_priority", "Mode already correct, no update needed");
+            }
+          }
+
+  # Fast check for control change triggers (runs when flag is set)
+  - interval: 1s
+    then:
+      - lambda: |-
+          // Check if update was requested by a control change
+          if (!id(inverter_priority_update_requested)) {
+            return;  // Nothing to do
+          }
+
+          // Clear flag immediately to avoid repeated triggers
+          id(inverter_priority_update_requested) = false;
+
+          ESP_LOGI("inverter_priority", "Running triggered update check...");
+
+          // Same logic as automatic interval
+          int soc = id(bms_soc);
+          int desired_mode = id(inverter_priority_mode);
+
+          // Determine desired mode based on control setting
+          if (id(inverter_priority_control_mode) == 0) {
+            // Auto mode: Use SOC discharge blocking flag
+            if (id(soc_control_enabled)) {
+              if (id(soc_discharge_blocked)) {
+                desired_mode = 1;  // Utility priority
+              } else {
+                desired_mode = 0;  // Inverter priority
+              }
+            }
+          } else if (id(inverter_priority_control_mode) == 1) {
+            desired_mode = 0;  // Force Inverter priority
+          } else if (id(inverter_priority_control_mode) == 2) {
+            desired_mode = 1;  // Force Utility priority
+          }
+
+          if (id(inverter_priority_debug_level) >= 1) {
+            ESP_LOGI("inverter_priority", "Triggered check: current=%d, desired=%d (SOC=%d%%)",
+                     id(inverter_priority_mode), desired_mode, soc);
+          }
+
+          // Only send if mode needs to change
+          if (desired_mode == id(inverter_priority_mode)) {
+            if (id(inverter_priority_debug_level) >= 1) {
+              ESP_LOGI("inverter_priority", "Mode already correct, no update needed");
+            }
+            return;
+          }
+
+          if (id(inverter_priority_debug_level) >= 1) {
+            ESP_LOGI("inverter_priority", "Mode change needed: %d -> %d", id(inverter_priority_mode), desired_mode);
+          }
+
+          // Build and send Modbus command (same as automatic interval)
+          const uint8_t slave_id = ${inverter_slave};
+          const char* inv_host = "${inverter_host}";
+          const int inv_port = ${inverter_port};
+
+          uint8_t modbus_cmd[11];
+          modbus_cmd[0] = slave_id;
+          modbus_cmd[1] = 0x10;
+          modbus_cmd[2] = 0x96;
+          modbus_cmd[3] = 0x08;
+          modbus_cmd[4] = 0x00;
+          modbus_cmd[5] = 0x01;
+          modbus_cmd[6] = 0x02;
+          modbus_cmd[7] = 0x00;
+          modbus_cmd[8] = desired_mode;
+
+          // Calculate CRC
+          uint16_t crc = 0xFFFF;
+          for (int i = 0; i < 9; i++) {
+            crc ^= modbus_cmd[i];
+            for (int j = 0; j < 8; j++) {
+              if (crc & 0x0001) {
+                crc = (crc >> 1) ^ 0xA001;
+              } else {
+                crc = crc >> 1;
+              }
+            }
+          }
+          modbus_cmd[9] = crc & 0xFF;
+          modbus_cmd[10] = (crc >> 8) & 0xFF;
+
+          ESP_LOGI("inverter_priority", "Modbus WRITE cmd: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                   modbus_cmd[0], modbus_cmd[1], modbus_cmd[2], modbus_cmd[3], modbus_cmd[4],
+                   modbus_cmd[5], modbus_cmd[6], modbus_cmd[7], modbus_cmd[8], modbus_cmd[9], modbus_cmd[10]);
+
+          // Send via TCP
+          struct sockaddr_in dest_addr;
+          dest_addr.sin_addr.s_addr = ::inet_addr(inv_host);
+          dest_addr.sin_family = AF_INET;
+          dest_addr.sin_port = ::htons(inv_port);
+
+          int sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
+          if (sock >= 0) {
+            if (id(inverter_priority_debug_level) >= 2) {
+              ESP_LOGI("inverter_priority", "Socket created (fd=%d)", sock);
+            }
+
+            struct timeval timeout;
+            timeout.tv_sec = 1;
+            timeout.tv_usec = 0;
+            ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
+
+            int conn_result = ::connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
+            if (conn_result == 0) {
+              if (id(inverter_priority_debug_level) >= 2) {
+                ESP_LOGI("inverter_priority", "Connected to %s:%d", inv_host, inv_port);
+              }
+
+              id(inverter_priority_attempts)++;
+
+              int written = ::send(sock, modbus_cmd, 11, 0);
+              if (written == 11) {
+                delay(100);
+                uint8_t response[8];
+                int len = ::recv(sock, response, 8, 0);
+
+                if (len > 0) {
+                  ESP_LOGI("inverter_priority", "Response: %02X %02X %02X %02X %02X %02X %02X %02X",
+                           response[0], response[1], response[2], response[3],
+                           response[4], response[5], response[6], response[7]);
+                }
+
+                if (len >= 5 && response[0] == slave_id && (response[1] & 0x80)) {
+                  uint8_t exception_code = response[2];
+                  const char* exception_msg = "Unknown";
+                  if (exception_code == 1) exception_msg = "Illegal Function";
+                  else if (exception_code == 2) exception_msg = "Illegal Data Address";
+                  else if (exception_code == 3) exception_msg = "Illegal Data Value";
+                  else if (exception_code == 4) exception_msg = "Slave Device Failure";
+
+                  ESP_LOGE("inverter_priority", "Modbus Exception: %s (code %d)", exception_msg, exception_code);
+                  id(inverter_priority_failures)++;
+                } else if (len == 8 && response[0] == slave_id && response[1] == 0x10) {
+                  id(inverter_priority_mode) = desired_mode;
+                  id(inverter_priority_successes)++;
+                  if (id(inverter_priority_debug_level) >= 1) {
+                    const char* mode_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
+                    ESP_LOGI("inverter_priority", "✓ Mode changed successfully to %s (%d)", mode_str, desired_mode);
+                  }
+                } else {
+                  if (id(inverter_priority_debug_level) >= 1) {
+                    ESP_LOGW("inverter_priority", "Unexpected response (len=%d)", len);
+                  }
+                  id(inverter_priority_failures)++;
+                }
+              } else {
+                if (id(inverter_priority_debug_level) >= 1) {
+                  ESP_LOGW("inverter_priority", "Failed to send command");
+                }
+                id(inverter_priority_failures)++;
+              }
+              ::close(sock);
+            } else {
+              if (id(inverter_priority_debug_level) >= 1) {
+                ESP_LOGE("inverter_priority", "Failed to connect (errno=%d)", errno);
+              }
+              id(inverter_priority_failures)++;
+              ::close(sock);
+            }
+          } else {
+            if (id(inverter_priority_debug_level) >= 1) {
+              ESP_LOGE("inverter_priority", "Failed to create socket (errno=%d)", errno);
+            }
+            id(inverter_priority_failures)++;
           }
 
   # Modbus RTU responder - responds to inverter read requests
@@ -1461,6 +1696,39 @@ sensor:
     lambda: 'return id(can_error_count);'
     update_interval: 10s
 
+  - platform: template
+    name: "Inverter Priority Change Attempts"
+    accuracy_decimals: 0
+    icon: "mdi:counter"
+    lambda: 'return id(inverter_priority_attempts);'
+    update_interval: 10s
+
+  - platform: template
+    name: "Inverter Priority Change Successes"
+    accuracy_decimals: 0
+    icon: "mdi:check-circle"
+    lambda: 'return id(inverter_priority_successes);'
+    update_interval: 10s
+
+  - platform: template
+    name: "Inverter Priority Change Failures"
+    accuracy_decimals: 0
+    icon: "mdi:alert-circle"
+    lambda: 'return id(inverter_priority_failures);'
+    update_interval: 10s
+
+  - platform: template
+    name: "Inverter Priority Change Success Rate"
+    accuracy_decimals: 1
+    unit_of_measurement: "%"
+    icon: "mdi:percent"
+    lambda: |-
+      int attempts = id(inverter_priority_attempts);
+      if (attempts == 0) return 0.0;
+      int successes = id(inverter_priority_successes);
+      return (float)successes / (float)attempts * 100.0;
+    update_interval: 10s
+
   - platform: wifi_signal
     name: "WiFi Signal"
     update_interval: 60s
@@ -1638,6 +1906,10 @@ select:
             id(soc_discharge_allow_threshold) = 65;
             ESP_LOGI("soc_config", "Discharge: Block at 60%%, Allow at 65%%");
           }
+      - delay: 5s
+      - lambda: |-
+          ESP_LOGI("soc_config", "Triggering inverter priority update after control change");
+          id(inverter_priority_update_requested) = true;
 
   - platform: template
     name: "SOC Force Charge Control"
@@ -1674,6 +1946,10 @@ select:
             id(soc_force_charge_off_threshold) = 60;
             ESP_LOGI("soc_config", "Force Charge: ON at 55%%, OFF at 60%%");
           }
+      - delay: 5s
+      - lambda: |-
+          ESP_LOGI("soc_config", "Triggering inverter priority update after control change");
+          id(inverter_priority_update_requested) = true;
 
   - platform: template
     name: "Inverter Output Priority Control"
@@ -1697,12 +1973,40 @@ select:
             id(inverter_priority_control_mode) = 2;
             ESP_LOGI("inverter_priority", "Control: Force Utility Priority (grid preferred)");
           }
+      - delay: 5s
+      - lambda: |-
+          ESP_LOGI("inverter_priority", "Triggering inverter priority update after control change");
+          id(inverter_priority_update_requested) = true;
+
+  - platform: template
+    name: "Inverter Priority Debug Level"
+    icon: "mdi:bug"
+    optimistic: true
+    restore_value: true
+    options:
+      - "Minimal (Modbus only)"
+      - "Normal"
+      - "Verbose"
+    initial_option: "Minimal (Modbus only)"
+    on_value:
+      - lambda: |-
+          if (x == "Minimal (Modbus only)") {
+            id(inverter_priority_debug_level) = 0;
+            ESP_LOGI("inverter_priority", "Debug: Minimal (Modbus RTU transactions only)");
+          } else if (x == "Normal") {
+            id(inverter_priority_debug_level) = 1;
+            ESP_LOGI("inverter_priority", "Debug: Normal (Modbus + results)");
+          } else if (x == "Verbose") {
+            id(inverter_priority_debug_level) = 2;
+            ESP_LOGI("inverter_priority", "Debug: Verbose (all details)");
+          }
 
 switch:
   - platform: template
     name: "Enable SOC Reserve Control"
     icon: "mdi:battery-heart"
     optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
     turn_on_action:
       - lambda: |-
           id(soc_control_enabled) = true;
@@ -1711,12 +2015,20 @@ switch:
                    id(soc_discharge_block_threshold), id(soc_discharge_allow_threshold));
           ESP_LOGI("soc_control", "  Force Charge: ON <%d%%, OFF >=%d%%",
                    id(soc_force_charge_on_threshold), id(soc_force_charge_off_threshold));
+      - delay: 5s
+      - lambda: |-
+          ESP_LOGI("soc_control", "Triggering inverter priority update after control change");
+          id(inverter_priority_update_requested) = true;
     turn_off_action:
       - lambda: |-
           id(soc_control_enabled) = false;
           id(soc_discharge_blocked) = false;
           id(soc_force_charge_active) = false;
           ESP_LOGI("soc_control", "SOC Reserve Control DISABLED");
+      - delay: 5s
+      - lambda: |-
+          ESP_LOGI("soc_control", "Triggering inverter priority update after control change");
+          id(inverter_priority_update_requested) = true;
 
 button:
   - platform: restart
@@ -1759,10 +2071,12 @@ button:
             desired_mode = 1;  // Force Utility priority
           }
 
-          ESP_LOGI("inverter_priority", "=== REFRESH BUTTON PRESSED ===");
-          ESP_LOGI("inverter_priority", "Target: %s:%d, slave=%d", inv_host, inv_port, slave_id);
-          ESP_LOGI("inverter_priority", "Desired mode: %d (SOC=%d%%, control_mode=%d, soc_control=%d, discharge_blocked=%d)",
-                   desired_mode, soc, id(inverter_priority_control_mode), id(soc_control_enabled), id(soc_discharge_blocked));
+          if (id(inverter_priority_debug_level) >= 1) {
+            ESP_LOGI("inverter_priority", "=== REFRESH BUTTON PRESSED ===");
+            ESP_LOGI("inverter_priority", "Target: %s:%d, slave=%d", inv_host, inv_port, slave_id);
+            ESP_LOGI("inverter_priority", "Desired mode: %d (SOC=%d%%, control_mode=%d, soc_control=%d, discharge_blocked=%d)",
+                     desired_mode, soc, id(inverter_priority_control_mode), id(soc_control_enabled), id(soc_discharge_blocked));
+          }
 
           // Build Modbus RTU read request for register 0x9608
           // Function 0x03 (Read Holding Registers), starting at 0x9608, count 1
@@ -1799,40 +2113,58 @@ button:
           dest_addr.sin_family = AF_INET;
           dest_addr.sin_port = ::htons(inv_port);
 
-          ESP_LOGI("inverter_priority", "Creating socket...");
           int sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
           if (sock >= 0) {
-            ESP_LOGI("inverter_priority", "Socket created (fd=%d), connecting to %s:%d...", sock, inv_host, inv_port);
+            if (id(inverter_priority_debug_level) >= 2) {
+              ESP_LOGI("inverter_priority", "Socket created (fd=%d), connecting to %s:%d...", sock, inv_host, inv_port);
+            }
+
             struct timeval timeout;
             timeout.tv_sec = 2;
             timeout.tv_usec = 0;
             ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
             int conn_result = ::connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-            ESP_LOGI("inverter_priority", "Connect result: %d (errno=%d)", conn_result, errno);
+            if (id(inverter_priority_debug_level) >= 2) {
+              ESP_LOGI("inverter_priority", "Connect result: %d (errno=%d)", conn_result, errno);
+            }
 
             if (conn_result == 0) {
-              ESP_LOGI("inverter_priority", "Connected! Sending READ command...");
+              if (id(inverter_priority_debug_level) >= 2) {
+                ESP_LOGI("inverter_priority", "Connected! Sending READ command...");
+              }
+
               // Send read command
               int written = ::send(sock, read_cmd, 8, 0);
-              ESP_LOGI("inverter_priority", "Sent %d bytes (expected 8)", written);
+              if (id(inverter_priority_debug_level) >= 2) {
+                ESP_LOGI("inverter_priority", "Sent %d bytes (expected 8)", written);
+              }
 
               if (written == 8) {
                 // Give inverter time to process (Modbus RTU timing)
                 delay(100);
 
-                ESP_LOGI("inverter_priority", "Waiting for response...");
+                if (id(inverter_priority_debug_level) >= 2) {
+                  ESP_LOGI("inverter_priority", "Waiting for response...");
+                }
+
                 // Read response: [slave][func][byte_count][data_high][data_low][crc_low][crc_high]
                 uint8_t response[7];
                 int len = ::recv(sock, response, 7, 0);
-                ESP_LOGI("inverter_priority", "Received %d bytes (expected 7)", len);
+                if (id(inverter_priority_debug_level) >= 2) {
+                  ESP_LOGI("inverter_priority", "Received %d bytes (expected 7)", len);
+                }
 
                 // Retry once if timeout
                 if (len < 0) {
-                  ESP_LOGW("inverter_priority", "Read timeout, retrying...");
+                  if (id(inverter_priority_debug_level) >= 1) {
+                    ESP_LOGW("inverter_priority", "Read timeout, retrying...");
+                  }
                   delay(200);
                   len = ::recv(sock, response, 7, 0);
-                  ESP_LOGI("inverter_priority", "Retry received %d bytes", len);
+                  if (id(inverter_priority_debug_level) >= 2) {
+                    ESP_LOGI("inverter_priority", "Retry received %d bytes", len);
+                  }
                 }
 
                 if (len > 0) {
@@ -1841,8 +2173,16 @@ button:
                            response[4], response[5], response[6]);
                 }
 
-                if (len == 7 && response[0] == slave_id && response[1] == 0x03 && response[2] == 2) {
-                  // Extract current mode from response
+                // Accept both function 0x03 (Read Holding) and 0x04 (Read Input)
+                // EPever sometimes responds with 0x04 even when we send 0x03
+                if (len >= 7 && response[0] == slave_id &&
+                    (response[1] == 0x03 || response[1] == 0x04) && response[2] >= 2) {
+
+                  if (response[1] == 0x04 && id(inverter_priority_debug_level) >= 1) {
+                    ESP_LOGW("inverter_priority", "Note: Inverter responded with function 0x04 (Read Input) instead of 0x03");
+                  }
+
+                  // Extract current mode from response (data starts at byte 3)
                   int current_mode = (response[3] << 8) | response[4];
                   id(inverter_priority_mode) = current_mode;
 
@@ -1851,10 +2191,14 @@ button:
                   const char* desired_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
 
                   if (current_mode == desired_mode) {
-                    ESP_LOGI("inverter_priority", "Current mode is CORRECT: %s (%d)", current_str, current_mode);
+                    if (id(inverter_priority_debug_level) >= 1) {
+                      ESP_LOGI("inverter_priority", "Current mode is CORRECT: %s (%d)", current_str, current_mode);
+                    }
                   } else {
-                    ESP_LOGW("inverter_priority", "Mode MISMATCH: current=%s (%d), desired=%s (%d) - updating...",
-                             current_str, current_mode, desired_str, desired_mode);
+                    if (id(inverter_priority_debug_level) >= 1) {
+                      ESP_LOGW("inverter_priority", "Mode MISMATCH: current=%s (%d), desired=%s (%d) - updating...",
+                               current_str, current_mode, desired_str, desired_mode);
+                    }
 
                     // Close read socket before writing
                     ::close(sock);
@@ -1894,35 +2238,56 @@ button:
                              write_cmd[0], write_cmd[1], write_cmd[2], write_cmd[3], write_cmd[4],
                              write_cmd[5], write_cmd[6], write_cmd[7], write_cmd[8], write_cmd[9], write_cmd[10]);
 
-                    ESP_LOGI("inverter_priority", "Creating new socket for write...");
+                    // Increment attempt counter before write
+                    id(inverter_priority_attempts)++;
+
                     sock = ::socket(AF_INET, SOCK_STREAM, IPPROTO_IP);
                     if (sock >= 0) {
-                      ESP_LOGI("inverter_priority", "Write socket created (fd=%d), connecting...", sock);
+                      if (id(inverter_priority_debug_level) >= 2) {
+                        ESP_LOGI("inverter_priority", "Write socket created (fd=%d), connecting...", sock);
+                      }
+
                       ::setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
 
                       conn_result = ::connect(sock, (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-                      ESP_LOGI("inverter_priority", "Write connect result: %d (errno=%d)", conn_result, errno);
+                      if (id(inverter_priority_debug_level) >= 2) {
+                        ESP_LOGI("inverter_priority", "Write connect result: %d (errno=%d)", conn_result, errno);
+                      }
 
                       if (conn_result == 0) {
-                        ESP_LOGI("inverter_priority", "Connected! Sending WRITE command...");
+                        if (id(inverter_priority_debug_level) >= 2) {
+                          ESP_LOGI("inverter_priority", "Connected! Sending WRITE command...");
+                        }
+
                         written = ::send(sock, write_cmd, 11, 0);
-                        ESP_LOGI("inverter_priority", "Write sent %d bytes (expected 11)", written);
+                        if (id(inverter_priority_debug_level) >= 2) {
+                          ESP_LOGI("inverter_priority", "Write sent %d bytes (expected 11)", written);
+                        }
 
                         if (written == 11) {
                           // Give inverter time to process write
                           delay(100);
 
-                          ESP_LOGI("inverter_priority", "Waiting for write response...");
+                          if (id(inverter_priority_debug_level) >= 2) {
+                            ESP_LOGI("inverter_priority", "Waiting for write response...");
+                          }
+
                           uint8_t write_response[8];
                           len = ::recv(sock, write_response, 8, 0);
-                          ESP_LOGI("inverter_priority", "Write received %d bytes (expected 8)", len);
+                          if (id(inverter_priority_debug_level) >= 2) {
+                            ESP_LOGI("inverter_priority", "Write received %d bytes (expected 8)", len);
+                          }
 
                           // Retry once if timeout
                           if (len < 0) {
-                            ESP_LOGW("inverter_priority", "Write timeout, retrying...");
+                            if (id(inverter_priority_debug_level) >= 1) {
+                              ESP_LOGW("inverter_priority", "Write timeout, retrying...");
+                            }
                             delay(200);
                             len = ::recv(sock, write_response, 8, 0);
-                            ESP_LOGI("inverter_priority", "Write retry received %d bytes", len);
+                            if (id(inverter_priority_debug_level) >= 2) {
+                              ESP_LOGI("inverter_priority", "Write retry received %d bytes", len);
+                            }
                           }
 
                           if (len > 0) {
@@ -1941,46 +2306,76 @@ button:
                             else if (exception_code == 4) exception_msg = "Slave Device Failure";
 
                             ESP_LOGE("inverter_priority", "Modbus Exception: %s (code %d)", exception_msg, exception_code);
-                            ESP_LOGE("inverter_priority", "Register 0x9608 may be READ-ONLY or require different write method");
+                            if (id(inverter_priority_debug_level) >= 1) {
+                              ESP_LOGE("inverter_priority", "Register 0x9608 may be READ-ONLY or require different write method");
+                            }
+                            id(inverter_priority_failures)++;
                           } else if (len == 8 && write_response[0] == slave_id && write_response[1] == 0x10) {
                             id(inverter_priority_mode) = desired_mode;
-                            ESP_LOGI("inverter_priority", "✓ Mode updated successfully to %s (%d)",
-                                     desired_str, desired_mode);
+                            id(inverter_priority_successes)++;
+                            if (id(inverter_priority_debug_level) >= 1) {
+                              ESP_LOGI("inverter_priority", "✓ Mode updated successfully to %s (%d)",
+                                       desired_str, desired_mode);
+                            }
                           } else {
-                            ESP_LOGE("inverter_priority", "Write failed - unexpected response (len=%d, slave=%d, func=%02X)",
-                                     len, write_response[0], write_response[1]);
+                            if (id(inverter_priority_debug_level) >= 1) {
+                              ESP_LOGE("inverter_priority", "Write failed - unexpected response (len=%d, slave=%d, func=%02X)",
+                                       len, write_response[0], write_response[1]);
+                            }
+                            id(inverter_priority_failures)++;
                           }
                         } else {
-                          ESP_LOGE("inverter_priority", "Write failed - send error (errno=%d)", errno);
+                          if (id(inverter_priority_debug_level) >= 1) {
+                            ESP_LOGE("inverter_priority", "Write failed - send error (errno=%d)", errno);
+                          }
+                          id(inverter_priority_failures)++;
                         }
                         ::close(sock);
                       } else {
-                        ESP_LOGE("inverter_priority", "Write failed - connection error (errno=%d)", errno);
+                        if (id(inverter_priority_debug_level) >= 1) {
+                          ESP_LOGE("inverter_priority", "Write failed - connection error (errno=%d)", errno);
+                        }
+                        id(inverter_priority_failures)++;
                         ::close(sock);
                       }
                     } else {
-                      ESP_LOGE("inverter_priority", "Write failed - socket creation error (errno=%d)", errno);
+                      if (id(inverter_priority_debug_level) >= 1) {
+                        ESP_LOGE("inverter_priority", "Write failed - socket creation error (errno=%d)", errno);
+                      }
+                      id(inverter_priority_failures)++;
                     }
                     return;  // Exit after write attempt
                   }
                 } else {
-                  ESP_LOGE("inverter_priority", "Read failed - invalid response (len=%d, expected 7)", len);
-                  if (len > 0) {
-                    ESP_LOGE("inverter_priority", "Response validation: slave=%d (expect %d), func=%d (expect 3), byte_count=%d (expect 2)",
-                             response[0], slave_id, response[1], response[2]);
+                  if (id(inverter_priority_debug_level) >= 1) {
+                    ESP_LOGE("inverter_priority", "Read failed - invalid response (len=%d, expected 7)", len);
+                    if (len > 0) {
+                      ESP_LOGE("inverter_priority", "Response validation: slave=%d (expect %d), func=%d (expect 3), byte_count=%d (expect 2)",
+                               response[0], slave_id, response[1], response[2]);
+                    }
                   }
                 }
               } else {
-                ESP_LOGE("inverter_priority", "Read failed - send error (wrote %d bytes, errno=%d)", written, errno);
+                if (id(inverter_priority_debug_level) >= 1) {
+                  ESP_LOGE("inverter_priority", "Read failed - send error (wrote %d bytes, errno=%d)", written, errno);
+                }
               }
               ::close(sock);
-              ESP_LOGI("inverter_priority", "Socket closed after read attempt");
+              if (id(inverter_priority_debug_level) >= 2) {
+                ESP_LOGI("inverter_priority", "Socket closed after read attempt");
+              }
             } else {
-              ESP_LOGE("inverter_priority", "Connection failed (errno=%d: %s)", errno, strerror(errno));
+              if (id(inverter_priority_debug_level) >= 1) {
+                ESP_LOGE("inverter_priority", "Connection failed (errno=%d: %s)", errno, strerror(errno));
+              }
               ::close(sock);
             }
           } else {
-            ESP_LOGE("inverter_priority", "Socket creation failed (errno=%d: %s)", errno, strerror(errno));
+            if (id(inverter_priority_debug_level) >= 1) {
+              ESP_LOGE("inverter_priority", "Socket creation failed (errno=%d: %s)", errno, strerror(errno));
+            }
           }
 
-          ESP_LOGI("inverter_priority", "=== REFRESH COMPLETED ===");
+          if (id(inverter_priority_debug_level) >= 1) {
+            ESP_LOGI("inverter_priority", "=== REFRESH COMPLETED ===");
+          }

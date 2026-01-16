@@ -52,22 +52,58 @@ cd /home/micke/GitHub/pylontech-bms-mqtt/esphome-epever
 
 **Key advantage**: This allows the battery to be used in island mode (power outages) regardless of SOC control settings, since we're not blocking discharge via D14 flag anymore.
 
+### Instant Response to State Changes
+
+The system now **immediately** updates inverter priority (within 1 second) when:
+
+1. **SOC crosses thresholds**: When `soc_discharge_blocked` flag changes
+   - SOC drops below 50% → Triggers update to Utility Priority
+   - SOC rises above 55% → Triggers update to Inverter Priority
+
+2. **User changes controls**: When any control is modified (5 second delay)
+   - Enable/Disable SOC Reserve Control
+   - Change discharge thresholds
+   - Change force charge thresholds
+   - Change inverter priority control mode
+
+This eliminates the need to wait for the 3-hour interval or manually press the refresh button.
+
+### Statistics and Monitoring
+
+**New sensors on web UI**:
+- **Inverter Priority Change Attempts**: Total write attempts
+- **Inverter Priority Change Successes**: Successful writes
+- **Inverter Priority Change Failures**: Failed writes (timeouts, exceptions)
+- **Inverter Priority Change Success Rate**: Percentage of successful writes
+- All counters persist across reboots via NVRAM
+
+**Debug Level Control**:
+- **Minimal**: Only Modbus READ/WRITE commands and responses (default)
+- **Normal**: Adds success/failure messages, status updates, CAN health
+- **Verbose**: Full debug including socket operations, connections, timing
+
+### Improved Reliability
+
+**Function 0x04 Support**: EPever inverters sometimes respond with function 0x04 (Read Input Registers) instead of 0x03 (Read Holding Registers). The firmware now accepts both response types, fixing issues where the refresh button required multiple presses.
+
+**Retry Logic**: Automatic retry on Modbus timeouts to handle conflicts when Home Assistant is also polling the inverter (single-client Modbus gateway limitation).
+
+**State Persistence**: SOC Reserve Control switch state now persists across reboots.
+
 ### Implementation Details
 
-**Files modified**:
-- Line 990: D14 flag now only responds to BMS protection (`can_discharge_enabled`), not SOC control
-- Lines 197-209: Discharge blocking hysteresis comments updated to reflect inverter priority control
-- Lines 573-579: Inverter priority control now uses `soc_discharge_blocked` flag instead of separate thresholds
-
-**Global variables removed**:
-- `inverter_priority_soc_low_threshold` - No longer needed (uses SOC discharge thresholds instead)
-- `inverter_priority_soc_high_threshold` - No longer needed
-- `inverter_priority_last_update` - No longer needed (updates only on change)
+**Key code locations**:
+- Lines 202-215: SOC threshold crossing triggers `inverter_priority_update_requested` flag
+- Lines 754-918: Fast 1-second interval checks flag and executes Modbus write
+- Lines 1822-1844: Control changes trigger update after 5-second delay
+- Line 2001: SOC Reserve Control uses `restore_mode: RESTORE_DEFAULT_OFF`
+- Lines 2172-2179: Refresh button accepts both function 0x03 and 0x04 responses
 
 **Modbus communication**:
-- Updates every 3 hours (configurable via `inverter_priority_update_interval`)
+- Background 3-hour interval (configurable via `inverter_priority_update_interval`)
+- Triggered updates via flag mechanism (1 second response time)
 - Only sends Modbus command when mode actually needs to change
-- Non-chatty to avoid conflicts with single-client Modbus implementation
+- Uses function 0x10 (Write Multiple Registers) - required by EPever
 
 ## Hardware
 
