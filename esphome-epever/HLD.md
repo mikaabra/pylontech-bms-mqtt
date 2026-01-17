@@ -107,11 +107,17 @@ The ESPHome EPever CAN Bridge is an ESP32-based gateway that translates Pylontec
 - Configurable force charge activation (default 45%)
 - Hysteresis prevents oscillation
 - Master enable/disable switch (disabled by default)
+- **Instant response**: Updates within 1 second when SOC crosses thresholds
+- **Mode mismatch detection**: Verifies inverter mode on every CAN frame
 
 **Operation**:
 - Monitors SOC from CAN 0x355
 - Updates state machine on SOC changes
-- Outputs control flags to Modbus layer
+- Controls inverter priority mode via Modbus register 0x9608
+- **NEW APPROACH**: Uses inverter priority switching instead of D14 discharge blocking
+  - **Discharge BLOCKED** (SOC < 50%): Switches to Utility Priority (grid mode)
+  - **Discharge ALLOWED** (SOC > 55%): Switches to Inverter Priority (battery mode)
+  - **Advantage**: Battery remains available during power outages regardless of SOC control
 
 ### 4. Modbus Server (BMS-Link Protocol)
 - **Hardware**: UART with RS485 transceiver (GPIO17 TX, GPIO18 RX)
@@ -124,8 +130,23 @@ The ESPHome EPever CAN Bridge is an ESP32-based gateway that translates Pylontec
 
 **Layered Control Logic**:
 - **D13 (Force Charge)**: SOC control OR CAN request OR manual override
-- **D14 (Stop Discharge)**: BMS blocks OR SOC blocks OR manual override
+- **D14 (Stop Discharge)**: BMS blocks only OR manual override (no longer used for SOC control)
 - **D15 (Stop Charge)**: BMS blocks only OR manual override
+
+### 4a. Modbus Client (Inverter Priority Control)
+- **Hardware**: Modbus RTU over TCP gateway (10.10.0.117:9999)
+- **Target Register**: 0x9608 (Inverter Output Priority Mode)
+- **Protocol**: Uses function 0x10 (Write Multiple Registers) - required by EPever
+- **Values**: 0 = Inverter Priority (battery mode), 1 = Utility Priority (grid mode)
+- **Update Triggers**:
+  - SOC threshold crossing (instant response within 1 second)
+  - Control settings changed (5-second delay)
+  - Mode mismatch detected on CAN frame (instant correction)
+  - Background 3-hour interval (configurable)
+- **Reliability Features**:
+  - Accepts both function 0x03 and 0x04 responses
+  - Automatic retry on Modbus timeouts
+  - Statistics tracking (attempts, successes, failures, success rate)
 
 ### 5. Web UI Configuration
 **ESPHome Native Web Server**:
@@ -276,15 +297,20 @@ D15 Stop Charge Control: Auto (CAN)
 
 ## Known Limitations
 
-### ⚠️ Critical: Discharge Flag Blocks Island Mode Operation
+### ✅ MITIGATED: Island Mode Operation (Previously Critical Issue)
 
-**Issue**: When the "Stop Discharge" flag (D14) is set, the EPever inverter will NOT discharge the battery even in island mode (during power outages).
+**Previous Issue**: When the "Stop Discharge" flag (D14) was used for SOC control, the EPever inverter would NOT discharge the battery even in island mode (during power outages).
 
-**Impact**: The SOC Reserve Control feature cannot serve as a true "UPS reserve" because the reserved capacity is inaccessible during blackouts.
+**Solution Implemented** (2026-01-16): SOC control now uses **Inverter Priority Mode switching** instead of D14 flag:
+- **Low SOC** (< 50%): Switches to Utility Priority (grid mode)
+  - Battery not used when grid is available
+  - During blackouts: Battery IS available regardless of priority setting
+- **High SOC** (> 55%): Switches to Inverter Priority (battery mode)
+  - Battery preferred over grid for normal operation
 
-**Workaround**: Disable SOC Reserve Control and use the inverter's built-in voltage-based discharge cutoff settings instead.
+**Result**: SOC Reserve Control now works as intended - battery is reserved during normal operation but remains available during power outages.
 
-**Details**: See [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for complete analysis, testing results, and potential solutions.
+**Technical Details**: See [SUCCESS_SUMMARY.md](SUCCESS_SUMMARY.md) for implementation details and [KNOWN_ISSUES.md](KNOWN_ISSUES.md) for historical context.
 
 ## Future Enhancements
 

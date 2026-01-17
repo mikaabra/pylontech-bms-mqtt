@@ -53,7 +53,7 @@ id(bms_v_low) = v_low / 10.0f;
 | 0-1 | State of Charge (SOC) | value / 1 | % |
 | 2-3 | State of Health (SOH) | value / 1 | % |
 
-**Implementation** (lines 155-180):
+**Implementation** (lines 155-224):
 ```cpp
 uint16_t soc_raw = (x[1] << 8) | x[0];
 uint16_t soh_raw = (x[3] << 8) | x[2];
@@ -68,9 +68,11 @@ if (id(soc_control_enabled)) {
   // Discharge blocking hysteresis
   if (soc < id(soc_discharge_block_threshold) && !id(soc_discharge_blocked)) {
     id(soc_discharge_blocked) = true;
+    id(inverter_priority_update_requested) = true;  // Trigger instant update
   }
   if (soc > id(soc_discharge_allow_threshold) && id(soc_discharge_blocked)) {
     id(soc_discharge_blocked) = false;
+    id(inverter_priority_update_requested) = true;  // Trigger instant update
   }
 
   // Force charge hysteresis
@@ -81,7 +83,21 @@ if (id(soc_control_enabled)) {
     id(soc_force_charge_active) = false;
   }
 }
+
+// Mode mismatch detection - check on every CAN frame
+// Triggers correction if inverter mode doesn't match desired state
+int desired_mode = id(soc_discharge_blocked) ? 1 : 0;
+if (id(inverter_priority_control_mode) == 0 && desired_mode != id(inverter_priority_mode)) {
+  ESP_LOGI("soc_control", "Mode mismatch detected: current=%d, desired=%d",
+           id(inverter_priority_mode), desired_mode);
+  id(inverter_priority_update_requested) = true;  // Trigger instant correction
+}
 ```
+
+**NEW: Instant Response Mechanism**:
+- When `soc_discharge_blocked` flag changes, sets `inverter_priority_update_requested = true`
+- Fast 1-second interval checks this flag and triggers Modbus write to register 0x9608
+- Mode mismatch detection verifies inverter mode on every CAN frame and corrects if needed
 
 #### Frame ID 0x35C - Battery Charge Request Flags (V1.2)
 **Length**: 1-2 bytes (only byte 0 is used)
@@ -199,13 +215,12 @@ if (id(manual_mode_d13_force_charge) == 0) {
   d13_force_charge = true;  // Manual override: Force On
 }
 
-// Determine D14 (Stop Discharge) - layered priority
+// Determine D14 (Stop Discharge) - BMS only (no longer used for SOC control)
 bool d14_stop_discharge = false;
 if (id(manual_mode_d14_stop_discharge) == 0) {
-  // Auto mode: Layer SOC control over CAN
-  bool bms_blocks = !id(can_discharge_enabled);  // BMS blocks discharge
-  bool soc_blocks = id(soc_control_enabled) && id(soc_discharge_blocked);
-  d14_stop_discharge = bms_blocks || soc_blocks;  // Either can block
+  // Auto mode: Use CAN value only (BMS protection)
+  d14_stop_discharge = !id(can_discharge_enabled);  // BMS blocks discharge
+  // NOTE: SOC control now uses inverter priority mode switching instead
 } else if (id(manual_mode_d14_stop_discharge) == 2) {
   d14_stop_discharge = true;  // Manual override: Force On (Block)
 }
@@ -225,6 +240,8 @@ if (d13_force_charge) value |= 0x2000;
 if (d14_stop_discharge) value |= 0x4000;
 if (d15_stop_charge) value |= 0x8000;
 ```
+
+**IMPORTANT CHANGE** (2026-01-16): D14 flag is no longer used for SOC discharge control. SOC control now uses **inverter priority mode switching** via Modbus register 0x9608 (see Modbus Client section below). This allows the battery to remain available during power outages regardless of SOC reserve settings.
 
 **Example Values**:
 - `0x0000`: All OK (charge enabled, discharge enabled, no force)
@@ -268,6 +285,85 @@ if (start_address >= 0x9000 && start_address + register_count <= 0x9020) {
   - Example: 5000 = 50.0 Hz
   - **BMS-Link documentation is WRONG** - claims this is "Charging Low Temperature Protection"
   - **Actual function**: AC frequency for inverter display
+
+### Modbus Client Protocol (Inverter Priority Control)
+
+**NEW** (2026-01-16): ESP32 acts as Modbus RTU over TCP client to control inverter priority mode.
+
+#### Connection Details
+- **Protocol**: Modbus RTU over TCP (not Modbus TCP - uses RTU framing over TCP socket)
+- **Gateway**: 10.10.0.117:9999 (Modbus RTU to TCP bridge)
+- **Slave ID**: 10 (EPever inverter)
+- **Target Register**: 0x9608 (Inverter Output Priority Mode)
+
+#### Register 0x9608 - Inverter Output Priority Mode
+
+| Value | Mode | Behavior |
+|-------|------|----------|
+| 0 | Inverter Priority | Battery/PV preferred, grid backup |
+| 1 | Utility Priority | Grid preferred, battery/PV backup |
+
+#### Implementation Details
+
+**Read Operation** (Function 0x03/0x04):
+```cpp
+// Build command: Slave=10, Func=0x03, Reg=0x9608, Count=1
+cmd = [0x0A, 0x03, 0x96, 0x08, 0x00, 0x01, CRC_L, CRC_H];
+
+// EPever sometimes responds with function 0x04 instead of 0x03
+// Firmware accepts BOTH function codes for reliability
+if (response[1] == 0x03 || response[1] == 0x04) {
+  value = (response[3] << 8) | response[4];
+  id(inverter_priority_mode) = value;
+}
+```
+
+**Write Operation** (Function 0x10):
+```cpp
+// EPever requires function 0x10 even for single register
+// Function 0x06 returns exception 0x01 (Illegal Function)
+cmd = [0x0A, 0x10, 0x96, 0x08, 0x00, 0x01, 0x02, value_H, value_L, CRC_L, CRC_H];
+
+// Expected response: [0x0A, 0x10, 0x96, 0x08, 0x00, 0x01, CRC_L, CRC_H]
+if (response[1] == 0x10 && response_register == 0x9608) {
+  // Success!
+  id(inverter_priority_write_successes)++;
+}
+```
+
+**Update Triggers** (lines 754-918):
+1. **Fast interval** (1 second): Checks `inverter_priority_update_requested` flag
+   - Set by SOC threshold crossing
+   - Set by mode mismatch detection
+   - Set by control changes (after 5-second delay)
+2. **Background interval** (3 hours, configurable): Periodic verification
+
+**Reliability Features**:
+- **Retry logic**: Automatic retry on Modbus timeout
+- **Dual function support**: Accepts both 0x03 and 0x04 responses
+- **Statistics tracking**: Attempts, successes, failures, success rate (persists to NVRAM)
+- **Conditional updates**: Only sends write command if mode actually needs to change
+
+**Example Flow**:
+```
+1. SOC drops below 50%
+   └─> soc_discharge_blocked = true
+   └─> inverter_priority_update_requested = true
+
+2. Fast interval (within 1 second) detects flag
+   └─> desired_mode = 1 (Utility Priority)
+   └─> current_mode = 0 (Inverter Priority)
+   └─> Mode change needed!
+
+3. Modbus write to 0x9608
+   └─> TX: 0A 10 96 08 00 01 02 00 01 E3 E1
+   └─> RX: 0A 10 96 08 00 01 AC F8
+
+4. Success!
+   └─> inverter_priority_mode = 1
+   └─> inverter_priority_update_requested = false
+   └─> Battery stops cycling, inverter runs on grid
+```
 
 ## SOC Reserve Control State Machine
 
