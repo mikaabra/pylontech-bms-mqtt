@@ -6,22 +6,24 @@ This repository contains **two separate installation sites** with different envi
 
 | Aspect | Deye Site | EPever Site |
 |--------|-----------|-------------|
-| **Location in Repo** | Root directory (`/`) + `esphome/` | `esphome-epever/` subdirectory |
-| **Implementations** | **Python scripts** (current) + **ESPHome** (migration option) | **ESPHome only** |
-| **Languages** | Python 3.x OR ESPHome YAML → C++ | ESPHome YAML → C++ |
-| **Hardware Options** | Raspberry Pi (Python) OR ESP32-S3 (ESPHome) | ESP32-S3 (Waveshare RS485-CAN board) |
-| **Development Environment** | Ubuntu 24.04 VM | Ubuntu 24.04 VM (ESPHome toolchain) |
-| **Production Environment** | Raspberry Pi OR ESP32 (Deye site) | ESP32 device (EPever site) |
-| **Deployment** | systemd services OR OTA firmware | OTA firmware upload |
-| **Configuration** | Environment variables OR secrets.yaml | YAML + secrets.yaml |
+| **Location in Repo** | `esphome/` (production) + Root directory (legacy) | `esphome-epever/` subdirectory |
+| **Implementations** | **ESPHome** (production) + Python scripts (legacy/backup) | **ESPHome only** |
+| **Languages** | ESPHome YAML → C++ (Python legacy available) | ESPHome YAML → C++ |
+| **Hardware** | ESP32-S3 (Waveshare RS485-CAN board) | ESP32-S3 (Waveshare RS485-CAN board) |
+| **Development Environment** | Ubuntu 24.04 VM (ESPHome toolchain) | Ubuntu 24.04 VM (ESPHome toolchain) |
+| **Production Environment** | ESP32 device (Deye site) | ESP32 device (EPever site) |
+| **Deployment** | OTA firmware upload | OTA firmware upload |
+| **Configuration** | YAML + secrets.yaml | YAML + secrets.yaml |
 | **Purpose** | Monitor Pylontech + Deye inverter | Translate Pylontech CAN to EPever BMS-Link |
 
 ---
 
-## 1. Deye Site - Python Scripts (Root Directory)
+## 1. Deye Site - Python Scripts (Root Directory) - LEGACY
 
 ### Purpose
-Monitor Pylontech batteries and Deye inverter at the **Deye installation site** using Python scripts running on a Raspberry Pi.
+~~Monitor Pylontech batteries and Deye inverter at the **Deye installation site** using Python scripts running on a Raspberry Pi.~~
+
+**Status: LEGACY** - These scripts are kept as a backup option. Production has migrated to ESPHome on ESP32 (see Section 2).
 
 ### File Structure
 ```
@@ -90,10 +92,10 @@ MODBUS_HOST=192.168.200.111
 
 ---
 
-## 2. Deye Site - ESPHome Firmware (esphome/)
+## 2. Deye Site - ESPHome Firmware (esphome/) - PRODUCTION
 
 ### Purpose
-**Alternative implementation** to replace Python scripts with ESP32 firmware at the Deye site. Provides identical functionality using ESPHome instead of Python.
+Monitor Pylontech batteries and Deye inverter at the **Deye installation site** using ESP32 firmware. This is the **current production system**.
 
 ### File Structure
 ```
@@ -131,7 +133,7 @@ cd /home/micke/GitHub/pylontech-bms-mqtt/esphome
   - CAN interface: Built-in TWAI controller (GPIO15/16)
   - RS485 interface: Built-in transceiver (GPIO17/18/21)
   - Network: WiFi to site network
-- **Status**: **Migration option** - can replace Python scripts with identical MQTT topics
+- **Status**: **PRODUCTION** - Active system monitoring Pylontech batteries and Deye inverter
 
 **Deployment Method**:
 ```bash
@@ -162,7 +164,7 @@ mqtt:
   password: !secret mqtt_password
 ```
 
-### Relationship to Python Scripts
+### Relationship to Python Scripts (Legacy)
 
 **ESPHome firmware provides identical functionality**:
 - Same MQTT topics (`deye_bms/`, `deye_bms/rs485/`)
@@ -170,12 +172,7 @@ mqtt:
 - Drop-in replacement for `pylon_can2mqtt.py` + `pylon_rs485_monitor.py`
 - No changes needed in Home Assistant
 
-**Migration path**:
-1. Stop Python scripts on Raspberry Pi
-2. Disconnect CAN/RS485 from Pi USB adapters
-3. Connect CAN/RS485 to ESP32 board
-4. Power ESP32 (12V or USB-C)
-5. Home Assistant entities continue working (same topics)
+**Migration completed** - The Python scripts on Raspberry Pi have been replaced by ESP32. The scripts remain in the repo as a fallback option if needed.
 
 ---
 
@@ -268,58 +265,62 @@ substitutions:
 
 ## Key Differences
 
-### 1. **Two Sites, Three Implementations**
+### 1. **Two Sites, Two Production Systems**
 
-| Implementation | Hardware | Location | Purpose |
-|---------------|----------|----------|---------|
-| **Deye Python** | Raspberry Pi | Deye site | Monitor Pylontech + Deye inverter |
-| **Deye ESPHome** | ESP32-S3 | Deye site | Same as Python (migration option) |
-| **EPever ESPHome** | ESP32-S3 | EPever site | Translate Pylontech to EPever BMS-Link |
+| Implementation | Hardware | Location | Status | Purpose |
+|---------------|----------|----------|--------|---------|
+| **Deye ESPHome** | ESP32-S3 | Deye site | **PRODUCTION** | Monitor Pylontech + Deye inverter |
+| **EPever ESPHome** | ESP32-S3 | EPever site | **PRODUCTION** | Translate Pylontech to EPever BMS-Link |
+| **Deye Python** | Raspberry Pi | Deye site | Legacy/backup | Same as Deye ESPHome |
 
-**Key insight**: Deye site has TWO implementation options (Python OR ESPHome), EPever site has ONE (ESPHome only).
+**Key insight**: Both sites now run ESPHome on ESP32. Python scripts are kept as a fallback option for Deye site.
 
 ### 2. **Hardware Comparison**
 
-**Deye Site - Raspberry Pi (Python)**:
-- General-purpose Linux computer
-- USB peripherals for CAN/RS485
-- Always-on, network-connected
-- Shared resources with other processes
-- Higher power consumption (~5-10W)
-
-**Deye Site - ESP32 (ESPHome)**:
-- Embedded microcontroller
-- Built-in CAN/RS485 hardware
+**Both Sites - ESP32 (ESPHome) - PRODUCTION**:
+- Embedded microcontroller (ESP32-S3)
+- Built-in CAN/RS485 hardware (Waveshare board)
 - Low-power (~0.5W), WiFi-only
 - Dedicated single-purpose device
-- **Same functionality as Python, different platform**
+- **Different firmware per site**: Deye monitors, EPever translates protocols
 
-**EPever Site - ESP32 (ESPHome)**:
-- Same hardware as Deye ESPHome
-- **Different firmware**: Translates protocols instead of monitoring
-- Different site, different network, different purpose
+**Deye Site - Raspberry Pi (Python) - LEGACY**:
+- General-purpose Linux computer
+- USB peripherals for CAN/RS485
+- Higher power consumption (~5-10W)
+- Kept as fallback option
 
 ### 3. **Development Workflows**
 
-**Python Scripts (Deye only)**:
-1. Edit `.py` files in Git repo (root directory)
-2. Test locally with `python3 script.py`
-3. Commit changes
-4. Pull on Raspberry Pi
-5. Restart systemd services
-
-**ESPHome Firmware (Both sites)**:
+**ESPHome Firmware (Both sites - PRODUCTION)**:
 1. Edit YAML file (`deye-bms-can.yaml` OR `epever-can-bridge.yaml`)
 2. Compile with ESPHome toolchain
 3. Upload firmware OTA or USB
 4. Monitor via web UI or logs
 5. Commit YAML changes
 
-**Note**: Same toolchain for both Deye ESPHome and EPever ESPHome, but different YAML configs.
+**Note**: Same toolchain for both sites, but different YAML configs and different device IPs.
+
+**Python Scripts (Deye only - LEGACY)**:
+1. Edit `.py` files in Git repo (root directory)
+2. Test locally with `python3 script.py`
+3. Commit changes
+4. Pull on Raspberry Pi
+5. Restart systemd services
 
 ### 4. **Debugging Methods**
 
-**Python Scripts (Deye site)**:
+**ESPHome Firmware (Both sites - PRODUCTION)**:
+```bash
+# Deye site
+/home/micke/GitHub/esphome/venv/bin/esphome logs deye-bms-can.yaml
+
+# EPever site
+/home/micke/GitHub/esphome/venv/bin/esphome logs epever-can-bridge.yaml
+./modbus_log_tail.sh -f  # EPever-specific Modbus log viewer
+```
+
+**Python Scripts (Deye site - LEGACY)**:
 ```bash
 # View systemd logs
 sudo journalctl -u pylon-can2mqtt -f
@@ -329,16 +330,6 @@ sudo journalctl -u pylon-can2mqtt -f
 
 # Check process status
 systemctl status pylon-can2mqtt
-```
-
-**ESPHome Firmware (Both sites)**:
-```bash
-# Deye site
-/home/micke/GitHub/esphome/venv/bin/esphome logs deye-bms-can.yaml
-
-# EPever site
-/home/micke/GitHub/esphome/venv/bin/esphome logs epever-can-bridge.yaml
-./modbus_log_tail.sh -f  # EPever-specific Modbus log viewer
 ```
 
 ### 5. **Configuration Management**
@@ -452,26 +443,7 @@ nano /home/micke/GitHub/pylontech-bms-mqtt/esphome-epever/secrets.yaml
 
 ## Quick Reference
 
-### Working on Deye Site - Python Scripts (Current Production)
-
-```bash
-# Location
-cd /home/micke/GitHub/pylontech-bms-mqtt
-
-# Activate venv
-source venv/bin/activate
-
-# Test script
-./pylon_can2mqtt.py
-
-# Deploy to production
-ssh pi@raspberry-pi
-cd /opt/pylontech-bms-mqtt
-git pull
-sudo systemctl restart pylon-can2mqtt
-```
-
-### Working on Deye Site - ESPHome (Migration Option)
+### Working on Deye Site - ESPHome (PRODUCTION)
 
 ```bash
 # Location
@@ -483,14 +455,14 @@ cd /home/micke/GitHub/pylontech-bms-mqtt/esphome
 # Upload OTA
 /home/micke/GitHub/esphome/venv/bin/esphome upload deye-bms-can.yaml
 
-# Upload via USB (first time)
+# Upload via USB (if OTA fails)
 /home/micke/GitHub/esphome/venv/bin/esphome run deye-bms-can.yaml
 
 # View logs
 /home/micke/GitHub/esphome/venv/bin/esphome logs deye-bms-can.yaml
 ```
 
-### Working on EPever Site - ESPHome (Production)
+### Working on EPever Site - ESPHome (PRODUCTION)
 
 ```bash
 # Location
@@ -511,17 +483,36 @@ cd /home/micke/GitHub/pylontech-bms-mqtt/esphome-epever
 firefox http://10.10.0.45/
 ```
 
+### Working on Deye Site - Python Scripts (LEGACY)
+
+```bash
+# Location
+cd /home/micke/GitHub/pylontech-bms-mqtt
+
+# Activate venv
+source venv/bin/activate
+
+# Test script
+./pylon_can2mqtt.py
+
+# Deploy to production (if reverting to Pi)
+ssh pi@raspberry-pi
+cd /opt/pylontech-bms-mqtt
+git pull
+sudo systemctl restart pylon-can2mqtt
+```
+
 ---
 
 ## Contact & Support
 
-- **Deye Python Issues**: Tag with `[deye]` and `[python]`
 - **Deye ESPHome Issues**: Tag with `[deye]` and `[esphome]`
 - **EPever ESPHome Issues**: Tag with `[epever]` and `[esphome]`
+- **Deye Python Issues (legacy)**: Tag with `[deye]` and `[python]`
 - **Protocol Questions**: Relevant to both sites, check `docs/PROTOCOL_REFERENCE.md`
 
 ---
 
-**Last Updated**: 2026-01-17 23:30
+**Last Updated**: 2026-01-18
 **Maintained By**: micke
 **Repository**: https://github.com/mikaabra/pylontech-bms-mqtt
