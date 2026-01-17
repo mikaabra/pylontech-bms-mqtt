@@ -2315,6 +2315,21 @@ button:
                 if (len >= 7 && response[0] == slave_id &&
                     (response[1] == 0x03 || response[1] == 0x04) && response[2] >= 2) {
 
+                  // Validate byte count: should be exactly 2 for reading 1 register
+                  int byte_count = response[2];
+                  if (byte_count != 2) {
+                    ESP_LOGE("inverter_priority", "✗ Wrong byte count in response: %d (expected 2 for 1 register)",
+                             byte_count);
+                    ESP_LOGE("inverter_priority", "Gateway may be returning wrong register data");
+
+                    char err_msg[120];
+                    snprintf(err_msg, sizeof(err_msg), "✗ Wrong byte count: %d (expected 2) - gateway error?", byte_count);
+                    append_modbus_log(std::string(err_msg));
+
+                    ::close(sock);
+                    return;
+                  }
+
                   if (response[1] == 0x04 && id(inverter_priority_debug_level) >= 1) {
                     ESP_LOGW("inverter_priority", "Note: Inverter responded with function 0x04 (Read Input) instead of 0x03");
                   }
