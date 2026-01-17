@@ -1875,72 +1875,6 @@ sensor:
   - platform: uptime
     name: "Uptime"
 
-text_sensor:
-  - platform: template
-    id: sensor_flags
-    name: "BMS Flags"
-    icon: "mdi:flag"
-
-  - platform: template
-    name: "Modbus Status (0x3127)"
-    icon: "mdi:swap-horizontal"
-    update_interval: 5s
-    lambda: |-
-      uint16_t val = id(last_modbus_0x3127);
-      char buf[80];
-      snprintf(buf, sizeof(buf), "0x%04X (D13:%s D14:%s D15:%s)",
-               val,
-               (val & 0x2000) ? "ForceChg" : "-",
-               (val & 0x4000) ? "StopDis" : "-",
-               (val & 0x8000) ? "StopChg" : "-");
-      return std::string(buf);
-
-  - platform: version
-    name: "ESPHome Version"
-
-  - platform: template
-    name: "Inverter Output Priority Mode"
-    icon: "mdi:swap-horizontal"
-    update_interval: 10s
-    lambda: |-
-      if (id(inverter_priority_mode) == 0) {
-        return std::string("Inverter Priority (Battery/PV)");
-      } else {
-        return std::string("Utility Priority (Grid)");
-      }
-
-  - platform: template
-    name: "Modbus Interaction Log"
-    id: modbus_log_text
-    icon: "mdi:script-text-outline"
-    # Note: Accessible via API at http://10.10.0.45/text_sensor/modbus_log_text
-    # Use modbus_log_viewer.html for a dedicated viewer window with auto-refresh
-    entity_category: diagnostic  # Show in diagnostics section to reduce main UI clutter
-    update_interval: 5s
-    lambda: |-
-      if (id(modbus_log_buffer).empty()) {
-        return std::string("No Modbus interactions logged yet");
-      }
-
-      // Build display string from circular buffer (oldest to newest)
-      std::string result;
-      int total = id(modbus_log_buffer).size();
-
-      if (total < id(modbus_log_max_entries)) {
-        // Buffer not full - display in order
-        for (int i = 0; i < total; i++) {
-          result += id(modbus_log_buffer)[i] + "\n";
-        }
-      } else {
-        // Buffer full - display from oldest to newest
-        for (int i = 0; i < total; i++) {
-          int idx = (id(modbus_log_index) + i) % id(modbus_log_max_entries);
-          result += id(modbus_log_buffer)[idx] + "\n";
-        }
-      }
-
-      return result;
-
 binary_sensor:
   - platform: template
     name: "CAN Data Stale"
@@ -2593,3 +2527,71 @@ button:
           if (id(inverter_priority_debug_level) >= 1) {
             ESP_LOGI("inverter_priority", "=== REFRESH COMPLETED ===");
           }
+
+# Text sensors - moved to end for better web UI organization
+text_sensor:
+  - platform: template
+    id: sensor_flags
+    name: "BMS Flags"
+    icon: "mdi:flag"
+
+  - platform: template
+    name: "Modbus Status (0x3127)"
+    icon: "mdi:swap-horizontal"
+    update_interval: 5s
+    lambda: |-
+      uint16_t val = id(last_modbus_0x3127);
+      char buf[80];
+      snprintf(buf, sizeof(buf), "0x%04X (D13:%s D14:%s D15:%s)",
+               val,
+               (val & 0x2000) ? "ForceChg" : "-",
+               (val & 0x4000) ? "StopDis" : "-",
+               (val & 0x8000) ? "StopChg" : "-");
+      return std::string(buf);
+
+  - platform: version
+    name: "ESPHome Version"
+
+  - platform: template
+    name: "Inverter Output Priority Mode"
+    icon: "mdi:swap-horizontal"
+    update_interval: 10s
+    lambda: |-
+      if (id(inverter_priority_mode) == 0) {
+        return std::string("Inverter Priority (Battery/PV)");
+      } else {
+        return std::string("Utility Priority (Grid)");
+      }
+
+  - platform: template
+    name: "Modbus Interaction Log"
+    id: modbus_log_text
+    icon: "mdi:script-text-outline"
+    # Note: Accessible via API at http://10.10.0.45/text_sensor/modbus_log_text
+    # Use modbus_log_viewer.html for a dedicated viewer window with auto-refresh
+    entity_category: diagnostic  # Show in diagnostics section to reduce main UI clutter
+    update_interval: 5s
+    lambda: |-
+      if (id(modbus_log_buffer).empty()) {
+        return std::string("No Modbus interactions logged yet");
+      }
+
+      // Build display string from circular buffer (oldest to newest)
+      std::string result;
+      int total = id(modbus_log_buffer).size();
+
+      if (total < id(modbus_log_max_entries)) {
+        // Buffer not full - display in order
+        for (int i = 0; i < total; i++) {
+          result += id(modbus_log_buffer)[i] + "\n";
+        }
+      } else {
+        // Buffer full - display from oldest to newest
+        for (int i = 0; i < total; i++) {
+          int idx = (id(modbus_log_index) + i) % id(modbus_log_max_entries);
+          result += id(modbus_log_buffer)[idx] + "\n";
+        }
+      }
+
+      return result;
+
