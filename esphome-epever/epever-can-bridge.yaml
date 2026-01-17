@@ -2321,6 +2321,22 @@ button:
 
                   // Extract current mode from response (data starts at byte 3)
                   int current_mode = (response[3] << 8) | response[4];
+
+                  // Validate: mode must be 0 or 1, anything else is invalid data
+                  if (current_mode != 0 && current_mode != 1) {
+                    ESP_LOGE("inverter_priority", "✗ Invalid mode value from register 0x9608: %d (0x%04X) - expected 0 or 1",
+                             current_mode, current_mode);
+                    ESP_LOGE("inverter_priority", "This may indicate wrong register being read or Modbus gateway error");
+
+                    char err_msg[120];
+                    snprintf(err_msg, sizeof(err_msg), "✗ Invalid mode: %d (0x%04X) - wrong register?", current_mode, current_mode);
+                    append_modbus_log(std::string(err_msg));
+
+                    // Don't update inverter_priority_mode with garbage data
+                    ::close(sock);
+                    return;
+                  }
+
                   id(inverter_priority_mode) = current_mode;
 
                   // Log comparison
