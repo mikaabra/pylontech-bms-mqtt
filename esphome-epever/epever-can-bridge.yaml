@@ -548,6 +548,20 @@ globals:
     type: std::vector<uint16_t>
     restore_value: no
 
+  # Modbus interaction log buffer (RAM-backed circular buffer, ~8KB)
+  # Captures inverter priority state machine and Modbus RTU over TCP operations
+  - id: modbus_log_buffer
+    type: std::vector<std::string>
+    restore_value: no
+  - id: modbus_log_index
+    type: int
+    initial_value: '0'
+    restore_value: no
+  - id: modbus_log_max_entries
+    type: int
+    initial_value: '50'
+    restore_value: no
+
 # Intervals
 interval:
   # CAN heartbeat - keep batteries awake by sending inverter-like frame
@@ -597,6 +611,22 @@ interval:
   - interval: ${inverter_priority_update_interval}s
     then:
       - lambda: |-
+          // Helper: Append to Modbus log buffer (circular)
+          auto append_modbus_log = [](const std::string& message) {
+            uint32_t uptime_sec = millis() / 1000;
+            char timestamp[12];
+            snprintf(timestamp, sizeof(timestamp), "[%06u] ", uptime_sec);
+
+            std::string entry = std::string(timestamp) + message;
+
+            if (id(modbus_log_buffer).size() < id(modbus_log_max_entries)) {
+              id(modbus_log_buffer).push_back(entry);
+            } else {
+              id(modbus_log_buffer)[id(modbus_log_index)] = entry;
+              id(modbus_log_index) = (id(modbus_log_index) + 1) % id(modbus_log_max_entries);
+            }
+          };
+
           // Only run if WiFi is connected
           // (WiFi component automatically available)
 
@@ -625,6 +655,11 @@ interval:
           if (id(inverter_priority_debug_level) >= 1) {
             ESP_LOGI("inverter_priority", "Auto check: current=%d, desired=%d (SOC=%d%%, soc_control=%d, discharge_blocked=%d)",
                      id(inverter_priority_mode), desired_mode, soc, id(soc_control_enabled), id(soc_discharge_blocked));
+
+            char log_msg[100];
+            snprintf(log_msg, sizeof(log_msg), "Auto check: current=%d, desired=%d (SOC=%d%%)",
+                     id(inverter_priority_mode), desired_mode, soc);
+            append_modbus_log(std::string(log_msg));
           }
 
           // Only send Modbus command if mode actually needs to change
@@ -633,6 +668,11 @@ interval:
             if (id(inverter_priority_debug_level) >= 1) {
               ESP_LOGI("inverter_priority", "Mode change needed: %d -> %d (SOC=%d%%)",
                        id(inverter_priority_mode), desired_mode, soc);
+
+              char log_msg[100];
+              snprintf(log_msg, sizeof(log_msg), "Mode change needed: %d -> %d (SOC=%d%%)",
+                       id(inverter_priority_mode), desired_mode, soc);
+              append_modbus_log(std::string(log_msg));
             }
 
             // Build Modbus RTU write request
@@ -672,6 +712,13 @@ interval:
                      modbus_cmd[0], modbus_cmd[1], modbus_cmd[2], modbus_cmd[3], modbus_cmd[4],
                      modbus_cmd[5], modbus_cmd[6], modbus_cmd[7], modbus_cmd[8], modbus_cmd[9], modbus_cmd[10]);
 
+            // Log to buffer
+            char cmd_hex[100];
+            snprintf(cmd_hex, sizeof(cmd_hex), "TX: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                     modbus_cmd[0], modbus_cmd[1], modbus_cmd[2], modbus_cmd[3], modbus_cmd[4],
+                     modbus_cmd[5], modbus_cmd[6], modbus_cmd[7], modbus_cmd[8], modbus_cmd[9], modbus_cmd[10]);
+            append_modbus_log(std::string(cmd_hex));
+
             // Send via TCP to inverter (use lwIP sockets with explicit namespace)
             struct sockaddr_in dest_addr;
             dest_addr.sin_addr.s_addr = ::inet_addr(inv_host);
@@ -710,6 +757,13 @@ interval:
                     ESP_LOGI("inverter_priority", "Response: %02X %02X %02X %02X %02X %02X %02X %02X",
                              response[0], response[1], response[2], response[3],
                              response[4], response[5], response[6], response[7]);
+
+                    // Log to buffer
+                    char resp_hex[80];
+                    snprintf(resp_hex, sizeof(resp_hex), "RX: %02X %02X %02X %02X %02X %02X %02X %02X",
+                             response[0], response[1], response[2], response[3],
+                             response[4], response[5], response[6], response[7]);
+                    append_modbus_log(std::string(resp_hex));
                   }
 
                   // Check for Modbus exception response
@@ -725,6 +779,12 @@ interval:
                     if (id(inverter_priority_debug_level) >= 1) {
                       ESP_LOGE("inverter_priority", "Register 0x9608 may be READ-ONLY or require different write method");
                     }
+
+                    // Log to buffer
+                    char err_msg[80];
+                    snprintf(err_msg, sizeof(err_msg), "✗ Exception 0x%02X: %s", exception_code, exception_msg);
+                    append_modbus_log(std::string(err_msg));
+
                     id(inverter_priority_failures)++;
                   } else if (len == 8 && response[0] == slave_id && response[1] == 0x10) {
                     id(inverter_priority_mode) = desired_mode;
@@ -733,18 +793,26 @@ interval:
                       const char* mode_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
                       ESP_LOGI("inverter_priority", "✓ Mode changed successfully to %s (%d)",
                                mode_str, desired_mode);
+
+                      // Log to buffer
+                      char success_msg[80];
+                      snprintf(success_msg, sizeof(success_msg), "✓ Mode changed to %s (%d)",
+                               mode_str, desired_mode);
+                      append_modbus_log(std::string(success_msg));
                     }
                   } else {
                     if (id(inverter_priority_debug_level) >= 1) {
                       ESP_LOGW("inverter_priority", "Unexpected response (len=%d, slave=%d, func=%02X)",
                                len, response[0], response[1]);
                     }
+                    append_modbus_log("✗ Unexpected response");
                     id(inverter_priority_failures)++;
                   }
                 } else {
                   if (id(inverter_priority_debug_level) >= 1) {
                     ESP_LOGW("inverter_priority", "Failed to send command (wrote %d bytes, expected 11, errno=%d)", written, errno);
                   }
+                  append_modbus_log("✗ Failed to send command");
                   id(inverter_priority_failures)++;
                 }
                 ::close(sock);
@@ -752,6 +820,7 @@ interval:
                 if (id(inverter_priority_debug_level) >= 1) {
                   ESP_LOGE("inverter_priority", "Failed to connect (errno=%d: %s)", errno, strerror(errno));
                 }
+                append_modbus_log("✗ Connection failed");
                 id(inverter_priority_failures)++;
                 ::close(sock);
               }
@@ -759,6 +828,7 @@ interval:
               if (id(inverter_priority_debug_level) >= 1) {
                 ESP_LOGE("inverter_priority", "Failed to create socket (errno=%d: %s)", errno, strerror(errno));
               }
+              append_modbus_log("✗ Socket creation failed");
               id(inverter_priority_failures)++;
             }
           } else {
@@ -771,6 +841,22 @@ interval:
   - interval: 1s
     then:
       - lambda: |-
+          // Helper: Append to Modbus log buffer (circular)
+          auto append_modbus_log = [](const std::string& message) {
+            uint32_t uptime_sec = millis() / 1000;
+            char timestamp[12];
+            snprintf(timestamp, sizeof(timestamp), "[%06u] ", uptime_sec);
+
+            std::string entry = std::string(timestamp) + message;
+
+            if (id(modbus_log_buffer).size() < id(modbus_log_max_entries)) {
+              id(modbus_log_buffer).push_back(entry);
+            } else {
+              id(modbus_log_buffer)[id(modbus_log_index)] = entry;
+              id(modbus_log_index) = (id(modbus_log_index) + 1) % id(modbus_log_max_entries);
+            }
+          };
+
           // Check if update was requested by a control change
           if (!id(inverter_priority_update_requested)) {
             return;  // Nothing to do
@@ -780,6 +866,7 @@ interval:
           id(inverter_priority_update_requested) = false;
 
           ESP_LOGI("inverter_priority", "Running triggered update check...");
+          append_modbus_log("Triggered update check");
 
           // Same logic as automatic interval
           int soc = id(bms_soc);
@@ -804,18 +891,28 @@ interval:
           if (id(inverter_priority_debug_level) >= 1) {
             ESP_LOGI("inverter_priority", "Triggered check: current=%d, desired=%d (SOC=%d%%)",
                      id(inverter_priority_mode), desired_mode, soc);
+
+            char log_msg[100];
+            snprintf(log_msg, sizeof(log_msg), "Triggered: current=%d, desired=%d (SOC=%d%%)",
+                     id(inverter_priority_mode), desired_mode, soc);
+            append_modbus_log(std::string(log_msg));
           }
 
           // Only send if mode needs to change
           if (desired_mode == id(inverter_priority_mode)) {
             if (id(inverter_priority_debug_level) >= 1) {
               ESP_LOGI("inverter_priority", "Mode already correct, no update needed");
+              append_modbus_log("Mode already correct");
             }
             return;
           }
 
           if (id(inverter_priority_debug_level) >= 1) {
             ESP_LOGI("inverter_priority", "Mode change needed: %d -> %d", id(inverter_priority_mode), desired_mode);
+
+            char log_msg[100];
+            snprintf(log_msg, sizeof(log_msg), "Mode change needed: %d -> %d", id(inverter_priority_mode), desired_mode);
+            append_modbus_log(std::string(log_msg));
           }
 
           // Build and send Modbus command (same as automatic interval)
@@ -853,6 +950,13 @@ interval:
                    modbus_cmd[0], modbus_cmd[1], modbus_cmd[2], modbus_cmd[3], modbus_cmd[4],
                    modbus_cmd[5], modbus_cmd[6], modbus_cmd[7], modbus_cmd[8], modbus_cmd[9], modbus_cmd[10]);
 
+          // Log to buffer
+          char cmd_hex[100];
+          snprintf(cmd_hex, sizeof(cmd_hex), "TX: %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X",
+                   modbus_cmd[0], modbus_cmd[1], modbus_cmd[2], modbus_cmd[3], modbus_cmd[4],
+                   modbus_cmd[5], modbus_cmd[6], modbus_cmd[7], modbus_cmd[8], modbus_cmd[9], modbus_cmd[10]);
+          append_modbus_log(std::string(cmd_hex));
+
           // Send via TCP
           struct sockaddr_in dest_addr;
           dest_addr.sin_addr.s_addr = ::inet_addr(inv_host);
@@ -888,6 +992,13 @@ interval:
                   ESP_LOGI("inverter_priority", "Response: %02X %02X %02X %02X %02X %02X %02X %02X",
                            response[0], response[1], response[2], response[3],
                            response[4], response[5], response[6], response[7]);
+
+                  // Log to buffer
+                  char resp_hex[80];
+                  snprintf(resp_hex, sizeof(resp_hex), "RX: %02X %02X %02X %02X %02X %02X %02X %02X",
+                           response[0], response[1], response[2], response[3],
+                           response[4], response[5], response[6], response[7]);
+                  append_modbus_log(std::string(resp_hex));
                 }
 
                 if (len >= 5 && response[0] == slave_id && (response[1] & 0x80)) {
@@ -899,6 +1010,12 @@ interval:
                   else if (exception_code == 4) exception_msg = "Slave Device Failure";
 
                   ESP_LOGE("inverter_priority", "Modbus Exception: %s (code %d)", exception_msg, exception_code);
+
+                  // Log to buffer
+                  char err_msg[80];
+                  snprintf(err_msg, sizeof(err_msg), "✗ Exception 0x%02X: %s", exception_code, exception_msg);
+                  append_modbus_log(std::string(err_msg));
+
                   id(inverter_priority_failures)++;
                 } else if (len == 8 && response[0] == slave_id && response[1] == 0x10) {
                   id(inverter_priority_mode) = desired_mode;
@@ -906,17 +1023,25 @@ interval:
                   if (id(inverter_priority_debug_level) >= 1) {
                     const char* mode_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
                     ESP_LOGI("inverter_priority", "✓ Mode changed successfully to %s (%d)", mode_str, desired_mode);
+
+                    // Log to buffer
+                    char success_msg[80];
+                    snprintf(success_msg, sizeof(success_msg), "✓ Mode changed to %s (%d)",
+                             mode_str, desired_mode);
+                    append_modbus_log(std::string(success_msg));
                   }
                 } else {
                   if (id(inverter_priority_debug_level) >= 1) {
                     ESP_LOGW("inverter_priority", "Unexpected response (len=%d)", len);
                   }
+                  append_modbus_log("✗ Unexpected response");
                   id(inverter_priority_failures)++;
                 }
               } else {
                 if (id(inverter_priority_debug_level) >= 1) {
                   ESP_LOGW("inverter_priority", "Failed to send command");
                 }
+                append_modbus_log("✗ Failed to send command");
                 id(inverter_priority_failures)++;
               }
               ::close(sock);
@@ -924,6 +1049,7 @@ interval:
               if (id(inverter_priority_debug_level) >= 1) {
                 ESP_LOGE("inverter_priority", "Failed to connect (errno=%d)", errno);
               }
+              append_modbus_log("✗ Connection failed");
               id(inverter_priority_failures)++;
               ::close(sock);
             }
@@ -931,6 +1057,7 @@ interval:
             if (id(inverter_priority_debug_level) >= 1) {
               ESP_LOGE("inverter_priority", "Failed to create socket (errno=%d)", errno);
             }
+            append_modbus_log("✗ Socket creation failed");
             id(inverter_priority_failures)++;
           }
 
@@ -1779,6 +1906,34 @@ text_sensor:
         return std::string("Utility Priority (Grid)");
       }
 
+  - platform: template
+    name: "Modbus Interaction Log"
+    icon: "mdi:script-text-outline"
+    update_interval: 5s
+    lambda: |-
+      if (id(modbus_log_buffer).empty()) {
+        return std::string("No Modbus interactions logged yet");
+      }
+
+      // Build display string from circular buffer (oldest to newest)
+      std::string result;
+      int total = id(modbus_log_buffer).size();
+
+      if (total < id(modbus_log_max_entries)) {
+        // Buffer not full - display in order
+        for (int i = 0; i < total; i++) {
+          result += id(modbus_log_buffer)[i] + "\n";
+        }
+      } else {
+        // Buffer full - display from oldest to newest
+        for (int i = 0; i < total; i++) {
+          int idx = (id(modbus_log_index) + i) % id(modbus_log_max_entries);
+          result += id(modbus_log_buffer)[idx] + "\n";
+        }
+      }
+
+      return result;
+
 binary_sensor:
   - platform: template
     name: "CAN Data Stale"
@@ -2056,6 +2211,24 @@ button:
     icon: "mdi:refresh"
     on_press:
       - lambda: |-
+          // Helper: Append to Modbus log buffer (circular)
+          auto append_modbus_log = [](const std::string& message) {
+            uint32_t uptime_sec = millis() / 1000;
+            char timestamp[12];
+            snprintf(timestamp, sizeof(timestamp), "[%06u] ", uptime_sec);
+
+            std::string entry = std::string(timestamp) + message;
+
+            if (id(modbus_log_buffer).size() < id(modbus_log_max_entries)) {
+              id(modbus_log_buffer).push_back(entry);
+            } else {
+              id(modbus_log_buffer)[id(modbus_log_index)] = entry;
+              id(modbus_log_index) = (id(modbus_log_index) + 1) % id(modbus_log_max_entries);
+            }
+          };
+
+          append_modbus_log("=== MANUAL REFRESH ===");
+
           // Read current inverter priority mode from register 0x9608 and update if needed
           const uint8_t slave_id = ${inverter_slave};
           const char* inv_host = "${inverter_host}";
@@ -2115,6 +2288,13 @@ button:
           ESP_LOGI("inverter_priority", "Modbus READ cmd: %02X %02X %02X %02X %02X %02X %02X %02X",
                    read_cmd[0], read_cmd[1], read_cmd[2], read_cmd[3],
                    read_cmd[4], read_cmd[5], read_cmd[6], read_cmd[7]);
+
+          // Log to buffer
+          char cmd_hex[80];
+          snprintf(cmd_hex, sizeof(cmd_hex), "TX READ: %02X %02X %02X %02X %02X %02X %02X %02X",
+                   read_cmd[0], read_cmd[1], read_cmd[2], read_cmd[3],
+                   read_cmd[4], read_cmd[5], read_cmd[6], read_cmd[7]);
+          append_modbus_log(std::string(cmd_hex));
 
           // Connect and read
           struct sockaddr_in dest_addr;
@@ -2180,6 +2360,13 @@ button:
                   ESP_LOGI("inverter_priority", "Response: %02X %02X %02X %02X %02X %02X %02X",
                            response[0], response[1], response[2], response[3],
                            response[4], response[5], response[6]);
+
+                  // Log to buffer
+                  char resp_hex[80];
+                  snprintf(resp_hex, sizeof(resp_hex), "RX READ: %02X %02X %02X %02X %02X %02X %02X",
+                           response[0], response[1], response[2], response[3],
+                           response[4], response[5], response[6]);
+                  append_modbus_log(std::string(resp_hex));
                 }
 
                 // Accept both function 0x03 (Read Holding) and 0x04 (Read Input)
@@ -2203,11 +2390,22 @@ button:
                     if (id(inverter_priority_debug_level) >= 1) {
                       ESP_LOGI("inverter_priority", "Current mode is CORRECT: %s (%d)", current_str, current_mode);
                     }
+
+                    // Log to buffer
+                    char match_msg[100];
+                    snprintf(match_msg, sizeof(match_msg), "✓ Mode correct: %s (%d)", current_str, current_mode);
+                    append_modbus_log(std::string(match_msg));
                   } else {
                     if (id(inverter_priority_debug_level) >= 1) {
                       ESP_LOGW("inverter_priority", "Mode MISMATCH: current=%s (%d), desired=%s (%d) - updating...",
                                current_str, current_mode, desired_str, desired_mode);
                     }
+
+                    // Log to buffer
+                    char mismatch_msg[120];
+                    snprintf(mismatch_msg, sizeof(mismatch_msg), "✗ Mismatch: current=%d, desired=%d - will update",
+                             current_mode, desired_mode);
+                    append_modbus_log(std::string(mismatch_msg));
 
                     // Close read socket before writing
                     ::close(sock);
@@ -2354,7 +2552,7 @@ button:
                       id(inverter_priority_failures)++;
                     }
                     return;  // Exit after write attempt
-                  }
+                  }  // End of mismatch else block
                 } else {
                   if (id(inverter_priority_debug_level) >= 1) {
                     ESP_LOGE("inverter_priority", "Read failed - invalid response (len=%d, expected 7)", len);
