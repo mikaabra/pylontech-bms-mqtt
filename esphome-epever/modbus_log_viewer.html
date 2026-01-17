@@ -1,0 +1,255 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Modbus Interaction Log - EPever CAN Bridge</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Consolas', 'Monaco', 'Courier New', monospace;
+      background: #1e1e1e;
+      color: #d4d4d4;
+      line-height: 1.5;
+    }
+
+    #header {
+      background: #2d2d30;
+      padding: 15px 20px;
+      border-bottom: 2px solid #3e3e42;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+    }
+
+    #header h1 {
+      font-size: 18px;
+      color: #cccccc;
+      margin-bottom: 8px;
+    }
+
+    #header-controls {
+      display: flex;
+      align-items: center;
+      gap: 15px;
+      flex-wrap: wrap;
+    }
+
+    #header a {
+      color: #4ec9b0;
+      text-decoration: none;
+      padding: 5px 10px;
+      border-radius: 3px;
+      transition: background 0.2s;
+    }
+
+    #header a:hover {
+      background: rgba(78, 201, 176, 0.1);
+      text-decoration: underline;
+    }
+
+    #status {
+      color: #808080;
+      font-size: 12px;
+      padding: 2px 8px;
+      background: rgba(255,255,255,0.05);
+      border-radius: 3px;
+    }
+
+    #status.connected { color: #4ec9b0; }
+    #status.error { color: #f48771; }
+
+    #content {
+      padding: 20px;
+    }
+
+    #log-container {
+      background: #252526;
+      border: 1px solid #3e3e42;
+      border-radius: 4px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+    }
+
+    #log {
+      padding: 15px;
+      font-size: 13px;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      overflow-y: auto;
+      max-height: calc(100vh - 180px);
+      min-height: 400px;
+      color: #d4d4d4;
+    }
+
+    #log:empty::before {
+      content: "Loading...";
+      color: #808080;
+      font-style: italic;
+    }
+
+    /* Syntax highlighting */
+    .timestamp { color: #6a9955; }
+    .tx { color: #4fc1ff; font-weight: bold; }
+    .rx { color: #ce9178; font-weight: bold; }
+    .success { color: #4ec9b0; }
+    .error { color: #f48771; }
+    .mode-change { color: #dcdcaa; }
+
+    /* Scrollbar styling */
+    #log::-webkit-scrollbar { width: 12px; }
+    #log::-webkit-scrollbar-track { background: #1e1e1e; }
+    #log::-webkit-scrollbar-thumb {
+      background: #555;
+      border-radius: 6px;
+    }
+    #log::-webkit-scrollbar-thumb:hover { background: #777; }
+
+    button {
+      background: #0e639c;
+      color: white;
+      border: none;
+      padding: 6px 12px;
+      border-radius: 3px;
+      cursor: pointer;
+      font-family: inherit;
+      font-size: 12px;
+      transition: background 0.2s;
+    }
+
+    button:hover {
+      background: #1177bb;
+    }
+
+    button:active {
+      background: #0d5a8f;
+    }
+
+    #entry-count {
+      color: #808080;
+      font-size: 12px;
+      padding: 8px 15px;
+      border-top: 1px solid #3e3e42;
+      background: rgba(0,0,0,0.2);
+    }
+  </style>
+</head>
+<body>
+  <div id="header">
+    <h1>Modbus Interaction Log - EPever CAN Bridge</h1>
+    <div id="header-controls">
+      <a href="http://10.10.0.45/" target="_blank">← Back to Main</a>
+      <a href="http://10.10.0.45/logs" target="_blank">System Logs</a>
+      <button onclick="updateLog()">Refresh Now</button>
+      <span id="status">Connecting...</span>
+    </div>
+  </div>
+
+  <div id="content">
+    <div id="log-container">
+      <div id="log"></div>
+      <div id="entry-count"></div>
+    </div>
+  </div>
+
+  <script>
+    const ESP_IP = '10.10.0.45';  // Change this if your ESP32 has a different IP
+
+    // Auto-detect: use /api/log if served from proxy server, otherwise direct ESP32 access
+    const API_URL = (window.location.protocol === 'http:' && window.location.hostname !== '')
+      ? '/api/log'  // Served by modbus_log_server.py proxy
+      : `http://${ESP_IP}/text_sensor/modbus_interaction_log`;  // Direct file:// access
+
+    const UPDATE_INTERVAL = 5000;  // 5 seconds
+
+    let autoRefresh = true;
+    let lastContent = '';
+
+    function updateLog() {
+      const statusEl = document.getElementById('status');
+      const logEl = document.getElementById('log');
+      const countEl = document.getElementById('entry-count');
+
+      fetch(API_URL)
+        .then(response => {
+          if (!response.ok) {
+            throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+          }
+          return response.json();
+        })
+        .then(data => {
+          const content = data.value || 'No Modbus interactions logged yet';
+
+          // Only update if content changed
+          if (content !== lastContent) {
+            lastContent = content;
+
+            // Apply syntax highlighting
+            const highlighted = content
+              .replace(/&/g, '&amp;')
+              .replace(/</g, '&lt;')
+              .replace(/>/g, '&gt;')
+              .replace(/\[(\d+)\]/g, '<span class="timestamp">[$1]</span>')
+              .replace(/TX:/g, '<span class="tx">TX:</span>')
+              .replace(/RX:/g, '<span class="rx">RX:</span>')
+              .replace(/✓([^\n]*)/g, '<span class="success">✓$1</span>')
+              .replace(/✗([^\n]*)/g, '<span class="error">✗$1</span>')
+              .replace(/(Mode change needed|Mode already correct|Auto check)/g, '<span class="mode-change">$1</span>');
+
+            // Check if user was at bottom before update
+            const wasAtBottom = logEl.scrollHeight - logEl.scrollTop <= logEl.clientHeight + 50;
+
+            logEl.innerHTML = highlighted;
+
+            // Auto-scroll to bottom if user was already there
+            if (wasAtBottom) {
+              logEl.scrollTop = logEl.scrollHeight;
+            }
+
+            // Count entries
+            const entries = content.split('\n').filter(line => line.trim().length > 0).length;
+            countEl.textContent = `${entries} log entries (buffer limit: 50)`;
+          }
+
+          // Update status
+          const now = new Date().toLocaleTimeString();
+          statusEl.textContent = `Last updated: ${now}`;
+          statusEl.className = 'connected';
+        })
+        .catch(error => {
+          console.error('Fetch error:', error);
+          statusEl.textContent = `Error: ${error.message}`;
+          statusEl.className = 'error';
+
+          if (logEl.innerHTML === '') {
+            logEl.innerHTML = `<span class="error">Failed to connect to ESP32 at ${ESP_IP}\n\n` +
+              `Make sure:\n` +
+              `1. The ESP32 is powered on and connected to WiFi\n` +
+              `2. The IP address in this file is correct (current: ${ESP_IP})\n` +
+              `3. Your browser can access the ESP32's web interface\n\n` +
+              `Error details: ${error.message}</span>`;
+          }
+        });
+    }
+
+    // Auto-refresh every 5 seconds
+    setInterval(() => {
+      if (autoRefresh) {
+        updateLog();
+      }
+    }, UPDATE_INTERVAL);
+
+    // Initial load
+    updateLog();
+
+    // Handle visibility changes (pause when tab is hidden)
+    document.addEventListener('visibilitychange', () => {
+      autoRefresh = !document.hidden;
+      if (autoRefresh) {
+        updateLog();
+      }
+    });
+  </script>
+</body>
+</html>

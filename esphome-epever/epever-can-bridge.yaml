@@ -101,6 +101,9 @@ ota:
 
 web_server:
   port: 80
+  # Note: ESPHome web_server doesn't support custom page handlers
+  # The Modbus log is available via API: http://10.10.0.45/text_sensor/modbus_log_text
+  # Or create an external HTML file that fetches from this endpoint
 
 api:
   encryption:
@@ -1908,7 +1911,11 @@ text_sensor:
 
   - platform: template
     name: "Modbus Interaction Log"
+    id: modbus_log_text
     icon: "mdi:script-text-outline"
+    # Note: Accessible via API at http://10.10.0.45/text_sensor/modbus_log_text
+    # Use modbus_log_viewer.html for a dedicated viewer window with auto-refresh
+    entity_category: diagnostic  # Show in diagnostics section to reduce main UI clutter
     update_interval: 5s
     lambda: |-
       if (id(modbus_log_buffer).empty()) {
