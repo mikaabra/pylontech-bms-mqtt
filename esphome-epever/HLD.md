@@ -287,10 +287,82 @@ D15 Stop Charge Control: Auto (CAN)
 ```
 **Result**: Force charge from grid, block discharge, allow BMS to control charge blocking
 
+## Modbus Interaction Log Buffer
+
+### Purpose
+RAM-backed circular buffer (~8KB) that captures Modbus RTU over TCP interactions with the EPever inverter for troubleshooting and visibility.
+
+### Features
+- **Circular buffer**: 50 entries × ~160 bytes = ~8KB RAM
+- **Persistence**: Survives browser disconnects, clears on power loss
+- **Filtering**: Only EPever Modbus operations (no RS485 errors or CAN frames)
+- **Timestamped**: Each entry prefixed with uptime in seconds `[000123]`
+
+### What Gets Logged
+- State machine events: `Auto check`, `Mode change needed`, `Triggered update`
+- Modbus TX commands: `TX: 0A 10 96 08 00 01 02 00 01 E3 E1`
+- Modbus RX responses: `RX: 0A 10 96 08 00 01 AC F8`
+- Success messages: `✓ Mode changed successfully to Utility Priority (1)`
+- Error messages: `✗ Connection failed`, `✗ Exception 0x01: Illegal Function`
+
+### Access Methods
+
+**Terminal Viewer (Primary - via SSH):**
+```bash
+# Show once
+./modbus_log_tail.sh
+
+# Follow mode (refresh every 5 seconds)
+./modbus_log_tail.sh -f
+
+# Watch mode (refresh every 2 seconds)
+./modbus_log_tail.sh -w
+```
+
+**Web UI (Alternative):**
+- Sensor name: "zzz Modbus Interaction Log"
+- Location: Bottom of text sensor list (alphabetically sorted)
+- Updates: Auto-refresh every 5 seconds
+- API endpoint: `http://10.10.0.45/text_sensor/zzz_modbus_interaction_log`
+
+**Browser Viewer (Optional):**
+```bash
+# Direct access (if on same network)
+firefox modbus_log_viewer.html
+
+# Via proxy (if using SSH tunnel)
+./modbus_log_server.py --port 8080
+firefox http://localhost:8080/
+```
+
+### Design Rationale
+
+**Why RAM-backed?**
+- Fast writes without flash wear
+- Frequent updates (every few seconds during mode changes)
+- Acceptable to lose history on power cycle
+- NVRAM reserved for persistent settings
+
+**Why Circular Buffer?**
+- Fixed memory footprint (no growth)
+- Oldest entries automatically discarded
+- Always shows recent history
+
+**Why Terminal Viewer?**
+- User has SSH access to server
+- No browser required
+- Simple bash script, no dependencies
+- Instant access from command line
+
+### Implementation Details
+
+See [SESSION_2026-01-17.md](SESSION_2026-01-17.md) for complete implementation details and [LLD.md](LLD.md) for technical specifications.
+
 ## Related Documentation
 
 - **LLD.md**: Low-level technical implementation details
-- **SESSION_2026-01-13.md**: Development session log and findings
+- **SESSION_2026-01-13.md**: Development session log and findings (inverter priority control)
+- **SESSION_2026-01-17.md**: Development session log and findings (Modbus log buffer)
 - **EPEVER_MODBUS_FINDINGS.md**: Modbus register mapping and protocol analysis
 - **SOC_HYSTERESIS_FEASIBILITY.md**: SOC control design and implementation report
 - **docs/PROTOCOL_REFERENCE.md**: Complete protocol specifications

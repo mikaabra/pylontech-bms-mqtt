@@ -516,6 +516,173 @@ if (x == "50% / 55%") {
 - CAN-derived values (charge_enabled, discharge_enabled, SOC, etc.)
 - Temporary status values
 
+## Modbus Interaction Log Buffer
+
+### Purpose
+RAM-backed circular buffer for capturing Modbus RTU over TCP interactions with the EPever inverter for troubleshooting and debugging.
+
+### Global Variables (lines 551-563)
+
+```yaml
+globals:
+  - id: modbus_log_buffer
+    type: std::vector<std::string>
+    restore_value: no                    # RAM only, no NVRAM persistence
+
+  - id: modbus_log_index
+    type: int
+    initial_value: '0'
+    restore_value: no
+
+  - id: modbus_log_max_entries
+    type: int
+    initial_value: '50'                  # 50 entries × ~160 bytes = ~8KB
+    restore_value: no
+```
+
+### Helper Lambda Function
+
+Added in three locations (auto interval, triggered interval, manual refresh button):
+
+```cpp
+auto append_modbus_log = [](const std::string& message) {
+  // Add uptime timestamp [NNNNNN]
+  uint32_t uptime_sec = millis() / 1000;
+  char timestamp[12];
+  snprintf(timestamp, sizeof(timestamp), "[%06u] ", uptime_sec);
+
+  std::string entry = std::string(timestamp) + message;
+
+  // Circular buffer logic
+  if (id(modbus_log_buffer).size() < id(modbus_log_max_entries)) {
+    // Buffer not full - just append
+    id(modbus_log_buffer).push_back(entry);
+  } else {
+    // Buffer full - overwrite oldest entry
+    id(modbus_log_buffer)[id(modbus_log_index)] = entry;
+    id(modbus_log_index) = (id(modbus_log_index) + 1) % id(modbus_log_max_entries);
+  }
+};
+```
+
+### Logging Points
+
+**Auto check interval** (lines 659-801):
+- Line 659: "Auto check: current=X, desired=Y (SOC=Z%)"
+- Line 672: "Mode change needed: X -> Y"
+- Line 715-720: TX command hex dump
+- Line 761-766: RX response hex dump
+- Line 783: Exception errors
+- Line 797: Success messages
+- Line 808, 815, 823, 831: Various error conditions
+
+**Triggered interval** (lines 873-1006): Similar logging pattern
+
+**Manual refresh button** (lines 2208-2354): READ command logging only
+
+### Text Sensor Output (lines 2566-2596)
+
+```yaml
+text_sensor:
+  - platform: template
+    name: "zzz Modbus Interaction Log"
+    id: modbus_log_text
+    icon: "mdi:script-text-outline"
+    entity_category: diagnostic
+    update_interval: 5s
+    lambda: |-
+      if (id(modbus_log_buffer).empty()) {
+        return std::string("No Modbus interactions logged yet");
+      }
+
+      std::string result;
+      int total = id(modbus_log_buffer).size();
+
+      if (total < id(modbus_log_max_entries)) {
+        // Buffer not full - display in order
+        for (int i = 0; i < total; i++) {
+          result += id(modbus_log_buffer)[i] + "\n";
+        }
+      } else {
+        // Buffer full - display from oldest to newest
+        for (int i = 0; i < total; i++) {
+          int idx = (id(modbus_log_index) + i) % id(modbus_log_max_entries);
+          result += id(modbus_log_buffer)[idx] + "\n";
+        }
+      }
+
+      return result;
+```
+
+**Note**: Named "zzz Modbus Interaction Log" to force alphabetical sorting to bottom of web UI.
+
+### Memory Characteristics
+
+| Metric | Value | Notes |
+|--------|-------|-------|
+| Buffer size | ~8 KB | 50 entries × 160 bytes average |
+| Entry format | `[NNNNNN] Message` | Uptime in seconds + message |
+| Growth behavior | Fixed | Overwrites oldest when full |
+| Persistence | RAM only | Clears on power loss |
+| Flash wear | None | No NVRAM writes |
+
+### Access Methods
+
+**API Endpoint:**
+```
+GET http://10.10.0.45/text_sensor/zzz_modbus_interaction_log
+```
+
+Returns JSON:
+```json
+{
+  "id": "text_sensor/zzz Modbus Interaction Log",
+  "value": "[000001] Triggered update check\n[000001] TX: 0A 10 96...",
+  "state": "[000001] Triggered update check\n[000001] TX: 0A 10 96..."
+}
+```
+
+**Terminal Viewer:**
+- Script: `modbus_log_tail.sh`
+- Fetches JSON from API endpoint
+- Applies ANSI color syntax highlighting
+- Three modes: one-shot, follow (5s), watch (2s)
+
+**Web Viewers:**
+- `modbus_log_viewer.html`: Standalone HTML with auto-refresh
+- `modbus_log_server.py`: Python proxy for SSH tunnel scenarios
+
+### Implementation Notes
+
+**Circular Buffer Algorithm:**
+- Uses `std::vector<std::string>` for dynamic array storage
+- Integer index tracks oldest entry position
+- Modulo arithmetic wraps index: `(index + 1) % max_entries`
+- Always displays oldest-to-newest chronological order
+
+**Why Not Ring Buffer (Linked List)?**
+- Vectors provide faster random access for display
+- Simpler implementation in ESPHome lambda environment
+- Predictable memory usage (no fragmentation)
+
+**Why Prefix with "zzz"?**
+- ESPHome web UI sorts entities alphabetically by name
+- YAML file order has no effect on web UI ordering
+- "zzz" prefix forces sensor to appear last in list
+- Alternative approaches (internal, entity_category) break API access
+
+### Log Entry Format Examples
+
+```
+[000005] Triggered update check
+[000171] Mode change needed: 0 -> 1 (SOC=48%)
+[000171] TX: 0A 10 96 08 00 01 02 00 01 E3 E1
+[000172] RX: 0A 10 96 08 00 01 AC F8
+[000172] ✓ Mode changed successfully to Utility Priority (1)
+[000300] ✗ Connection failed (errno=111: Connection refused)
+[000301] ✗ Exception 0x01: Illegal Function
+```
+
 ## Build Configuration
 
 ### ESPHome YAML Structure
