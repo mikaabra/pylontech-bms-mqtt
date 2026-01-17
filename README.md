@@ -4,6 +4,18 @@ A Python-based bridge that reads battery and inverter data and publishes to MQTT
 
 Supports **CAN bus**, **RS485**, and **Modbus-TCP** interfaces for comprehensive system monitoring.
 
+---
+
+**📁 Repository Structure**: This repository contains THREE separate implementations for TWO different sites:
+
+1. **Deye Site - Python Scripts** (this directory): Monitor Pylontech + Deye inverter on Raspberry Pi
+2. **Deye Site - ESPHome Firmware** (`esphome/`): Same functionality as Python, ESP32 platform (migration option)
+3. **EPever Site - ESPHome Firmware** (`esphome-epever/`): Translate Pylontech to EPever BMS-Link protocol (different site)
+
+**See [ENVIRONMENTS.md](ENVIRONMENTS.md) for full documentation of all implementations.**
+
+---
+
 ## Features
 
 - **CAN Bus Monitoring**: Real-time SOC, SOH, voltage/current limits, cell min/max, temperatures (Pylontech protocol)
