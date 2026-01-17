@@ -128,3 +128,170 @@ When `d14_stop_discharge = true`, register 0x3127 includes 0x4000 flag, and inve
 **Next Steps**: User testing with voltage-based cutoff settings to validate workaround approach.
 
 **Last Updated**: 2026-01-15
+
+**Resolution**: ✅ **FIXED** - See SUCCESS_SUMMARY.md. Implemented inverter priority mode switching instead of D14 flag on 2026-01-16.
+
+---
+
+## Modbus Gateway Returns Wrong Register Data
+
+**Date Discovered**: 2026-01-17
+**Severity**: MEDIUM - Causes data corruption and infinite loops, but now mitigated
+**Status**: ✅ **MITIGATED** - Validation added to prevent corruption
+
+### Issue Description
+
+The Modbus RTU over TCP gateway (10.10.0.117:9999) occasionally returns data from the **wrong register** when reading register 0x9608 (Inverter Output Priority Mode).
+
+**Normal Response**:
+```
+0A 03 02 00 01 DC 45
+^  ^  ^  ^^^^^
+|  |  |  Value = 1 (Utility Priority)
+|  |  Byte count = 2 (correct)
+|  Function 0x03 (Read Holding)
+Slave 10
+```
+
+**Abnormal Responses Observed**:
+
+1. **Battery voltage instead of mode**:
+```
+Current value: 5460 (0x1554) = 54.60V battery voltage
+Expected: 0 or 1 (inverter mode)
+```
+
+2. **Wrong byte count**:
+```
+0A 04 04 00 00 00 00
+   ^  ^  ^^^^^^^^^^^
+   |  |  4 bytes of zeros
+   |  Byte count = 4 (should be 2)
+   Function 0x04 (should be 0x03)
+```
+
+### Impact
+
+**Before Mitigation**:
+- Invalid data stored in `inverter_priority_mode` variable
+- Infinite "mode mismatch" detection loops
+- Confusing log messages showing voltage values as mode
+- System unable to properly track inverter state
+
+**After Mitigation**:
+- Invalid data rejected with clear error messages
+- Variable protected from corruption
+- System continues with last known good value
+- Clear diagnostic logging for troubleshooting
+
+### Root Cause
+
+**Hypothesis**: The Modbus RTU over TCP gateway has a **cache or routing bug** where it sometimes returns:
+1. Data from a different register (likely battery voltage or current)
+2. Wrong function code (0x04 instead of 0x03)
+3. Wrong byte count (4 bytes instead of 2)
+
+**Possible triggers**:
+- Concurrent access from multiple clients (Home Assistant + ESP32)
+- Gateway caching responses from previous queries
+- Gateway firmware bug in register address routing
+- Single-client limitation causing data mixing
+
+### Mitigation Applied
+
+**Commit 8a80f29** (2026-01-17 20:24):
+- Added mode value validation (only 0 or 1 accepted)
+- Reject invalid values before storing
+- Log detailed error with decimal and hex values
+
+**Commit ce5fb3d** (2026-01-17 23:00):
+- Added byte count validation (must be exactly 2 bytes)
+- Reject malformed responses before processing
+- Log gateway errors with diagnostic messages
+
+**Code Changes** (lines 2318-2338):
+```cpp
+// Validate byte count
+int byte_count = response[2];
+if (byte_count != 2) {
+  ESP_LOGE("inverter_priority", "✗ Wrong byte count in response: %d (expected 2 for 1 register)",
+           byte_count);
+  // Reject and return early
+}
+
+// Validate mode value
+int current_mode = (response[3] << 8) | response[4];
+if (current_mode != 0 && current_mode != 1) {
+  ESP_LOGE("inverter_priority", "✗ Invalid mode value from register 0x9608: %d (0x%04X) - expected 0 or 1",
+           current_mode, current_mode);
+  // Reject and return early
+}
+```
+
+### Error Messages
+
+When malformed data is detected, the log will show:
+
+**Wrong byte count**:
+```
+✗ Wrong byte count: 4 (expected 2) - gateway error?
+Gateway may be returning wrong register data
+```
+
+**Invalid mode value**:
+```
+✗ Invalid mode: 5460 (0x1554) - wrong register?
+This may indicate wrong register being read or Modbus gateway error
+```
+
+### Testing Results
+
+**After fixes applied**:
+- 3/3 manual refresh tests successful
+- All validation checks passing
+- No corrupted data stored
+- No infinite mismatch loops
+
+**Example successful operation**:
+```
+[000072] TX READ: 0A 03 96 08 00 01 29 3B
+[000072] RX READ: 0A 03 02 00 01 DC 45
+[000072] ✓ Mode correct: Utility Priority (1)
+```
+
+### Recommendations
+
+**For Users**:
+1. Monitor the Modbus interaction log for validation errors
+2. If errors occur frequently, investigate gateway configuration
+3. Consider reducing polling frequency if gateway is overloaded
+4. Check for concurrent Modbus clients accessing the gateway
+
+**For Troubleshooting**:
+1. Use `./modbus_log_tail.sh -f` to monitor for errors
+2. Look for patterns in when errors occur (time of day, SOC values, etc.)
+3. Test gateway directly with `./modbus_rtu_tcp.py 0x9608 -v`
+4. Check Home Assistant Modbus integration load
+
+### Related Documentation
+
+- **SESSION_2026-01-17.md**: Bug discovery and fix details
+- **LLD.md**: Modbus interaction log implementation
+- **SUCCESS_SUMMARY.md**: Inverter priority control implementation
+
+### Future Work
+
+**Possible improvements**:
+1. Add retry logic for malformed responses
+2. Implement exponential backoff on repeated errors
+3. Add statistics tracking for gateway reliability
+4. Consider alternative Modbus gateway hardware/firmware
+5. Investigate Home Assistant Modbus integration scheduling
+
+### Status
+
+**Current Status**: ✅ **MITIGATED**
+
+The system now validates all Modbus responses and rejects invalid data before it can corrupt system state. The underlying gateway issue remains unresolved, but the system is protected from its effects.
+
+**Last Updated**: 2026-01-17 23:05
