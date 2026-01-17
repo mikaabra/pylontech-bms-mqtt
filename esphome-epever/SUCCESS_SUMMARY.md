@@ -163,7 +163,9 @@ All settings configurable via web UI:
 - `epever-can-bridge.yaml` - Updated to use function 0x10
 
 ### New Files
-- `test_modbus_rtu_tcp.py` - Python test script for Modbus RTU over TCP
+- `test_modbus_rtu_tcp.py` - Python test script for Modbus RTU over TCP (investigation)
+- `test_modbus_priority.py` - Alternative test script using pymodbus library
+- `modbus_rtu_tcp.py` - Generic Modbus RTU over TCP tool for reading/writing registers
 - `INVERTER_PRIORITY_INVESTIGATION.md` - Investigation guide
 - `DEVELOPMENT.md` - Development and usage guide
 - `SUCCESS_SUMMARY.md` - This file
@@ -196,8 +198,16 @@ baf7cec - Add comprehensive debug logging for inverter priority control
 The system now immediately updates inverter priority (within 1 second) when:
 1. **SOC crosses thresholds**: When discharge blocked/allowed state changes
 2. **Controls are changed**: When user modifies any SOC or priority control (5 second delay)
+3. **Mode mismatch detected**: On every CAN frame with SOC data, checks if inverter mode matches desired state and triggers correction if needed
 
 This eliminates the need to wait for the 3-hour automatic interval or press the refresh button manually.
+
+**Note on Hysteresis Thresholds**: With "45% / 50%" setting:
+- Below **45%** going down → Switch to Utility Priority (grid mode)
+- Above **50%** going up → Switch to Inverter Priority (battery mode)
+- Between 45%-50% → Hysteresis zone, stays in current mode
+
+To switch at 50% going down, use "50% / 55%" setting.
 
 ### How It Works
 ```
@@ -223,6 +233,30 @@ All settings accessible via web UI:
 ### Firmware Size
 - **Current**: 956KB (52.1% of flash)
 - **RAM**: 37KB (11.3%)
+
+### Testing Tools
+
+**modbus_rtu_tcp.py** - Generic Modbus RTU over TCP command-line tool:
+```bash
+# Read register
+./modbus_rtu_tcp.py 0x9608
+
+# Write register
+./modbus_rtu_tcp.py 0x9608 -w 1
+
+# Read multiple registers with verbose output
+./modbus_rtu_tcp.py 0x9000 -c 5 -v
+
+# Custom host/port/slave
+./modbus_rtu_tcp.py 0x9019 --host 10.10.0.200 --port 502 --slave 1
+```
+
+Features:
+- Supports hex (0x9608) and decimal (38408) register addresses
+- Read/write holding registers (function 0x03/0x10)
+- Verbose mode shows raw Modbus RTU frames
+- Automatic write verification
+- Configurable host, port, slave ID
 
 ## Acknowledgments
 

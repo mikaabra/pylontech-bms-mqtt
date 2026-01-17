@@ -214,6 +214,15 @@ canbus:
                     id(inverter_priority_update_requested) = true;
                   }
 
+                  // Check if inverter mode needs update (even if soc_discharge_blocked didn't change)
+                  // This handles the case where we're in the hysteresis zone but inverter mode is wrong
+                  int desired_mode = id(soc_discharge_blocked) ? 1 : 0;
+                  if (id(inverter_priority_control_mode) == 0 && desired_mode != id(inverter_priority_mode)) {
+                    ESP_LOGI("soc_control", "Inverter mode mismatch detected: current=%d, desired=%d (SOC=%d%%, blocked=%d)",
+                             id(inverter_priority_mode), desired_mode, soc, id(soc_discharge_blocked));
+                    id(inverter_priority_update_requested) = true;
+                  }
+
                   // Force charge hysteresis
                   if (soc < id(soc_force_charge_on_threshold) && !id(soc_force_charge_active)) {
                     id(soc_force_charge_active) = true;
