@@ -159,7 +159,7 @@
     // Auto-detect: use /api/log if served from proxy server, otherwise direct ESP32 access
     const API_URL = (window.location.protocol === 'http:' && window.location.hostname !== '')
       ? '/api/log'  // Served by modbus_log_server.py proxy
-      : `http://${ESP_IP}/text_sensor/modbus_interaction_log`;  // Direct file:// access
+      : `http://${ESP_IP}/text_sensor/zzz_modbus_interaction_log`;  // Direct file:// access
 
     const UPDATE_INTERVAL = 5000;  // 5 seconds
 

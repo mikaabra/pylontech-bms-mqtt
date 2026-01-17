@@ -10,7 +10,7 @@
 #
 
 ESP32_IP="10.10.0.45"
-API_URL="http://${ESP32_IP}/text_sensor/modbus_interaction_log"
+API_URL="http://${ESP32_IP}/text_sensor/zzz_modbus_interaction_log"
 
 # ANSI color codes
 GREEN='\033[0;32m'

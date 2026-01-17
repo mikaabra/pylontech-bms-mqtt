@@ -21,7 +21,7 @@ import argparse
 from pathlib import Path
 
 ESP32_IP = '10.10.0.45'
-ESP32_API_URL = f'http://{ESP32_IP}/text_sensor/modbus_interaction_log'
+ESP32_API_URL = f'http://{ESP32_IP}/text_sensor/zzz_modbus_interaction_log'
 
 class ModbusLogHandler(http.server.SimpleHTTPRequestHandler):
     def do_GET(self):
