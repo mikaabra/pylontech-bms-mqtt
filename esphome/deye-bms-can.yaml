@@ -67,7 +67,7 @@ esp32:
     type: esp-idf
 
 logger:
-  level: DEBUG  # Changed to DEBUG for CAN troubleshooting
+  level: WARN  # Change to DEBUG for troubleshooting
 
 wifi:
   ssid: !secret wifi_ssid
