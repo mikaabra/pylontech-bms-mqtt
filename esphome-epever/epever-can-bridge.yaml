@@ -655,27 +655,31 @@ interval:
             desired_mode = 1;  // Force Utility priority
           }
 
+          // Always log to Modbus buffer (even at debug level 0) so user can verify interval is working
+          char log_msg[100];
+          snprintf(log_msg, sizeof(log_msg), "Auto check: current=%d, desired=%d (SOC=%d%%)",
+                   id(inverter_priority_mode), desired_mode, soc);
+          append_modbus_log(std::string(log_msg));
+
+          // Detailed ESP log only at debug level >= 1
           if (id(inverter_priority_debug_level) >= 1) {
             ESP_LOGI("inverter_priority", "Auto check: current=%d, desired=%d (SOC=%d%%, soc_control=%d, discharge_blocked=%d)",
                      id(inverter_priority_mode), desired_mode, soc, id(soc_control_enabled), id(soc_discharge_blocked));
-
-            char log_msg[100];
-            snprintf(log_msg, sizeof(log_msg), "Auto check: current=%d, desired=%d (SOC=%d%%)",
-                     id(inverter_priority_mode), desired_mode, soc);
-            append_modbus_log(std::string(log_msg));
           }
 
           // Only send Modbus command if mode actually needs to change
           // (No force updates - be quiet on Modbus to avoid conflicts)
           if (desired_mode != id(inverter_priority_mode)) {
+            // Always log mode changes to Modbus buffer (even at debug level 0)
+            char log_msg[100];
+            snprintf(log_msg, sizeof(log_msg), "Mode change needed: %d -> %d (SOC=%d%%)",
+                     id(inverter_priority_mode), desired_mode, soc);
+            append_modbus_log(std::string(log_msg));
+
+            // Detailed ESP log only at debug level >= 1
             if (id(inverter_priority_debug_level) >= 1) {
               ESP_LOGI("inverter_priority", "Mode change needed: %d -> %d (SOC=%d%%)",
                        id(inverter_priority_mode), desired_mode, soc);
-
-              char log_msg[100];
-              snprintf(log_msg, sizeof(log_msg), "Mode change needed: %d -> %d (SOC=%d%%)",
-                       id(inverter_priority_mode), desired_mode, soc);
-              append_modbus_log(std::string(log_msg));
             }
 
             // Build Modbus RTU write request
@@ -792,16 +796,18 @@ interval:
                   } else if (len == 8 && response[0] == slave_id && response[1] == 0x10) {
                     id(inverter_priority_mode) = desired_mode;
                     id(inverter_priority_successes)++;
+
+                    // Always log success to Modbus buffer (even at debug level 0)
+                    const char* mode_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
+                    char success_msg[80];
+                    snprintf(success_msg, sizeof(success_msg), "✓ Mode changed to %s (%d)",
+                             mode_str, desired_mode);
+                    append_modbus_log(std::string(success_msg));
+
+                    // Detailed ESP log only at debug level >= 1
                     if (id(inverter_priority_debug_level) >= 1) {
-                      const char* mode_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
                       ESP_LOGI("inverter_priority", "✓ Mode changed successfully to %s (%d)",
                                mode_str, desired_mode);
-
-                      // Log to buffer
-                      char success_msg[80];
-                      snprintf(success_msg, sizeof(success_msg), "✓ Mode changed to %s (%d)",
-                               mode_str, desired_mode);
-                      append_modbus_log(std::string(success_msg));
                     }
                   } else {
                     if (id(inverter_priority_debug_level) >= 1) {
@@ -891,31 +897,31 @@ interval:
             desired_mode = 1;  // Force Utility priority
           }
 
+          // Always log to Modbus buffer (even at debug level 0)
+          char log_msg[100];
+          snprintf(log_msg, sizeof(log_msg), "Triggered: current=%d, desired=%d (SOC=%d%%)",
+                   id(inverter_priority_mode), desired_mode, soc);
+          append_modbus_log(std::string(log_msg));
+
+          // Detailed ESP log only at debug level >= 1
           if (id(inverter_priority_debug_level) >= 1) {
             ESP_LOGI("inverter_priority", "Triggered check: current=%d, desired=%d (SOC=%d%%)",
                      id(inverter_priority_mode), desired_mode, soc);
-
-            char log_msg[100];
-            snprintf(log_msg, sizeof(log_msg), "Triggered: current=%d, desired=%d (SOC=%d%%)",
-                     id(inverter_priority_mode), desired_mode, soc);
-            append_modbus_log(std::string(log_msg));
           }
 
           // Only send if mode needs to change
           if (desired_mode == id(inverter_priority_mode)) {
+            append_modbus_log("Mode already correct");  // Always log
             if (id(inverter_priority_debug_level) >= 1) {
               ESP_LOGI("inverter_priority", "Mode already correct, no update needed");
-              append_modbus_log("Mode already correct");
             }
             return;
           }
 
+          // Always log mode changes to Modbus buffer (even at debug level 0)
+          append_modbus_log("Mode change needed");
           if (id(inverter_priority_debug_level) >= 1) {
             ESP_LOGI("inverter_priority", "Mode change needed: %d -> %d", id(inverter_priority_mode), desired_mode);
-
-            char log_msg[100];
-            snprintf(log_msg, sizeof(log_msg), "Mode change needed: %d -> %d", id(inverter_priority_mode), desired_mode);
-            append_modbus_log(std::string(log_msg));
           }
 
           // Build and send Modbus command (same as automatic interval)
@@ -1023,15 +1029,17 @@ interval:
                 } else if (len == 8 && response[0] == slave_id && response[1] == 0x10) {
                   id(inverter_priority_mode) = desired_mode;
                   id(inverter_priority_successes)++;
-                  if (id(inverter_priority_debug_level) >= 1) {
-                    const char* mode_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
-                    ESP_LOGI("inverter_priority", "✓ Mode changed successfully to %s (%d)", mode_str, desired_mode);
 
-                    // Log to buffer
-                    char success_msg[80];
-                    snprintf(success_msg, sizeof(success_msg), "✓ Mode changed to %s (%d)",
-                             mode_str, desired_mode);
-                    append_modbus_log(std::string(success_msg));
+                  // Always log success to Modbus buffer (even at debug level 0)
+                  const char* mode_str = (desired_mode == 0) ? "Inverter Priority" : "Utility Priority";
+                  char success_msg[80];
+                  snprintf(success_msg, sizeof(success_msg), "✓ Mode changed to %s (%d)",
+                           mode_str, desired_mode);
+                  append_modbus_log(std::string(success_msg));
+
+                  // Detailed ESP log only at debug level >= 1
+                  if (id(inverter_priority_debug_level) >= 1) {
+                    ESP_LOGI("inverter_priority", "✓ Mode changed successfully to %s (%d)", mode_str, desired_mode);
                   }
                 } else {
                   if (id(inverter_priority_debug_level) >= 1) {
