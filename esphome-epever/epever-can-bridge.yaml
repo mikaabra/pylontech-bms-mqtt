@@ -630,6 +630,15 @@ interval:
             }
           };
 
+          // Skip mode check for first 60 seconds after boot to allow CAN data to populate
+          // (avoids using default SOC=50% instead of real CAN data)
+          if (millis() < 60000) {
+            if (id(inverter_priority_debug_level) >= 1) {
+              ESP_LOGI("inverter_priority", "Skipping auto check (boot delay: %d/60s)", millis() / 1000);
+            }
+            return;
+          }
+
           // Only run if WiFi is connected
           // (WiFi component automatically available)
 
@@ -873,6 +882,15 @@ interval:
 
           // Clear flag immediately to avoid repeated triggers
           id(inverter_priority_update_requested) = false;
+
+          // Skip mode check for first 60 seconds after boot to allow CAN data to populate
+          // (avoids using default SOC=50% instead of real CAN data)
+          if (millis() < 60000) {
+            if (id(inverter_priority_debug_level) >= 1) {
+              ESP_LOGI("inverter_priority", "Skipping triggered check (boot delay: %d/60s)", millis() / 1000);
+            }
+            return;
+          }
 
           ESP_LOGI("inverter_priority", "Running triggered update check...");
           append_modbus_log("Triggered update check");
