@@ -103,6 +103,7 @@ firefox http://10.10.0.45/
 - **[LLD.md](LLD.md)** - Low-level technical details, protocol implementations
 - **[SUCCESS_SUMMARY.md](SUCCESS_SUMMARY.md)** - Inverter priority control implementation
 - **[SESSION_2026-01-17.md](SESSION_2026-01-17.md)** - Modbus log buffer development session
+- **[SESSION_2026-01-18.md](SESSION_2026-01-18.md)** - Refactoring to eliminate code duplication
 - **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** - Known limitations and workarounds
 - **[../ENVIRONMENTS.md](../ENVIRONMENTS.md)** - Development vs production environments
 
