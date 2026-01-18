@@ -67,7 +67,7 @@ esp32:
     type: esp-idf
 
 logger:
-  level: WARN  # Change to DEBUG for troubleshooting
+  level: DEBUG  # Changed to DEBUG for CAN troubleshooting
 
 wifi:
   ssid: !secret wifi_ssid
@@ -343,17 +343,15 @@ canbus:
       - can_id: 0x351
         then:
           - lambda: |-
-              id(can_frame_count)++;
-              id(last_can_rx) = millis();
-              if (id(can_stale)) { id(can_stale) = false; }
+              if (!can_frame_preamble(x, id(can_frame_count), id(last_can_rx), id(can_stale), id(can_error_count))) {
+                return;
+              }
+              can_track_frame(0x351, true);
 
-              if (x.size() != 8) { id(can_error_count)++; return; }
-              auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
-
-              float v_charge_max = le_u16(x[0], x[1]) / 10.0f;
-              float i_charge_lim = le_u16(x[2], x[3]) / 10.0f;
-              float i_dis_lim = le_u16(x[4], x[5]) / 10.0f;
-              float v_low_lim = le_u16(x[6], x[7]) / 10.0f;
+              float v_charge_max = can_le_u16(x[0], x[1]) / 10.0f;
+              float i_charge_lim = can_le_u16(x[2], x[3]) / 10.0f;
+              float i_dis_lim = can_le_u16(x[4], x[5]) / 10.0f;
+              float v_low_lim = can_le_u16(x[6], x[7]) / 10.0f;
 
               // Sanity checks
               if (v_charge_max >= 30.0f && v_charge_max <= 65.0f &&
@@ -370,15 +368,13 @@ canbus:
       - can_id: 0x355
         then:
           - lambda: |-
-              id(can_frame_count)++;
-              id(last_can_rx) = millis();
-              if (id(can_stale)) { id(can_stale) = false; }
+              if (!can_frame_preamble(x, id(can_frame_count), id(last_can_rx), id(can_stale), id(can_error_count))) {
+                return;
+              }
+              can_track_frame(0x355, true);
 
-              if (x.size() != 8) { id(can_error_count)++; return; }
-              auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
-
-              uint16_t soc = le_u16(x[0], x[1]);
-              uint16_t soh = le_u16(x[2], x[3]);
+              uint16_t soc = can_le_u16(x[0], x[1]);
+              uint16_t soh = can_le_u16(x[2], x[3]);
 
               if (soc <= 100 && soh <= 100) {
                 id(sensor_soc).publish_state(soc);
@@ -389,11 +385,11 @@ canbus:
       - can_id: 0x359
         then:
           - lambda: |-
-              id(can_frame_count)++;
-              id(last_can_rx) = millis();
-              if (id(can_stale)) { id(can_stale) = false; }
+              if (!can_frame_preamble(x, id(can_frame_count), id(last_can_rx), id(can_stale), id(can_error_count))) {
+                return;
+              }
+              can_track_frame(0x359, true);
 
-              if (x.size() != 8) { id(can_error_count)++; return; }
               uint64_t flags = 0;
               for (int i = 7; i >= 0; i--) {
                 flags = (flags << 8) | x[i];
@@ -416,20 +412,18 @@ canbus:
       - can_id: 0x370
         then:
           - lambda: |-
-              id(can_frame_count)++;
-              id(last_can_rx) = millis();
-              if (id(can_stale)) { id(can_stale) = false; }
+              if (!can_frame_preamble(x, id(can_frame_count), id(last_can_rx), id(can_stale), id(can_error_count))) {
+                return;
+              }
+              can_track_frame(0x370, true);
 
-              if (x.size() != 8) { id(can_error_count)++; return; }
-              auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
-
-              float t1 = le_u16(x[0], x[1]) / 10.0f;
-              float t2 = le_u16(x[2], x[3]) / 10.0f;
+              float t1 = can_le_u16(x[0], x[1]) / 10.0f;
+              float t2 = can_le_u16(x[2], x[3]) / 10.0f;
               float tmin = (t1 <= t2) ? t1 : t2;
               float tmax = (t1 > t2) ? t1 : t2;
 
-              float v1 = le_u16(x[4], x[5]) / 1000.0f;
-              float v2 = le_u16(x[6], x[7]) / 1000.0f;
+              float v1 = can_le_u16(x[4], x[5]) / 1000.0f;
+              float v2 = can_le_u16(x[6], x[7]) / 1000.0f;
 
               if (tmin >= -10.0f && tmax <= 50.0f) {
                 id(sensor_temp_min).publish_state(tmin);
@@ -462,11 +456,11 @@ canbus:
       - can_id: 0x35C
         then:
           - lambda: |-
-              id(can_frame_count)++;
-              id(last_can_rx) = millis();
-              if (id(can_stale)) { id(can_stale) = false; }
+              if (!can_frame_preamble(x, id(can_frame_count), id(last_can_rx), id(can_stale), id(can_error_count), 8)) {
+                return;
+              }
+              can_track_frame(0x35C, true);
 
-              if (x.size() < 1) { id(can_error_count)++; return; }
               uint8_t flags = x[0];
 
               // Correct bit mapping per Pylontech CAN V1.2 spec

@@ -41,6 +41,52 @@ inline std::string rs485_make_cmd(int addr, int cid2, int batt_num) {
   return result;
 }
 
+// CAN frame processing helper - common preamble for all CAN handlers
+// Returns true if frame is valid (expected_size), false if invalid
+inline bool can_frame_preamble(const std::vector<uint8_t>& x, int& frame_count, unsigned long& last_rx, bool& stale, int& error_count, size_t expected_size = 8) {
+    frame_count++;
+    last_rx = millis();
+    if (stale) { stale = false; }
+
+    if (x.size() != expected_size) { 
+        error_count++;
+        ESP_LOGW("can", "Invalid CAN frame size: expected %zu bytes, got %zu bytes", expected_size, x.size());
+        return false;
+    }
+    return true;
+}
+
+// Helper to extract little-endian uint16 from CAN frame
+inline uint16_t can_le_u16(uint8_t b0, uint8_t b1) {
+    return b0 | (b1 << 8);
+}
+
+// Track expected CAN frames and log missing ones
+inline void can_track_frame(uint32_t can_id, bool received) {
+    static std::set<uint32_t> expected_frames = {0x351, 0x355, 0x359, 0x370, 0x35C};
+    static std::map<uint32_t, uint32_t> frame_counts;
+    static uint32_t last_check = 0;
+    
+    if (received) {
+        frame_counts[can_id]++;
+    }
+    
+    // Check for missing frames every 30 seconds
+    uint32_t now = millis();
+    if (now - last_check > 30000) {
+        last_check = now;
+        
+        for (uint32_t expected_id : expected_frames) {
+            if (frame_counts.find(expected_id) == frame_counts.end() || frame_counts[expected_id] == 0) {
+                ESP_LOGW("can", "Missing expected CAN frame: 0x%03X", expected_id);
+            }
+        }
+        
+        // Reset counters for next check period
+        frame_counts.clear();
+    }
+}
+
 // Verify Pylontech RS485 response checksum
 // Returns true if valid, false if invalid
 inline bool rs485_verify_checksum(const std::string& response) {
