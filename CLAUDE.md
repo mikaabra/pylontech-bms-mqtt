@@ -10,6 +10,10 @@ This is a multi-protocol MQTT bridge for Deye/Shoto solar systems:
 
 All data is published to MQTT with Home Assistant auto-discovery.
 
+## Coding Guidelines
+
+When adding functionality that's similar to existing code, always propose consolidation first. Don't duplicate - extend or refactor. Before writing new code, search for existing similar patterns and reuse them. If you find yourself about to copy-paste logic for a third time, stop and refactor into a shared helper first.
+
 ## Running
 
 ```bash
