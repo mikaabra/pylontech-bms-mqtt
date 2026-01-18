@@ -690,52 +690,18 @@ interval:
   - interval: 10s
     then:
       - lambda: |-
-          // Pylontech RS485 command builder
           // Prevent overlapping RS485 transactions (10s/30s polls)
           if (id(rs485_busy)) {
             ESP_LOGW("rs485", "BUSY: skipping RS485 poll (another transaction in progress)");
             return;
           }
-          struct Rs485BusyGuard {
-            bool *flag;
-            explicit Rs485BusyGuard(bool &f) : flag(&f) { f = true; }
-            ~Rs485BusyGuard() { *flag = false; }
-          };
           Rs485BusyGuard _rs485_guard(id(rs485_busy));
-
-          auto calc_chksum = [](const std::string& frame) -> std::string {
-            uint32_t total = 0;
-            for (char c : frame) total += (uint8_t)c;
-            uint16_t chk = (~total + 1) & 0xFFFF;
-            char buf[5];
-            snprintf(buf, sizeof(buf), "%04X", chk);
-            return std::string(buf);
-          };
-
-          auto make_cmd = [&calc_chksum](int addr, int cid2, int batt_num) -> std::string {
-            char frame[32];
-            char info[3];
-            snprintf(info, sizeof(info), "%02X", batt_num);
-            int info_hex_len = 2;  // 1 byte = 2 hex chars
-            // LENID checksum: sum of hex digits of length field (e.g., "002" -> 0+0+2=2)
-            int len_digit_sum = (info_hex_len / 256) + ((info_hex_len / 16) % 16) + (info_hex_len % 16);
-            int lchksum = (~len_digit_sum + 1) & 0xF;
-            char lenid[5];
-            snprintf(lenid, sizeof(lenid), "%X%03X", lchksum, info_hex_len);
-            snprintf(frame, sizeof(frame), "20%02X46%02X%s%s", addr, cid2, lenid, info);
-            std::string result = "~";
-            result += frame;
-            result += calc_chksum(frame);
-            result += "\r";
-            return result;
-          };
 
           int batt = id(rs485_poll_battery);
           int addr = ${pylontech_addr};
 
           // Send analog data request (CID2=0x42)
-          // Battery numbers are 0-based in INFO field (matches Python script)
-          std::string cmd = make_cmd(addr, 0x42, batt);
+          std::string cmd = rs485_make_cmd(addr, 0x42, batt);
           ESP_LOGD("rs485", "TX analog batt %d", batt);
 
           // Clear RX buffer
@@ -760,7 +726,6 @@ interval:
           delay(300);
 
           // Read response (frame-based: wait for '\r')
-
           std::string response;
           response.reserve(600);
           uint32_t start_ms = millis();
@@ -793,42 +758,11 @@ interval:
             }
           };
 
-          // Basic response validation
-          if (response.length() < 18 || response.substr(7, 2) != "00") {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "error code=%s len=%d",
-                     response.length() >= 9 ? response.substr(7, 2).c_str() : "?", (int)response.length());
-            handle_poll_failure(msg);
+          // Validate response (checks length, error code, address, and checksum)
+          std::string error = rs485_validate_response(response, addr);
+          if (!error.empty()) {
+            handle_poll_failure(error.c_str());
             return;
-          }
-
-          // Verify response address matches request (positions 3-4 after ~)
-          int resp_addr = strtol(response.substr(3, 2).c_str(), nullptr, 16);
-          if (resp_addr != ${pylontech_addr}) {
-            char msg[64];
-            snprintf(msg, sizeof(msg), "address mismatch (expected %d, got %d)", ${pylontech_addr}, resp_addr);
-            handle_poll_failure(msg);
-            return;
-          }
-
-          // Verify checksum (last 4 chars before \r)
-          // Frame to checksum: from position 1 (after ~) to len-5 (before checksum)
-          if (response.length() >= 6) {
-            std::string frame = response.substr(1, response.length() - 6);  // Exclude ~ at start, CCCC\r at end
-            std::string recv_chk = response.substr(response.length() - 5, 4);
-
-            uint32_t total = 0;
-            for (char c : frame) total += (uint8_t)c;
-            uint16_t calc = (~total + 1) & 0xFFFF;
-            char expected[5];
-            snprintf(expected, sizeof(expected), "%04X", calc);
-
-            if (recv_chk != std::string(expected)) {
-              char msg[64];
-              snprintf(msg, sizeof(msg), "checksum mismatch (expected %s, got %s)", expected, recv_chk.c_str());
-              handle_poll_failure(msg);
-              return;
-            }
           }
 
           // Success! Reset poll failure counter and clear alarm if set
@@ -937,44 +871,39 @@ interval:
             ESP_LOGW("rs485", "BUSY: skipping RS485 poll (another transaction in progress)");
             return;
           }
-          struct Rs485BusyGuard {
-            bool *flag;
-            explicit Rs485BusyGuard(bool &f) : flag(&f) { f = true; }
-            ~Rs485BusyGuard() { *flag = false; }
-          };
           Rs485BusyGuard _rs485_guard(id(rs485_busy));
-
-          auto calc_chksum = [](const std::string& frame) -> std::string {
-            uint32_t total = 0;
-            for (char c : frame) total += (uint8_t)c;
-            uint16_t chk = (~total + 1) & 0xFFFF;
-            char buf[5];
-            snprintf(buf, sizeof(buf), "%04X", chk);
-            return std::string(buf);
-          };
-
-          auto make_cmd = [&calc_chksum](int addr, int cid2, int batt_num) -> std::string {
-            char frame[32];
-            char info[3];
-            snprintf(info, sizeof(info), "%02X", batt_num);
-            int info_hex_len = 2;  // 1 byte = 2 hex chars
-            // LENID checksum: sum of hex digits of length field (e.g., "002" -> 0+0+2=2)
-            int len_digit_sum = (info_hex_len / 256) + ((info_hex_len / 16) % 16) + (info_hex_len % 16);
-            int lchksum = (~len_digit_sum + 1) & 0xF;
-            char lenid[5];
-            snprintf(lenid, sizeof(lenid), "%X%03X", lchksum, info_hex_len);
-            snprintf(frame, sizeof(frame), "20%02X46%02X%s%s", addr, cid2, lenid, info);
-            std::string result = "~";
-            result += frame;
-            result += calc_chksum(frame);
-            result += "\r";
-            return result;
-          };
 
           int addr = ${pylontech_addr};
           int total_balancing = 0;
           int total_overvolt = 0;
           std::set<std::string> all_alarms;
+
+          // Helper to handle poll failure for a battery
+          auto handle_poll_failure = [](int batt, const char* reason) {
+            ESP_LOGW("rs485", "Batt %d alarm poll failed: %s", batt, reason);
+            id(batt_poll_failures)[batt]++;
+            if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
+              id(batt_poll_alarm)[batt] = true;
+              ESP_LOGW("rs485", "POLL ALARM: Battery %d not responding (10 consecutive failures)", batt);
+              char topic[64];
+              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+              id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
+            }
+          };
+
+          // Helper to handle poll success for a battery
+          auto handle_poll_success = [](int batt) {
+            if (id(batt_poll_failures)[batt] > 0 || id(batt_poll_alarm)[batt]) {
+              id(batt_poll_failures)[batt] = 0;
+              if (id(batt_poll_alarm)[batt]) {
+                id(batt_poll_alarm)[batt] = false;
+                ESP_LOGI("rs485", "Poll alarm cleared for battery %d", batt);
+                char topic[64];
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+                id(mqtt_client).publish(std::string(topic), std::string("OFF"), (uint8_t)0, true);
+              }
+            }
+          };
 
           for (int batt = 0; batt < ${num_batteries}; batt++) {
             // Clear buffer
@@ -984,10 +913,7 @@ interval:
             }
 
             // Send alarm request (CID2=0x44)
-            // Battery numbers are 0-based in INFO field (matches Python script)
-            std::string cmd = make_cmd(addr, 0x44, batt);
-
-            // No manual EN control - let hardware handle direction
+            std::string cmd = rs485_make_cmd(addr, 0x44, batt);
 
             for (char c : cmd) {
               id(rs485_uart).write_byte((uint8_t)c);
@@ -1018,72 +944,14 @@ interval:
             auto tilde = response.find('~');
             if (tilde != std::string::npos) response = response.substr(tilde);
 
-            // Basic response validation
-            if (response.length() < 18 || response.substr(7, 2) != "00") {
-              ESP_LOGW("rs485", "Batt %d alarm poll failed: error code=%s len=%d", batt,
-                       response.length() >= 9 ? response.substr(7, 2).c_str() : "?", (int)response.length());
-              id(batt_poll_failures)[batt]++;
-              if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
-                id(batt_poll_alarm)[batt] = true;
-                ESP_LOGW("rs485", "POLL ALARM: Battery %d not responding (10 consecutive failures)", batt);
-                char topic[64];
-                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
-                id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
-              }
+            // Validate response (checks length, error code, address, and checksum)
+            std::string error = rs485_validate_response(response, addr);
+            if (!error.empty()) {
+              handle_poll_failure(batt, error.c_str());
               continue;
             }
 
-            // Verify response address matches request (positions 3-4 after ~)
-            int resp_addr = strtol(response.substr(3, 2).c_str(), nullptr, 16);
-            if (resp_addr != ${pylontech_addr}) {
-              ESP_LOGW("rs485", "Batt %d alarm poll failed: address mismatch (expected %d, got %d)",
-                       batt, ${pylontech_addr}, resp_addr);
-              id(batt_poll_failures)[batt]++;
-              if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
-                id(batt_poll_alarm)[batt] = true;
-                char topic[64];
-                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
-                id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
-              }
-              continue;
-            }
-
-            // Verify checksum (last 4 chars before \r)
-            if (response.length() >= 6) {
-              std::string frame = response.substr(1, response.length() - 6);
-              std::string recv_chk = response.substr(response.length() - 5, 4);
-
-              uint32_t chk_total = 0;
-              for (char c : frame) chk_total += (uint8_t)c;
-              uint16_t calc = (~chk_total + 1) & 0xFFFF;
-              char expected[5];
-              snprintf(expected, sizeof(expected), "%04X", calc);
-
-              if (recv_chk != std::string(expected)) {
-                ESP_LOGW("rs485", "Batt %d alarm poll failed: checksum mismatch (expected %s, got %s)",
-                         batt, expected, recv_chk.c_str());
-                id(batt_poll_failures)[batt]++;
-                if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
-                  id(batt_poll_alarm)[batt] = true;
-                  char topic[64];
-                  snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
-                  id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
-                }
-                continue;
-              }
-            }
-
-            // Success! Reset poll failure counter and clear alarm if set
-            if (id(batt_poll_failures)[batt] > 0 || id(batt_poll_alarm)[batt]) {
-              id(batt_poll_failures)[batt] = 0;
-              if (id(batt_poll_alarm)[batt]) {
-                id(batt_poll_alarm)[batt] = false;
-                ESP_LOGI("rs485", "Poll alarm cleared for battery %d", batt);
-                char topic[64];
-                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
-                id(mqtt_client).publish(std::string(topic), std::string("OFF"), (uint8_t)0, true);
-              }
-            }
+            handle_poll_success(batt);
 
             std::string data = response.substr(13, response.length() - 13 - 5);
             if (data.length() < 40) continue;
@@ -1256,57 +1124,10 @@ interval:
           }
 
           id(stack_balancing_count) = total_balancing;
+          id(stack_balancing_cells) = build_stack_cells_string(id(batt_balancing_cells), ${num_batteries});
 
-          // Build stack balancing cells string (e.g., "B0C3,B1C7")
-          std::string stack_bal_str;
-          for (int b = 0; b < ${num_batteries}; b++) {
-            const std::string& cells = id(batt_balancing_cells)[b];
-            if (!cells.empty()) {
-              // Split cells and add battery prefix
-              size_t pos = 0;
-              size_t comma_pos;
-              std::string cell_list = cells;
-              while ((comma_pos = cell_list.find(',', pos)) != std::string::npos) {
-                std::string cell = cell_list.substr(pos, comma_pos - pos);
-                if (!stack_bal_str.empty()) stack_bal_str += ",";
-                stack_bal_str += "B" + std::to_string(b) + "C" + cell;
-                pos = comma_pos + 1;
-              }
-              // Last cell (or only cell if no commas)
-              std::string cell = cell_list.substr(pos);
-              if (!cell.empty()) {
-                if (!stack_bal_str.empty()) stack_bal_str += ",";
-                stack_bal_str += "B" + std::to_string(b) + "C" + cell;
-              }
-            }
-          }
-          id(stack_balancing_cells) = stack_bal_str;
-
-          // Stack overvolt tracking
           id(stack_overvolt_count) = total_overvolt;
-
-          // Build stack overvolt cells string (e.g., "B0C3,B1C7")
-          std::string stack_ov_str;
-          for (int b = 0; b < ${num_batteries}; b++) {
-            const std::string& cells = id(batt_overvolt_cells)[b];
-            if (!cells.empty()) {
-              size_t pos = 0;
-              size_t comma_pos;
-              std::string cell_list = cells;
-              while ((comma_pos = cell_list.find(',', pos)) != std::string::npos) {
-                std::string cell = cell_list.substr(pos, comma_pos - pos);
-                if (!stack_ov_str.empty()) stack_ov_str += ",";
-                stack_ov_str += "B" + std::to_string(b) + "C" + cell;
-                pos = comma_pos + 1;
-              }
-              std::string cell = cell_list.substr(pos);
-              if (!cell.empty()) {
-                if (!stack_ov_str.empty()) stack_ov_str += ",";
-                stack_ov_str += "B" + std::to_string(b) + "C" + cell;
-              }
-            }
-          }
-          id(stack_overvolt_cells) = stack_ov_str;
+          id(stack_overvolt_cells) = build_stack_cells_string(id(batt_overvolt_cells), ${num_batteries});
 
           // Build alarm string
           std::string alarm_str;

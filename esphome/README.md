@@ -340,3 +340,77 @@ ESPHome handles these scenarios automatically:
 - **WiFi disconnect**: Reconnects and resumes operation
 - **MQTT disconnect**: Reconnects and republishes availability/discovery
 - **OTA updates**: Safe mode if boot fails multiple times
+
+## Code Architecture
+
+### File Structure
+
+```
+esphome/
+├── deye-bms-can.yaml          # Main ESPHome configuration
+├── secrets.yaml               # WiFi/MQTT credentials (not in git)
+├── includes/
+│   └── set_include.h          # Shared C++ helper functions
+└── custom_components/
+    └── esp32_can_listen/      # Custom CAN component for listen-only mode
+```
+
+### Helper Functions (includes/set_include.h)
+
+Shared C++ functions to reduce code duplication in the YAML lambdas:
+
+| Function | Purpose |
+|----------|---------|
+| `Rs485BusyGuard` | RAII guard to prevent overlapping RS485 transactions |
+| `rs485_calc_chksum()` | Calculate Pylontech RS485 frame checksum |
+| `rs485_make_cmd()` | Build complete command frame (address, CID2, battery) |
+| `rs485_verify_checksum()` | Verify response checksum is valid |
+| `rs485_validate_response()` | Full validation: length, error code, address, checksum |
+| `build_stack_cells_string()` | Build "B0C3,B1C7" format strings from per-battery data |
+
+### Polling Intervals
+
+| Interval | Purpose | Data |
+|----------|---------|------|
+| 5s | CAN stale detection | Checks if CAN data is older than 30s |
+| 10s | RS485 analog poll | Cell voltages, temps, current, SOC (cycles through batteries) |
+| 10s | CAN diagnostics | Publish charge/discharge flags, frame/error counts |
+| 30s | RS485 alarm poll | Balancing, alarms, warnings, MOSFET status (all batteries) |
+| 30s | RS485 stale detection | Checks if RS485 data is older than 90s |
+| 30s | MQTT publish | Publishes all RS485 data to MQTT topics |
+
+## Future Enhancement Opportunities
+
+The following areas have been identified for potential future refactoring:
+
+### CAN Frame Handler Preamble
+
+Every CAN frame handler (0x351, 0x355, 0x359, 0x370, 0x35C) repeats the same preamble:
+```cpp
+id(can_frame_count)++;
+id(last_can_rx) = millis();
+if (id(can_stale)) { id(can_stale) = false; }
+if (x.size() != 8) { id(can_error_count)++; return; }
+auto le_u16 = [](uint8_t b0, uint8_t b1) -> uint16_t { return b0 | (b1 << 8); };
+```
+
+This could be moved to a helper function, though ESPHome's YAML structure makes this
+less straightforward than the RS485 refactoring.
+
+### HA Discovery Payload Generation
+
+The MQTT `on_connect` handler has similar patterns for generating sensor JSON payloads
+with conditional device_class and unit_of_measurement fields. A templated helper could
+reduce this ~200 lines to ~50 lines.
+
+### Response Reading Loop
+
+The RS485 response reading loop (wait for `\r` with timeout, trim to `~`) is still
+duplicated between the 10s and 30s polling intervals. This could be extracted to a
+helper function that takes a UART reference and timeout parameter.
+
+### Per-Battery Binary Sensor Definitions
+
+The poll alarm binary sensors are defined individually for each battery (0, 1, 2).
+This could potentially use ESPHome packages or a more dynamic approach, though
+the current explicit approach is clearer for a fixed 3-battery configuration.
