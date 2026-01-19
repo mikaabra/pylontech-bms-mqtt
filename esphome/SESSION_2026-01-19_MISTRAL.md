@@ -156,6 +156,61 @@ esphome compile deye-bms-can.yaml
 4. **Logging**: Clear "CAN data resumed" message
 5. **MQTT Updates**: Status changes from "offline" to "online"
 
+### Compilation Verification ✅
+**Command**: `source venv/bin/activate && esphome compile esphome/deye-bms-can.yaml`
+
+**Results**:
+- ✅ **Successful compilation** (28.71 seconds)
+- ✅ **No syntax errors** or warnings
+- ✅ **Memory usage within limits**:
+  - RAM: 11.8% (used 38564 bytes from 327680 bytes)
+  - Flash: 54.4% (used 999167 bytes from 1835008 bytes)
+- ✅ **Firmware generated**: `firmware.factory.bin` (1039600 bytes)
+- ✅ **OTA update ready**: `firmware.ota.bin` generated
+
+**Initial Bug Fixed**: Changed helper function parameter from reference to pointer to match `id(mqtt_client)` return type
+
+---
+
+## Compilation Issue and Fix
+
+### Initial Compilation Error ❌
+```
+error: invalid initialization of reference of type 'esphome::mqtt::MQTTClientComponent&' 
+from expression of type 'esphome::mqtt::MQTTClientComponent*'
+```
+
+### Root Cause
+- `id(mqtt_client)` returns a **pointer** (`mqtt::MQTTClientComponent*`)
+- Helper function expected a **reference** (`mqtt::MQTTClientComponent&`)
+- Type mismatch prevented compilation
+
+### Solution Implemented ✅
+```cpp
+// Changed parameter from reference to pointer
+inline void can_handle_stale_recovery(bool& can_stale,
+                                    mqtt::MQTTClientComponent* mqtt_client,  // ← Changed to pointer
+                                    const char* can_prefix) {
+    if (can_stale && mqtt_client) {  // ← Added null check
+        can_stale = false;
+        ESP_LOGI("can", "CAN data resumed, marking online");
+        mqtt_client->publish(std::string(can_prefix) + "/status", std::string("online"), (uint8_t)0, true);  // ← Changed . to ->
+    }
+}
+```
+
+### Changes Made
+1. **Parameter type**: `MQTTClientComponent&` → `MQTTClientComponent*`
+2. **Null check**: Added `&& mqtt_client` safety check
+3. **Method call**: `mqtt_client.publish()` → `mqtt_client->publish()`
+4. **Safety**: Added null pointer protection
+
+### Verification
+- ✅ **Compilation successful** after fix
+- ✅ **No warnings** or errors
+- ✅ **Memory usage** unchanged
+- ✅ **Functionality preserved**
+
 ---
 
 ## Session Timeline

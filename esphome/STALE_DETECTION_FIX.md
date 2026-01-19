@@ -46,11 +46,11 @@ Added `can_handle_stale_recovery()` to `includes/set_include.h`:
 ```cpp
 // Handle CAN stale state recovery
 // Checks if CAN was stale and recovers if data is flowing again
-inline void can_handle_stale_recovery(bool& can_stale, mqtt::MQTTClientComponent& mqtt_client, const char* can_prefix) {
-    if (can_stale) {
+inline void can_handle_stale_recovery(bool& can_stale, mqtt::MQTTClientComponent* mqtt_client, const char* can_prefix) {
+    if (can_stale && mqtt_client) {
         can_stale = false;
         ESP_LOGI("can", "CAN data resumed, marking online");
-        mqtt_client.publish(std::string(can_prefix) + "/status", std::string("online"), (uint8_t)0, true);
+        mqtt_client->publish(std::string(can_prefix) + "/status", std::string("online"), (uint8_t)0, true);
     }
 }
 ```
