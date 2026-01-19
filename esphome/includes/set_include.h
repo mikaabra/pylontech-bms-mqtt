@@ -87,6 +87,16 @@ inline void can_track_frame(uint32_t can_id, bool received) {
     }
 }
 
+// Handle CAN stale state recovery
+// Checks if CAN was stale and recovers if data is flowing again
+inline void can_handle_stale_recovery(bool& can_stale, mqtt::MQTTClientComponent& mqtt_client, const char* can_prefix) {
+    if (can_stale) {
+        can_stale = false;
+        ESP_LOGI("can", "CAN data resumed, marking online");
+        mqtt_client.publish(std::string(can_prefix) + "/status", std::string("online"), (uint8_t)0, true);
+    }
+}
+
 // Verify Pylontech RS485 response checksum
 // Returns true if valid, false if invalid
 inline bool rs485_verify_checksum(const std::string& response) {

@@ -347,6 +347,9 @@ canbus:
                 return;
               }
               can_track_frame(0x351, true);
+              
+              // Check for recovery from stale state
+              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}");
 
               float v_charge_max = can_le_u16(x[0], x[1]) / 10.0f;
               float i_charge_lim = can_le_u16(x[2], x[3]) / 10.0f;
@@ -372,6 +375,9 @@ canbus:
                 return;
               }
               can_track_frame(0x355, true);
+              
+              // Check for recovery from stale state
+              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}");
 
               uint16_t soc = can_le_u16(x[0], x[1]);
               uint16_t soh = can_le_u16(x[2], x[3]);
@@ -389,6 +395,9 @@ canbus:
                 return;
               }
               can_track_frame(0x359, true);
+              
+              // Check for recovery from stale state
+              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}");
 
               uint64_t flags = 0;
               for (int i = 7; i >= 0; i--) {
@@ -416,6 +425,9 @@ canbus:
                 return;
               }
               can_track_frame(0x370, true);
+              
+              // Check for recovery from stale state
+              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}");
 
               float t1 = can_le_u16(x[0], x[1]) / 10.0f;
               float t2 = can_le_u16(x[2], x[3]) / 10.0f;
@@ -460,6 +472,9 @@ canbus:
                 return;
               }
               can_track_frame(0x35C, true);
+              
+              // Check for recovery from stale state
+              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}");
 
               uint8_t flags = x[0];
 
