@@ -89,6 +89,13 @@ firefox http://10.10.0.45/
 - Browser viewer: `modbus_log_viewer.html`
 - Survives browser disconnects, clears on power loss
 
+### Modbus Error Handling (Added 2026-01-19)
+- **CRC validation**: Verifies Modbus CRC16 on all responses
+- **Function code validation**: Rejects responses with wrong function codes
+- **Automatic retry logic**: Up to 3 attempts with 200ms delays
+- **Corruption detection**: Catches electrical noise from inverter's internal RS485
+- Logs all errors and retries to Modbus interaction log
+
 ### Web UI
 - Manual control dropdowns (D13/D14/D15)
 - SOC threshold selectors (5% increments)
@@ -104,6 +111,7 @@ firefox http://10.10.0.45/
 - **[SUCCESS_SUMMARY.md](SUCCESS_SUMMARY.md)** - Inverter priority control implementation
 - **[SESSION_2026-01-17.md](SESSION_2026-01-17.md)** - Modbus log buffer development session
 - **[SESSION_2026-01-18.md](SESSION_2026-01-18.md)** - Refactoring to eliminate code duplication
+- **[SESSION_2026-01-19.md](SESSION_2026-01-19.md)** - Modbus CRC validation and retry logic
 - **[KNOWN_ISSUES.md](KNOWN_ISSUES.md)** - Known limitations and workarounds
 - **[../ENVIRONMENTS.md](../ENVIRONMENTS.md)** - Development vs production environments
 
@@ -194,8 +202,14 @@ ping 10.10.0.45
 ./modbus_rtu_tcp.py 0x9608 -v
 
 # Check for validation errors
-grep "Invalid mode\|Wrong byte count" in logs
+grep "Invalid mode\|Wrong byte count\|CRC mismatch\|Wrong function code" in logs
 ```
+
+Common Modbus error patterns:
+- **`✗ Wrong function code: 0x04 (expected 0x03)`** - Electrical noise corruption, will auto-retry
+- **`✗ CRC mismatch`** - Data corruption in transit, will auto-retry
+- **`✗ Failed to read mode after all retries`** - Network or gateway failure, check connectivity
+- **Retry attempt 2/3...** - Normal operation, corruption recovered automatically
 
 ## Common Mistakes
 
