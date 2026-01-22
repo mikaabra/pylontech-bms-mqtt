@@ -19,12 +19,7 @@ substitutions:
   # Pylontech RS485 address
   pylontech_addr: "2"
 
-# Custom component for CAN listen-only mode
-external_components:
-  - source:
-      type: local
-      path: custom_components
-    components: [esp32_can_listen]
+
 
 esphome:
   name: ${device_name}
@@ -35,6 +30,11 @@ esphome:
     priority: -100
     then:
       - logger.log: "BMS bridge starting..."
+      - lambda: |-
+          // Ensure logger starts in WARN mode (minimal logging)
+          id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_WARN);
+          id(logger_level) = "WARN";
+          id(debug_level_sensor).publish_state("WARN");
       - lambda: |-
           // Initialize arrays based on num_batteries
           const int num_batt = ${num_batteries};
@@ -67,7 +67,8 @@ esp32:
     type: esp-idf
 
 logger:
-  level: WARN  # Change to DEBUG for troubleshooting
+  level: WARN  # Start with minimal logging, but compile with DEBUG support
+  id: logger_level_global
 
 wifi:
   ssid: !secret wifi_ssid
@@ -330,7 +331,7 @@ uart:
 
 # CAN bus configuration (listen-only mode - no ACKs sent)
 canbus:
-  - platform: esp32_can_listen
+  - platform: esp32_can
     id: can_bus
     tx_pin: GPIO15
     rx_pin: GPIO16
@@ -498,6 +499,11 @@ canbus:
 
 # Global variables
 globals:
+  # Logger level tracking
+  - id: logger_level
+    type: std::string
+    initial_value: '"WARN"'  # Default to minimal logging
+
   # CAN stale detection
   - id: last_can_rx
     type: uint32_t
@@ -753,6 +759,15 @@ interval:
           auto tilde = response.find('~');
           if (tilde != std::string::npos) response = response.substr(tilde);
           ESP_LOGD("rs485", "RX len=%d: %s", response.length(), response.c_str());
+          
+          // Detailed response analysis for debugging
+          if (response.length() >= 18) {
+            std::string error_code = response.substr(7, 2);
+            ESP_LOGD("rs485", "Response error code: %s (00=success, 02=invalid cmd, etc.)", error_code.c_str());
+            if (error_code != "00") {
+              ESP_LOGW("rs485", "BMS returned error code %s for command: %s", error_code.c_str(), cmd.c_str());
+            }
+          }
 
           // Helper to handle poll failure for this battery
           auto handle_poll_failure = [&batt](const char* reason) {
@@ -923,6 +938,8 @@ interval:
 
             // Send alarm request (CID2=0x44)
             std::string cmd = rs485_make_cmd(addr, 0x44, batt);
+            ESP_LOGD("rs485", "TX alarm batt %d", batt);
+            ESP_LOGD("rs485", "TX: %s", cmd.c_str());
 
             for (char c : cmd) {
               id(rs485_uart).write_byte((uint8_t)c);
@@ -952,10 +969,21 @@ interval:
             // Trim leading garbage until start marker '~' (if present)
             auto tilde = response.find('~');
             if (tilde != std::string::npos) response = response.substr(tilde);
+            ESP_LOGD("rs485", "RX alarm len=%d: %s", response.length(), response.c_str());
+            
+            // Detailed response analysis for debugging
+            if (response.length() >= 18) {
+              std::string error_code = response.substr(7, 2);
+              ESP_LOGD("rs485", "Alarm response error code: %s", error_code.c_str());
+              if (error_code != "00") {
+                ESP_LOGW("rs485", "BMS returned alarm error %s for command: %s", error_code.c_str(), cmd.c_str());
+              }
+            }
 
             // Validate response (checks length, error code, address, and checksum)
             std::string error = rs485_validate_response(response, addr);
             if (!error.empty()) {
+              ESP_LOGW("rs485", "Alarm poll validation failed: %s. Response: %s", error.c_str(), response.c_str());
               handle_poll_failure(batt, error.c_str());
               continue;
             }
@@ -1530,6 +1558,13 @@ text_sensor:
     icon: "mdi:flag"
     state_topic: ${can_prefix}/flags
 
+  - platform: template
+    name: "Debug Logging Level"
+    id: debug_level_sensor
+    icon: "mdi:bug"
+    lambda: 'return id(logger_level);'
+    update_interval: never
+
   - platform: version
     name: "ESPHome Version"
 
@@ -1587,3 +1622,19 @@ binary_sensor:
 button:
   - platform: restart
     name: "Restart"
+  
+  - platform: template
+    name: "Toggle Debug Logging"
+    id: debug_toggle_button
+    on_press:
+      - lambda: |-
+          if (id(logger_level) == "DEBUG") {
+            id(logger_level) = "WARN";
+            ESP_LOGI("main", "Debug logging DISABLED (WARN level)");
+            id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_WARN);
+          } else {
+            id(logger_level) = "DEBUG";
+            ESP_LOGI("main", "Debug logging ENABLED");
+            id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_DEBUG);
+          }
+          id(debug_level_sensor).publish_state(id(logger_level));

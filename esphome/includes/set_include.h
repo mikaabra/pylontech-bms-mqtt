@@ -57,33 +57,57 @@ inline bool can_frame_preamble(const std::vector<uint8_t>& x, int& frame_count, 
 }
 
 // Helper to extract little-endian uint16 from CAN frame
+// Using ESP-IDF style for consistency and potential future optimization
 inline uint16_t can_le_u16(uint8_t b0, uint8_t b1) {
-    return b0 | (b1 << 8);
+    return (uint16_t)b0 | ((uint16_t)b1 << 8);
 }
 
 // Track expected CAN frames and log missing ones
+// Optimized version with better memory management and reduced logging overhead
 inline void can_track_frame(uint32_t can_id, bool received) {
-    static std::set<uint32_t> expected_frames = {0x351, 0x355, 0x359, 0x370, 0x35C};
-    static std::map<uint32_t, uint32_t> frame_counts;
-    static uint32_t last_check = 0;
+    // Expected CAN frame IDs for Pylontech BMS protocol
+    static const uint32_t expected_frames[] = {0x351, 0x355, 0x359, 0x370, 0x35C};
+    static const size_t expected_count = sizeof(expected_frames) / sizeof(expected_frames[0]);
     
-    if (received) {
-        frame_counts[can_id]++;
+    // Use array instead of map for better performance with fixed set of frames
+    static uint32_t frame_counts[expected_count] = {0};
+    static uint32_t last_check = 0;
+    static uint32_t check_interval = 30000; // 30 seconds
+    
+    // Find the index of this CAN ID in our expected frames
+    for (size_t i = 0; i < expected_count; i++) {
+        if (expected_frames[i] == can_id) {
+            if (received) {
+                frame_counts[i]++;
+            }
+            break;
+        }
     }
     
-    // Check for missing frames every 30 seconds
+    // Check for missing frames periodically
     uint32_t now = millis();
-    if (now - last_check > 30000) {
+    if (now - last_check > check_interval) {
         last_check = now;
         
-        for (uint32_t expected_id : expected_frames) {
-            if (frame_counts.find(expected_id) == frame_counts.end() || frame_counts[expected_id] == 0) {
-                ESP_LOGW("can", "Missing expected CAN frame: 0x%03X", expected_id);
+        // Only log if we have some frames received (avoid startup spam)
+        bool has_any_frames = false;
+        for (size_t i = 0; i < expected_count; i++) {
+            if (frame_counts[i] > 0) {
+                has_any_frames = true;
+                break;
+            }
+        }
+        
+        if (has_any_frames) {
+            for (size_t i = 0; i < expected_count; i++) {
+                if (frame_counts[i] == 0) {
+                    ESP_LOGW("can", "Missing expected CAN frame: 0x%03lX", expected_frames[i]);
+                }
             }
         }
         
         // Reset counters for next check period
-        frame_counts.clear();
+        memset(frame_counts, 0, sizeof(frame_counts));
     }
 }
 

@@ -15,6 +15,7 @@ This directory contains the ESPHome configuration to replace both `pylon_can2mqt
 - **Data validation**: Response checksum verification and address matching
 - **Poll alarms**: Per-battery alarm after 10 consecutive communication failures
 - **Diagnostics**: Heap monitoring for memory health tracking
+- **Runtime Debug Logging**: Web UI button to toggle between minimal and verbose logging
 
 ## Hardware
 
@@ -30,6 +31,30 @@ This directory contains the ESPHome configuration to replace both `pylon_can2mqt
 - `deye-bms-can.yaml` - Main ESPHome configuration
 - `secrets.yaml` - WiFi/MQTT credentials (edit before flashing)
 - `custom_components/esp32_can_listen/` - Custom CAN component with listen-only mode
+
+## Runtime Debug Logging
+
+The system includes a **runtime debug logging toggle** feature that allows you to enable detailed debugging without restarting the device or modifying the configuration.
+
+### Features
+
+- **Web UI Button**: "Toggle Debug Logging" button in the ESPHome web interface
+- **Visual Feedback**: "Debug Logging Level" text sensor shows current state (DEBUG/WARN)
+- **Minimal by Default**: Starts with WARN level logging to reduce overhead
+- **Instant Toggle**: Switch between minimal and verbose logging with one button press
+
+### Usage
+
+1. **Normal Operation**: Device starts with WARN level (minimal logging)
+2. **Enable Debugging**: Press "Toggle Debug Logging" button to enable DEBUG level
+3. **Disable Debugging**: Press button again to return to WARN level
+
+### Benefits
+
+- **Troubleshooting**: Enable detailed logs when diagnosing communication issues
+- **Performance**: Minimal logging during normal operation reduces overhead
+- **Convenience**: No need to modify YAML or restart device
+- **Visual Feedback**: Text sensor updates immediately to show current state
 
 ## Important Implementation Notes
 
