@@ -28,11 +28,15 @@ ESP32-based firmware that translates Pylontech CAN bus protocol to EPever BMS-Li
 ### 1. Prerequisites
 
 ```bash
-# Install ESPHome (if not already installed)
-pip3 install esphome
+# Install ESPHome 2026.1.0 in venv (if not already installed)
+cd /home/micke/GitHub/pylontech-bms-mqtt
+python3 -m venv venv
+venv/bin/pip install esphome
 
-# Or use existing installation
-/home/micke/GitHub/esphome/venv/bin/esphome --version
+# Check version
+cd esphome-epever
+../venv/bin/esphome version
+# Should show: Version: 2026.1.0
 ```
 
 ### 2. Configure Secrets
@@ -44,33 +48,36 @@ nano secrets.yaml
 
 Required secrets:
 - WiFi credentials (ssid, password)
-- MQTT broker (host, user, password)
+- OTA password (for secure firmware updates)
+- API encryption key (for Home Assistant/ESPHome API)
+- Web UI credentials (username, password)
 - Inverter Modbus gateway (host, port, slave ID)
 
 ### 3. Compile & Upload
 
 ```bash
 # Compile firmware
-/home/micke/GitHub/esphome/venv/bin/esphome compile epever-can-bridge.yaml
+../venv/bin/esphome compile epever-can-bridge.yaml
 
 # Upload via OTA (WiFi)
-/home/micke/GitHub/esphome/venv/bin/esphome upload --device 10.10.0.45 epever-can-bridge.yaml
+../venv/bin/esphome upload --device 10.10.0.45 epever-can-bridge.yaml
 
-# Upload via USB (first time)
-/home/micke/GitHub/esphome/venv/bin/esphome run epever-can-bridge.yaml
+# Upload via USB (first time) or full compile + flash
+../venv/bin/esphome run epever-can-bridge.yaml
 ```
 
 ### 4. Monitor Logs
 
 ```bash
 # View live logs from ESPHome
-/home/micke/GitHub/esphome/venv/bin/esphome logs epever-can-bridge.yaml
+../venv/bin/esphome logs epever-can-bridge.yaml
 
 # View Modbus interaction log (terminal viewer)
 ./modbus_log_tail.sh -f
 
-# Access web UI
+# Access web UI (requires authentication)
 firefox http://10.10.0.45/
+# Default: admin / epever_web_2026 (configured in secrets.yaml)
 ```
 
 ## Features
@@ -126,10 +133,11 @@ Battery (CAN 500kbps) ←→ ESP32 ←→ BMS-Link ←→ EPever Inverter
 
 ## Key Design Decisions
 
-### Listen-Only CAN Mode
-- ESP32 passively monitors CAN bus without interfering
-- Custom ESPHome component required (`esp32_can_listen`)
-- No ACK signals prevent bus conflicts
+### CAN Bus Support
+- ESP32 TWAI (Two-Wire Automotive Interface) controller
+- **ESPHome 2026.1.0**: Native LISTENONLY mode support
+- Current mode: NORMAL (sends ACK signals for reliable operation)
+- No custom components required
 
 ### Inverter Priority Mode Switching (NOT D14 Flag)
 - **Low SOC**: Switch to Utility Priority (grid mode)
@@ -149,10 +157,10 @@ Battery (CAN 500kbps) ←→ ESP32 ←→ BMS-Link ←→ EPever Inverter
 nano epever-can-bridge.yaml
 
 # 2. Compile to check for errors
-/home/micke/GitHub/esphome/venv/bin/esphome compile epever-can-bridge.yaml
+../venv/bin/esphome compile epever-can-bridge.yaml
 
 # 3. Upload to device
-/home/micke/GitHub/esphome/venv/bin/esphome upload --device 10.10.0.45 epever-can-bridge.yaml
+../venv/bin/esphome upload --device 10.10.0.45 epever-can-bridge.yaml
 
 # 4. Monitor logs
 ./modbus_log_tail.sh -f
@@ -171,25 +179,25 @@ git push
 ### Compile Errors
 
 ```bash
-# Check ESPHome version
-/home/micke/GitHub/esphome/venv/bin/esphome version
+# Check ESPHome version (should be 2026.1.0)
+../venv/bin/esphome version
 
 # Clean build cache
 rm -rf .esphome/build/epever-can-bridge
-/home/micke/GitHub/esphome/venv/bin/esphome compile epever-can-bridge.yaml
+../venv/bin/esphome compile epever-can-bridge.yaml
 ```
 
 ### Upload Failures
 
 ```bash
 # OTA timeout - try USB upload
-/home/micke/GitHub/esphome/venv/bin/esphome run epever-can-bridge.yaml
+../venv/bin/esphome run epever-can-bridge.yaml
 
 # Check device is reachable
 ping 10.10.0.45
 
 # View existing logs to see if device is stuck
-/home/micke/GitHub/esphome/venv/bin/esphome logs epever-can-bridge.yaml
+../venv/bin/esphome logs epever-can-bridge.yaml
 ```
 
 ### Modbus Errors
@@ -220,7 +228,7 @@ python3 epever-can-bridge.yaml  # This is YAML, not Python!
 
 ### ✅ Right: Use ESPHome toolchain
 ```bash
-/home/micke/GitHub/esphome/venv/bin/esphome compile epever-can-bridge.yaml
+../venv/bin/esphome compile epever-can-bridge.yaml
 ```
 
 ### ❌ Wrong: Confusing with Deye site implementations
@@ -245,7 +253,7 @@ scp epever-can-bridge.yaml pi@raspberry-pi:/opt/
 
 ### ✅ Right: Upload to EPever site ESP32
 ```bash
-/home/micke/GitHub/esphome/venv/bin/esphome upload --device 10.10.0.45 epever-can-bridge.yaml
+../venv/bin/esphome upload --device 10.10.0.45 epever-can-bridge.yaml
 ```
 
 ## Performance
@@ -260,14 +268,21 @@ scp epever-can-bridge.yaml pi@raspberry-pi:/opt/
 | SOC Update Rate | ~3 seconds |
 | Uptime | Continuous (24/7) |
 
-## Safety Features
+## Safety & Security Features
 
+### Security (ESPHome 2026.1.0)
+1. **API Encryption**: Mandatory encryption key for Home Assistant API
+2. **OTA Password**: Password-protected firmware updates
+3. **Web Authentication**: Username/password required for web UI access
+4. **No API Password Support**: Deprecated password authentication removed in 2026.1.0
+
+### Safety
 1. **BMS Protection Priority**: BMS flags always respected
 2. **SOC Reserve Default: OFF**: Feature disabled by default
 3. **Layered Control Logic**: Multiple control sources with OR/AND logic
 4. **Anti-Cycling Mechanism**: 5% gap between thresholds
 5. **CAN Stale Detection**: 30-second timeout on CAN data
-6. **Modbus Validation**: Byte count and value range checks
+6. **Modbus Validation**: CRC16 validation with automatic retry (up to 3 attempts)
 
 ## License
 
@@ -284,6 +299,11 @@ See **[ENVIRONMENTS.md](../ENVIRONMENTS.md)** for full documentation of all thre
 
 ---
 
-**Last Updated**: 2026-01-17 23:30
-**Production Device**: ESP32 at 10.10.0.45 (EPever site)
-**Development Host**: Ubuntu 24.04 VM (micke-VMware20-1)
+## Version Information
+
+- **ESPHome**: 2026.1.0 (released January 2026)
+- **ESP-IDF Framework**: 5.5.2
+- **Platform**: ESP32-S3 with 8MB Flash, 2MB PSRAM
+- **Last Updated**: 2026-01-22
+- **Production Device**: ESP32 at 10.10.0.45 (EPever site)
+- **Development Host**: Ubuntu 24.04 VM (micke-VMware20-1)

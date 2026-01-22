@@ -33,16 +33,10 @@ substitutions:
   inverter_slave: !secret inverter_slave
   inverter_priority_update_interval: !secret inverter_priority_update_interval
 
-# External components: CAN listen-only mode
-external_components:
-  - source:
-      type: local
-      path: custom_components
-    components: [esp32_can_listen]
-
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
+  min_version: "2026.1.0"
   on_boot:
     - priority: -100
       then:
@@ -101,6 +95,9 @@ ota:
 
 web_server:
   port: 80
+  auth:
+    username: !secret web_username
+    password: !secret web_password
   # Note: ESPHome web_server doesn't support custom page handlers
   # The Modbus log is available via API: http://10.10.0.45/text_sensor/modbus_log_text
   # Or create an external HTML file that fetches from this endpoint
@@ -129,7 +126,7 @@ uart:
 
 # CAN bus configuration - NORMAL mode to allow heartbeat transmission
 canbus:
-  - platform: esp32_can_listen
+  - platform: esp32_can
     id: can_bus
     tx_pin: GPIO15
     rx_pin: GPIO16

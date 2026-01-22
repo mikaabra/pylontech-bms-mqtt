@@ -50,3 +50,4 @@ esphome-epever/.esphome/
 pylon_can2mqtt.py-working-*
 pylon_decode.works.py
 *.patch
+venv/
