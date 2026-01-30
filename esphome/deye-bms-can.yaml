@@ -265,6 +265,20 @@ mqtt:
               name, st, obj_id, avail_json, device_json);
             id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
           }
+
+          // Poll alarm binary sensor (RS485 communication failure detection)
+          {
+            char obj_id[32], name[48], st[64];
+            snprintf(obj_id, sizeof(obj_id), "%s_poll_alarm", prefix);
+            snprintf(name, sizeof(name), "Battery %d Poll Alarm", batt);
+            snprintf(st, sizeof(st), "%s/poll_alarm", state_prefix);
+
+            snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", obj_id);
+            snprintf(payload, sizeof(payload),
+              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","device_class":"problem","payload_on":"ON","payload_off":"OFF","icon":"mdi:lan-disconnect",%s,%s})",
+              name, st, obj_id, avail_json, device_json);
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+          }
         }
 
         ESP_LOGI("mqtt", "Published HA discovery configs for %d batteries", ${num_batteries});
@@ -302,6 +316,128 @@ mqtt:
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_error_count/config");
         snprintf(payload, sizeof(payload),
           R"({"name":"CAN Error Count","state_topic":"${can_prefix}/diag/error_count","unique_id":"deye_bms_can_error_count","icon":"mdi:alert-circle","entity_category":"diagnostic",%s,%s})",
+          can_avail_json, can_device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        // CAN 0x359 module count and status sensors
+        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_module_count/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"CAN Module Count","state_topic":"${can_prefix}/can/module_count","unique_id":"deye_bms_can_module_count","icon":"mdi:battery-multiple",%s,%s})",
+          can_avail_json, can_device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_status_byte7/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"CAN Status Byte 7","state_topic":"${can_prefix}/can/status_byte7","unique_id":"deye_bms_can_status_byte7","icon":"mdi:information-outline","entity_category":"diagnostic",%s,%s})",
+          can_avail_json, can_device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        // CAN alarm summary text sensor
+        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_alarm_summary/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"CAN Alarm Summary","state_topic":"${can_prefix}/can/alarm_summary","unique_id":"deye_bms_can_alarm_summary","icon":"mdi:alert",%s,%s})",
+          can_avail_json, can_device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        // CAN 0x359 protection binary sensors (device_class: problem)
+        const char* prot_sensors[][3] = {
+          {"prot_overvolt", "CAN Protection Overvolt", "mdi:flash-alert"},
+          {"prot_undervolt", "CAN Protection Undervolt", "mdi:flash-off"},
+          {"prot_overtemp", "CAN Protection Overtemp", "mdi:thermometer-alert"},
+          {"prot_undertemp", "CAN Protection Undertemp", "mdi:snowflake-alert"},
+          {"prot_discharge_overcurrent", "CAN Protection Discharge OC", "mdi:current-dc"},
+          {"prot_charge_overcurrent", "CAN Protection Charge OC", "mdi:current-dc"},
+          {"prot_system_error", "CAN Protection System Error", "mdi:alert-circle"},
+        };
+        for (int i = 0; i < 7; i++) {
+          snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_%s/config", prot_sensors[i][0]);
+          snprintf(payload, sizeof(payload),
+            R"({"name":"%s","state_topic":"${can_prefix}/can/%s","unique_id":"deye_bms_can_%s","device_class":"problem","payload_on":"1","payload_off":"0","icon":"%s",%s,%s})",
+            prot_sensors[i][1], prot_sensors[i][0], prot_sensors[i][0], prot_sensors[i][2], can_avail_json, can_device_json);
+          id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        }
+
+        // CAN 0x359 warning binary sensors
+        const char* warn_sensors[][3] = {
+          {"warn_high_voltage", "CAN Warning High Voltage", "mdi:flash"},
+          {"warn_low_voltage", "CAN Warning Low Voltage", "mdi:flash-outline"},
+          {"warn_high_temp", "CAN Warning High Temp", "mdi:thermometer-high"},
+          {"warn_low_temp", "CAN Warning Low Temp", "mdi:thermometer-low"},
+          {"warn_high_discharge_current", "CAN Warning High Discharge", "mdi:current-dc"},
+          {"warn_high_charge_current", "CAN Warning High Charge", "mdi:current-dc"},
+          {"warn_comms_fail", "CAN Warning Comms Fail", "mdi:lan-disconnect"},
+        };
+        for (int i = 0; i < 7; i++) {
+          snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_%s/config", warn_sensors[i][0]);
+          // warn_comms_fail gets device_class: problem, others don't
+          if (i == 6) {
+            snprintf(payload, sizeof(payload),
+              R"({"name":"%s","state_topic":"${can_prefix}/can/%s","unique_id":"deye_bms_can_%s","device_class":"problem","payload_on":"1","payload_off":"0","icon":"%s",%s,%s})",
+              warn_sensors[i][1], warn_sensors[i][0], warn_sensors[i][0], warn_sensors[i][2], can_avail_json, can_device_json);
+          } else {
+            snprintf(payload, sizeof(payload),
+              R"({"name":"%s","state_topic":"${can_prefix}/can/%s","unique_id":"deye_bms_can_%s","payload_on":"1","payload_off":"0","icon":"%s",%s,%s})",
+              warn_sensors[i][1], warn_sensors[i][0], warn_sensors[i][0], warn_sensors[i][2], can_avail_json, can_device_json);
+          }
+          id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        }
+
+        // CAN main sensors (SOC, SOH, limits, extremes)
+        // SOC and SOH
+        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soc/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"BMS SOC","state_topic":"${can_prefix}/soc","unique_id":"deye_bms_can_soc","unit_of_measurement":"%%","device_class":"battery","state_class":"measurement",%s,%s})",
+          can_avail_json, can_device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soh/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"BMS SOH","state_topic":"${can_prefix}/soh","unique_id":"deye_bms_can_soh","unit_of_measurement":"%%","icon":"mdi:battery-heart-variant","state_class":"measurement",%s,%s})",
+          can_avail_json, can_device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        // Charge/discharge limits
+        const char* limit_sensors[][4] = {
+          {"v_charge_max", "BMS Charge Voltage Max", "V", "voltage"},
+          {"v_low", "BMS Discharge Voltage Min", "V", "voltage"},
+          {"i_charge", "BMS Charge Current Limit", "A", "current"},
+          {"i_discharge", "BMS Discharge Current Limit", "A", "current"},
+        };
+        for (int i = 0; i < 4; i++) {
+          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_%s/config", limit_sensors[i][0]);
+          snprintf(payload, sizeof(payload),
+            R"({"name":"%s","state_topic":"${can_prefix}/limit/%s","unique_id":"deye_bms_can_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+            limit_sensors[i][1], limit_sensors[i][0], limit_sensors[i][0], limit_sensors[i][2], limit_sensors[i][3], can_avail_json, can_device_json);
+          id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        }
+
+        // Cell voltage and temperature extremes
+        const char* ext_sensors[][4] = {
+          {"cell_v_min", "BMS Cell Voltage Min", "V", "voltage"},
+          {"cell_v_max", "BMS Cell Voltage Max", "V", "voltage"},
+          {"cell_v_delta", "BMS Cell Voltage Delta", "V", "voltage"},
+          {"temp_min", "BMS Temperature Min", "°C", "temperature"},
+          {"temp_max", "BMS Temperature Max", "°C", "temperature"},
+        };
+        for (int i = 0; i < 5; i++) {
+          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_%s/config", ext_sensors[i][0]);
+          snprintf(payload, sizeof(payload),
+            R"({"name":"%s","state_topic":"${can_prefix}/ext/%s","unique_id":"deye_bms_can_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+            ext_sensors[i][1], ext_sensors[i][0], ext_sensors[i][0], ext_sensors[i][2], ext_sensors[i][3], can_avail_json, can_device_json);
+          id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        }
+
+        // Raw flags text sensor
+        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_flags/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"BMS Flags Raw","state_topic":"${can_prefix}/flags","unique_id":"deye_bms_can_flags","icon":"mdi:flag","entity_category":"diagnostic",%s,%s})",
+          can_avail_json, can_device_json);
+        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+
+        // Free heap diagnostic
+        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_free_heap/config");
+        snprintf(payload, sizeof(payload),
+          R"({"name":"ESP Free Heap","state_topic":"${can_prefix}/diag/free_heap","unique_id":"deye_bms_can_free_heap","unit_of_measurement":"bytes","icon":"mdi:memory","entity_category":"diagnostic",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
 
@@ -388,7 +524,13 @@ canbus:
                 id(sensor_soh).publish_state(soh);
               }
 
-      # 0x359: Flags
+      # 0x359: Protection & Alarm Flags (Pylontech V1.2)
+      # Byte 0: Protection - bit7=discharge_overcurrent, bit4=undertemp, bit3=overtemp, bit2=undervolt, bit1=overvolt
+      # Byte 1: Protection - bit7=system_error, bit0=charge_overcurrent
+      # Byte 2: Warning - bit7=high_discharge_current, bit4=low_temp, bit3=high_temp, bit2=low_volt, bit1=high_volt
+      # Byte 3: Warning - bit7=comms_fail, bit0=high_charge_current
+      # Byte 4: Module count
+      # Byte 7: Additional status (Shoto-specific)
       - can_id: 0x359
         then:
           - lambda: |-
@@ -396,13 +538,51 @@ canbus:
                 return;
               }
               can_track_frame(0x359, true);
-              
+
               // Check for recovery from stale state
               can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}");
 
               uint64_t flags = 0;
               for (int i = 7; i >= 0; i--) {
                 flags = (flags << 8) | x[i];
+              }
+
+              // Decode protection flags (byte 0)
+              uint8_t prot0 = x[0];
+              id(can_prot_overvolt) = (prot0 & 0x02) != 0;           // bit 1
+              id(can_prot_undervolt) = (prot0 & 0x04) != 0;          // bit 2
+              id(can_prot_overtemp) = (prot0 & 0x08) != 0;           // bit 3
+              id(can_prot_undertemp) = (prot0 & 0x10) != 0;          // bit 4
+              id(can_prot_discharge_overcurrent) = (prot0 & 0x80) != 0;  // bit 7
+
+              // Decode protection flags (byte 1)
+              uint8_t prot1 = x[1];
+              id(can_prot_charge_overcurrent) = (prot1 & 0x01) != 0; // bit 0
+              id(can_prot_system_error) = (prot1 & 0x80) != 0;       // bit 7
+
+              // Decode warning flags (byte 2)
+              uint8_t warn2 = x[2];
+              id(can_warn_high_voltage) = (warn2 & 0x02) != 0;       // bit 1
+              id(can_warn_low_voltage) = (warn2 & 0x04) != 0;        // bit 2
+              id(can_warn_high_temp) = (warn2 & 0x08) != 0;          // bit 3
+              id(can_warn_low_temp) = (warn2 & 0x10) != 0;           // bit 4
+              id(can_warn_high_discharge_current) = (warn2 & 0x80) != 0;  // bit 7
+
+              // Decode warning flags (byte 3)
+              uint8_t warn3 = x[3];
+              id(can_warn_high_charge_current) = (warn3 & 0x01) != 0;  // bit 0
+              id(can_warn_comms_fail) = (warn3 & 0x80) != 0;           // bit 7
+
+              // Module count (byte 4) and status byte (byte 7)
+              id(can_module_count) = x[4];
+              id(can_status_byte7) = x[7];
+
+              // Log if any protection or warning is active
+              if (prot0 || prot1) {
+                ESP_LOGW("can", "0x359 PROTECTION: byte0=0x%02X byte1=0x%02X", prot0, prot1);
+              }
+              if (warn2 || warn3) {
+                ESP_LOGI("can", "0x359 WARNING: byte2=0x%02X byte3=0x%02X", warn2, warn3);
               }
 
               // Hysteresis: only publish if flags changed OR 60s passed
@@ -416,6 +596,10 @@ canbus:
                 id(sensor_flags).publish_state(buf);
                 id(last_flags_value) = flags;
                 id(last_flags_publish) = now;
+
+                // Log module count changes
+                ESP_LOGI("can", "0x359: modules=%d status_b7=0x%02X flags=%s",
+                         x[4], x[7], buf);
               }
 
       # 0x370: Temperature and cell voltage extremes
@@ -537,6 +721,73 @@ globals:
     initial_value: '0'
   - id: can_error_count
     type: int
+    initial_value: '0'
+
+  # CAN 0x359 decoded protection flags (byte 0-1)
+  - id: can_prot_overvolt
+    type: bool
+    initial_value: 'false'
+  - id: can_prot_undervolt
+    type: bool
+    initial_value: 'false'
+  - id: can_prot_overtemp
+    type: bool
+    initial_value: 'false'
+  - id: can_prot_undertemp
+    type: bool
+    initial_value: 'false'
+  - id: can_prot_discharge_overcurrent
+    type: bool
+    initial_value: 'false'
+  - id: can_prot_charge_overcurrent
+    type: bool
+    initial_value: 'false'
+  - id: can_prot_system_error
+    type: bool
+    initial_value: 'false'
+
+  # CAN 0x359 decoded warning flags (byte 2-3)
+  - id: can_warn_high_voltage
+    type: bool
+    initial_value: 'false'
+  - id: can_warn_low_voltage
+    type: bool
+    initial_value: 'false'
+  - id: can_warn_high_temp
+    type: bool
+    initial_value: 'false'
+  - id: can_warn_low_temp
+    type: bool
+    initial_value: 'false'
+  - id: can_warn_high_discharge_current
+    type: bool
+    initial_value: 'false'
+  - id: can_warn_high_charge_current
+    type: bool
+    initial_value: 'false'
+  - id: can_warn_comms_fail
+    type: bool
+    initial_value: 'false'
+
+  # CAN 0x359 module status (byte 4-7)
+  - id: can_module_count
+    type: int
+    initial_value: '0'
+  - id: can_status_byte7
+    type: int
+    initial_value: '0'
+
+  # CAN 0x359 compact alarm summary for web UI
+  - id: can_alarm_summary
+    type: std::string
+    restore_value: no
+
+  # CAN 0x359 decoded flags hysteresis tracking
+  - id: last_can_decoded_state
+    type: uint32_t
+    initial_value: '0'
+  - id: last_can_decoded_publish
+    type: uint32_t
     initial_value: '0'
 
   # RS485 stale detection
@@ -683,6 +934,80 @@ interval:
           id(mqtt_client).publish(std::string("${can_prefix}/diag/frame_count"), std::string(payload));
           snprintf(payload, sizeof(payload), "%d", id(can_error_count));
           id(mqtt_client).publish(std::string("${can_prefix}/diag/error_count"), std::string(payload));
+
+          // Build combined state for hysteresis check (protection + warning + module count)
+          uint32_t current_state = 0;
+          // Pack protection flags into bits 0-6
+          if (id(can_prot_overvolt)) current_state |= (1 << 0);
+          if (id(can_prot_undervolt)) current_state |= (1 << 1);
+          if (id(can_prot_overtemp)) current_state |= (1 << 2);
+          if (id(can_prot_undertemp)) current_state |= (1 << 3);
+          if (id(can_prot_discharge_overcurrent)) current_state |= (1 << 4);
+          if (id(can_prot_charge_overcurrent)) current_state |= (1 << 5);
+          if (id(can_prot_system_error)) current_state |= (1 << 6);
+          // Pack warning flags into bits 7-13
+          if (id(can_warn_high_voltage)) current_state |= (1 << 7);
+          if (id(can_warn_low_voltage)) current_state |= (1 << 8);
+          if (id(can_warn_high_temp)) current_state |= (1 << 9);
+          if (id(can_warn_low_temp)) current_state |= (1 << 10);
+          if (id(can_warn_high_discharge_current)) current_state |= (1 << 11);
+          if (id(can_warn_high_charge_current)) current_state |= (1 << 12);
+          if (id(can_warn_comms_fail)) current_state |= (1 << 13);
+          // Pack module count and status_byte7 into bits 16-31
+          current_state |= ((uint32_t)id(can_module_count) << 16);
+          current_state |= ((uint32_t)id(can_status_byte7) << 24);
+
+          // Hysteresis: only publish if state changed OR 60s heartbeat
+          uint32_t now = millis();
+          bool state_changed = (current_state != id(last_can_decoded_state));
+          bool heartbeat = (now - id(last_can_decoded_publish) >= 60000);
+
+          if (state_changed || heartbeat) {
+            // Publish 0x359 decoded protection flags
+            id(mqtt_client).publish(std::string("${can_prefix}/can/prot_overvolt"),
+                id(can_prot_overvolt) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/prot_undervolt"),
+                id(can_prot_undervolt) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/prot_overtemp"),
+                id(can_prot_overtemp) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/prot_undertemp"),
+                id(can_prot_undertemp) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/prot_discharge_overcurrent"),
+                id(can_prot_discharge_overcurrent) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/prot_charge_overcurrent"),
+                id(can_prot_charge_overcurrent) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/prot_system_error"),
+                id(can_prot_system_error) ? std::string("1") : std::string("0"));
+
+            // Publish 0x359 decoded warning flags
+            id(mqtt_client).publish(std::string("${can_prefix}/can/warn_high_voltage"),
+                id(can_warn_high_voltage) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/warn_low_voltage"),
+                id(can_warn_low_voltage) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/warn_high_temp"),
+                id(can_warn_high_temp) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/warn_low_temp"),
+                id(can_warn_low_temp) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/warn_high_discharge_current"),
+                id(can_warn_high_discharge_current) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/warn_high_charge_current"),
+                id(can_warn_high_charge_current) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/warn_comms_fail"),
+                id(can_warn_comms_fail) ? std::string("1") : std::string("0"));
+
+            // Publish 0x359 module count and status byte 7
+            snprintf(payload, sizeof(payload), "%d", id(can_module_count));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/module_count"), std::string(payload));
+            snprintf(payload, sizeof(payload), "%d", id(can_status_byte7));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/status_byte7"), std::string(payload));
+
+            // Publish alarm summary
+            id(mqtt_client).publish(std::string("${can_prefix}/can/alarm_summary"),
+                id(can_alarm_summary).empty() ? std::string("OK") : id(can_alarm_summary));
+
+            id(last_can_decoded_state) = current_state;
+            id(last_can_decoded_publish) = now;
+          }
 
   # RS485 stale detection and availability
   - interval: 30s
@@ -1551,12 +1876,64 @@ sensor:
     update_interval: 10s
     lambda: 'return id(can_error_count);'
 
+  # CAN 0x359 module count (byte 4) - shows number of active modules
+  - platform: template
+    name: "CAN Module Count"
+    id: sensor_can_module_count
+    icon: "mdi:battery-multiple"
+    state_topic: ${can_prefix}/can/module_count
+    update_interval: 10s
+    lambda: 'return id(can_module_count);'
+
+  # CAN 0x359 status byte 7 (Shoto-specific diagnostic)
+  - platform: template
+    name: "CAN Status Byte 7"
+    id: sensor_can_status_byte7
+    icon: "mdi:information-outline"
+    entity_category: diagnostic
+    state_topic: ${can_prefix}/can/status_byte7
+    update_interval: 10s
+    lambda: 'return id(can_status_byte7);'
+
 text_sensor:
   - platform: template
     id: sensor_flags
     name: "BMS Flags"
     icon: "mdi:flag"
     state_topic: ${can_prefix}/flags
+
+  - platform: template
+    id: sensor_can_alarm_summary
+    name: "CAN Alarm Summary"
+    icon: "mdi:alert"
+    state_topic: ${can_prefix}/can/alarm_summary
+    update_interval: 10s
+    lambda: |-
+      std::string alarms;
+      // Protection flags (critical)
+      if (id(can_prot_overvolt)) { if (!alarms.empty()) alarms += ","; alarms += "P:OV"; }
+      if (id(can_prot_undervolt)) { if (!alarms.empty()) alarms += ","; alarms += "P:UV"; }
+      if (id(can_prot_overtemp)) { if (!alarms.empty()) alarms += ","; alarms += "P:OT"; }
+      if (id(can_prot_undertemp)) { if (!alarms.empty()) alarms += ","; alarms += "P:UT"; }
+      if (id(can_prot_discharge_overcurrent)) { if (!alarms.empty()) alarms += ","; alarms += "P:DOC"; }
+      if (id(can_prot_charge_overcurrent)) { if (!alarms.empty()) alarms += ","; alarms += "P:COC"; }
+      if (id(can_prot_system_error)) { if (!alarms.empty()) alarms += ","; alarms += "P:SYS"; }
+      // Warning flags
+      if (id(can_warn_high_voltage)) { if (!alarms.empty()) alarms += ","; alarms += "W:HV"; }
+      if (id(can_warn_low_voltage)) { if (!alarms.empty()) alarms += ","; alarms += "W:LV"; }
+      if (id(can_warn_high_temp)) { if (!alarms.empty()) alarms += ","; alarms += "W:HT"; }
+      if (id(can_warn_low_temp)) { if (!alarms.empty()) alarms += ","; alarms += "W:LT"; }
+      if (id(can_warn_high_discharge_current)) { if (!alarms.empty()) alarms += ","; alarms += "W:HDI"; }
+      if (id(can_warn_high_charge_current)) { if (!alarms.empty()) alarms += ","; alarms += "W:HCI"; }
+      if (id(can_warn_comms_fail)) { if (!alarms.empty()) alarms += ","; alarms += "W:COMM"; }
+      // Add module count if less than expected
+      if (id(can_module_count) > 0 && id(can_module_count) < ${num_batteries}) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), " [%d/%d mods]", id(can_module_count), ${num_batteries});
+        alarms += buf;
+      }
+      id(can_alarm_summary) = alarms.empty() ? "OK" : alarms;
+      return id(can_alarm_summary);
 
   - platform: template
     name: "Debug Logging Level"
@@ -1618,6 +1995,100 @@ binary_sensor:
     device_class: problem
     state_topic: ${rs485_prefix}/battery2/poll_alarm
     lambda: 'return id(batt_poll_alarm).size() > 2 ? id(batt_poll_alarm)[2] : false;'
+
+  # CAN 0x359 Protection flags (device_class: problem for alerts)
+  - platform: template
+    name: "CAN Protection Overvolt"
+    id: bs_can_prot_overvolt
+    device_class: problem
+    icon: "mdi:flash-alert"
+    lambda: 'return id(can_prot_overvolt);'
+
+  - platform: template
+    name: "CAN Protection Undervolt"
+    id: bs_can_prot_undervolt
+    device_class: problem
+    icon: "mdi:flash-off"
+    lambda: 'return id(can_prot_undervolt);'
+
+  - platform: template
+    name: "CAN Protection Overtemp"
+    id: bs_can_prot_overtemp
+    device_class: problem
+    icon: "mdi:thermometer-alert"
+    lambda: 'return id(can_prot_overtemp);'
+
+  - platform: template
+    name: "CAN Protection Undertemp"
+    id: bs_can_prot_undertemp
+    device_class: problem
+    icon: "mdi:snowflake-alert"
+    lambda: 'return id(can_prot_undertemp);'
+
+  - platform: template
+    name: "CAN Protection Discharge Overcurrent"
+    id: bs_can_prot_discharge_oc
+    device_class: problem
+    icon: "mdi:current-dc"
+    lambda: 'return id(can_prot_discharge_overcurrent);'
+
+  - platform: template
+    name: "CAN Protection Charge Overcurrent"
+    id: bs_can_prot_charge_oc
+    device_class: problem
+    icon: "mdi:current-dc"
+    lambda: 'return id(can_prot_charge_overcurrent);'
+
+  - platform: template
+    name: "CAN Protection System Error"
+    id: bs_can_prot_system_error
+    device_class: problem
+    icon: "mdi:alert-circle"
+    lambda: 'return id(can_prot_system_error);'
+
+  # CAN 0x359 Warning flags
+  - platform: template
+    name: "CAN Warning High Voltage"
+    id: bs_can_warn_high_volt
+    icon: "mdi:flash"
+    lambda: 'return id(can_warn_high_voltage);'
+
+  - platform: template
+    name: "CAN Warning Low Voltage"
+    id: bs_can_warn_low_volt
+    icon: "mdi:flash-outline"
+    lambda: 'return id(can_warn_low_voltage);'
+
+  - platform: template
+    name: "CAN Warning High Temp"
+    id: bs_can_warn_high_temp
+    icon: "mdi:thermometer-high"
+    lambda: 'return id(can_warn_high_temp);'
+
+  - platform: template
+    name: "CAN Warning Low Temp"
+    id: bs_can_warn_low_temp
+    icon: "mdi:thermometer-low"
+    lambda: 'return id(can_warn_low_temp);'
+
+  - platform: template
+    name: "CAN Warning High Discharge Current"
+    id: bs_can_warn_high_discharge
+    icon: "mdi:current-dc"
+    lambda: 'return id(can_warn_high_discharge_current);'
+
+  - platform: template
+    name: "CAN Warning High Charge Current"
+    id: bs_can_warn_high_charge
+    icon: "mdi:current-dc"
+    lambda: 'return id(can_warn_high_charge_current);'
+
+  - platform: template
+    name: "CAN Warning Comms Fail"
+    id: bs_can_warn_comms_fail
+    device_class: problem
+    icon: "mdi:lan-disconnect"
+    lambda: 'return id(can_warn_comms_fail);'
 
 button:
   - platform: restart
