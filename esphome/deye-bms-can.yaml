@@ -62,6 +62,9 @@ esphome:
           id(batt_poll_alarm).resize(num_batt, false);
           // Initialize temperature hysteresis tracking (6 temps per battery, use -999 as invalid)
           id(last_batt_temps).resize(6 * num_batt, -999.0f);
+          
+          // Initialize cell voltage hysteresis tracking (16 cells per battery, use -1 as invalid)
+          id(last_cell_voltages).resize(16 * num_batt, -1.0f);
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -120,6 +123,12 @@ mqtt:
         id(last_module_count) = id(can_module_count);
         id(last_status_byte7) = id(can_status_byte7);
         id(last_alarm_summary) = id(can_alarm_summary);
+        
+        // Publish initial cell voltages on connect (force republish to ensure HA has current values)
+        // Reset tracking to force next publish
+        for (int i = 0; i < id(last_cell_voltages).size(); i++) {
+            id(last_cell_voltages)[i] = -1.0f;  // Reset to force publish on next update
+        }
 
         // Publish HA Discovery configs
         // Device info shared by all entities
@@ -713,6 +722,11 @@ globals:
   - id: last_alarm_summary
     type: std::string
     initial_value: '""'
+
+  # Cell voltage hysteresis tracking - prevent excessive MQTT updates
+  - id: last_cell_voltages
+    type: std::vector<float>
+    restore_value: no
 
   # CAN stale detection
   - id: last_can_rx
@@ -1735,13 +1749,20 @@ interval:
               snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cw_cells", batt);
               id(mqtt_client).publish(topic, id(batt_cw_cells)[batt].c_str());
 
-              // Individual cell voltages
+              // Individual cell voltages with 10mV hysteresis
               for (int cell = 0; cell < 16; cell++) {
                 float v = id(cell_voltages)[batt * 16 + cell];
                 if (v > 0.1f) {
-                  snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cell%02d", batt, cell + 1);
-                  snprintf(payload, sizeof(payload), "%.3f", v);
-                  id(mqtt_client).publish(topic, payload);
+                  int cell_idx = batt * 16 + cell;
+                  float last_v = id(last_cell_voltages)[cell_idx];
+                  
+                  // Publish if first time or changed by >= 10mV (0.010V)
+                  if (last_v < 0 || fabsf(v - last_v) >= 0.010f) {
+                    snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cell%02d", batt, cell + 1);
+                    snprintf(payload, sizeof(payload), "%.3f", v);
+                    id(mqtt_client).publish(topic, payload);
+                    id(last_cell_voltages)[cell_idx] = v;  // Update tracking
+                  }
                 }
               }
 
@@ -1937,7 +1958,7 @@ sensor:
     filters:
       - or:
         - heartbeat: 60s
-        - delta: 0.002
+        - delta: 0.010  # Increased from 0.002V (2mV) to 0.010V (10mV)
 
   - platform: template
     id: sensor_temp_min

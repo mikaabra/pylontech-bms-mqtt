@@ -5,9 +5,11 @@ A Python script to monitor MQTT traffic and identify "top talkers" - topics with
 ## Features
 
 - **Real-time monitoring**: Tracks message counts and rates in real-time
-- **Top talkers identification**: Shows which topics are most active
+- **Top talkers identification**: Shows which topics are most active (configurable N)
 - **Comprehensive statistics**: Provides detailed metrics including message rates, data sizes, and percentages
-- **Configurable**: Adjust monitoring duration, update interval, and number of top talkers to display
+- **Complete topic listing**: Final output includes ALL topics with full details
+- **File output**: Save complete statistics to text file for analysis
+- **Configurable**: Adjust monitoring duration, update interval, top N talkers, and file output
 - **Seamless integration**: Uses existing `secrets.yaml` for MQTT credentials
 
 ## Installation
@@ -31,8 +33,8 @@ pip install paho-mqtt pyyaml
 # Custom duration (30 minutes = 1800 seconds)
 ./mqtt_stats_monitor.py --duration 1800
 
-# Show only top 5 talkers
-./mqtt_stats_monitor.py --top 5
+# Show top 20 talkers instead of default 10
+./mqtt_stats_monitor.py --top 20
 
 # Custom update interval (every 5 seconds)
 ./mqtt_stats_monitor.py --interval 5
@@ -40,11 +42,14 @@ pip install paho-mqtt pyyaml
 # Quiet mode (only show final summary, no periodic updates)
 ./mqtt_stats_monitor.py --quiet
 
-# Custom secrets file path
-./mqtt_stats_monitor.py --secrets /path/to/secrets.yaml
+# Save complete statistics to file
+./mqtt_stats_monitor.py --output mqtt_stats.txt
 
 # Combined options
-./mqtt_stats_monitor.py --duration 3600 --top 15 --interval 5 --quiet
+./mqtt_stats_monitor.py --duration 1800 --top 25 --output detailed_stats.txt
+
+# Quiet mode with file output
+./mqtt_stats_monitor.py --quiet --output background_monitor.txt
 ```
 
 ## Example Output
@@ -111,6 +116,8 @@ Detailed Statistics:
    - **Quiet mode**: Suppresses periodic updates when `--quiet` flag is used
    - **Final summary**: Always shows comprehensive statistics at the end
    - Shows top N most active topics, message counts, rates, data sizes, and percentages
+   - **Complete listing**: Includes ALL topics with full details in final output
+   - **File output**: Optionally saves complete statistics to text file
 
 ## Configuration
 
