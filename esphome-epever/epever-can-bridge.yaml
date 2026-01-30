@@ -245,7 +245,7 @@ canbus:
                 }
               }
 
-      # 0x359: Flags
+      # 0x359: Flags - decode protection/warning flags per Pylontech CAN V1.2 spec
       - can_id: 0x359
         then:
           - lambda: |-
@@ -257,6 +257,36 @@ canbus:
                 id(can_error_count)++;
                 return;
               }
+
+              // Decode protection flags (bytes 0-1)
+              uint8_t prot0 = x[0];
+              uint8_t prot1 = x[1];
+              id(can_prot_overvolt) = (prot0 & 0x02) != 0;           // bit 1
+              id(can_prot_undervolt) = (prot0 & 0x04) != 0;          // bit 2
+              id(can_prot_overtemp) = (prot0 & 0x08) != 0;           // bit 3
+              id(can_prot_undertemp) = (prot0 & 0x10) != 0;          // bit 4
+              id(can_prot_discharge_overcurrent) = (prot0 & 0x80) != 0;  // bit 7
+
+              id(can_prot_charge_overcurrent) = (prot1 & 0x01) != 0; // bit 0
+              id(can_prot_system_error) = (prot1 & 0x80) != 0;       // bit 7
+
+              // Decode warning flags (bytes 2-3)
+              uint8_t warn2 = x[2];
+              uint8_t warn3 = x[3];
+              id(can_warn_high_voltage) = (warn2 & 0x02) != 0;       // bit 1
+              id(can_warn_low_voltage) = (warn2 & 0x04) != 0;        // bit 2
+              id(can_warn_high_temp) = (warn2 & 0x08) != 0;          // bit 3
+              id(can_warn_low_temp) = (warn2 & 0x10) != 0;           // bit 4
+              id(can_warn_high_discharge_current) = (warn2 & 0x80) != 0;  // bit 7
+
+              id(can_warn_high_charge_current) = (warn3 & 0x01) != 0;  // bit 0
+              id(can_warn_comms_fail) = (warn3 & 0x80) != 0;           // bit 7
+
+              // Module count and status byte
+              id(can_module_count) = x[4];
+              id(can_status_byte7) = x[7];
+
+              // Build raw hex for display
               uint64_t flags = 0;
               for (int i = 7; i >= 0; i--) {
                 flags = (flags << 8) | x[i];
@@ -417,6 +447,64 @@ globals:
   - id: can_force_charge_request
     type: bool
     initial_value: 'false'  # BMS requesting force charge
+
+  # CAN 0x359 decoded protection flags (byte 0-1)
+  - id: can_prot_overvolt
+    type: bool
+    initial_value: 'false'
+  - id: can_prot_undervolt
+    type: bool
+    initial_value: 'false'
+  - id: can_prot_overtemp
+    type: bool
+    initial_value: 'false'
+  - id: can_prot_undertemp
+    type: bool
+    initial_value: 'false'
+  - id: can_prot_discharge_overcurrent
+    type: bool
+    initial_value: 'false'
+  - id: can_prot_charge_overcurrent
+    type: bool
+    initial_value: 'false'
+  - id: can_prot_system_error
+    type: bool
+    initial_value: 'false'
+
+  # CAN 0x359 decoded warning flags (byte 2-3)
+  - id: can_warn_high_voltage
+    type: bool
+    initial_value: 'false'
+  - id: can_warn_low_voltage
+    type: bool
+    initial_value: 'false'
+  - id: can_warn_high_temp
+    type: bool
+    initial_value: 'false'
+  - id: can_warn_low_temp
+    type: bool
+    initial_value: 'false'
+  - id: can_warn_high_discharge_current
+    type: bool
+    initial_value: 'false'
+  - id: can_warn_high_charge_current
+    type: bool
+    initial_value: 'false'
+  - id: can_warn_comms_fail
+    type: bool
+    initial_value: 'false'
+
+  # CAN 0x359 module count and status
+  - id: can_module_count
+    type: int
+    initial_value: '0'
+  - id: can_status_byte7
+    type: int
+    initial_value: '0'
+
+  # CAN alarm summary string for web UI
+  - id: can_alarm_summary
+    type: std::string
 
   # Manual control modes: 0=Auto(CAN), 1=Force Off, 2=Force On
   - id: manual_mode_d13_force_charge
@@ -1810,6 +1898,19 @@ sensor:
     update_interval: 10s
 
   - platform: template
+    name: "CAN Module Count"
+    accuracy_decimals: 0
+    icon: "mdi:battery-multiple"
+    lambda: 'return id(can_module_count);'
+
+  - platform: template
+    name: "CAN Status Byte 7"
+    accuracy_decimals: 0
+    icon: "mdi:information-outline"
+    entity_category: diagnostic
+    lambda: 'return id(can_status_byte7);'
+
+  - platform: template
     name: "Inverter Priority Change Attempts"
     accuracy_decimals: 0
     icon: "mdi:counter"
@@ -1879,6 +1980,78 @@ binary_sensor:
     name: "SOC Force Charge Active"
     icon: "mdi:battery-charging-100"
     lambda: 'return id(soc_control_enabled) && id(soc_force_charge_active);'
+
+  # CAN 0x359 Protection flags (decoded)
+  - platform: template
+    name: "CAN Protection Overvolt"
+    device_class: problem
+    lambda: 'return id(can_prot_overvolt);'
+
+  - platform: template
+    name: "CAN Protection Undervolt"
+    device_class: problem
+    lambda: 'return id(can_prot_undervolt);'
+
+  - platform: template
+    name: "CAN Protection Overtemp"
+    device_class: problem
+    lambda: 'return id(can_prot_overtemp);'
+
+  - platform: template
+    name: "CAN Protection Undertemp"
+    device_class: problem
+    lambda: 'return id(can_prot_undertemp);'
+
+  - platform: template
+    name: "CAN Protection Discharge Overcurrent"
+    device_class: problem
+    lambda: 'return id(can_prot_discharge_overcurrent);'
+
+  - platform: template
+    name: "CAN Protection Charge Overcurrent"
+    device_class: problem
+    lambda: 'return id(can_prot_charge_overcurrent);'
+
+  - platform: template
+    name: "CAN Protection System Error"
+    device_class: problem
+    lambda: 'return id(can_prot_system_error);'
+
+  # CAN 0x359 Warning flags (decoded)
+  - platform: template
+    name: "CAN Warning High Voltage"
+    icon: "mdi:flash"
+    lambda: 'return id(can_warn_high_voltage);'
+
+  - platform: template
+    name: "CAN Warning Low Voltage"
+    icon: "mdi:flash-outline"
+    lambda: 'return id(can_warn_low_voltage);'
+
+  - platform: template
+    name: "CAN Warning High Temp"
+    icon: "mdi:thermometer-high"
+    lambda: 'return id(can_warn_high_temp);'
+
+  - platform: template
+    name: "CAN Warning Low Temp"
+    icon: "mdi:thermometer-low"
+    lambda: 'return id(can_warn_low_temp);'
+
+  - platform: template
+    name: "CAN Warning High Discharge Current"
+    icon: "mdi:current-dc"
+    lambda: 'return id(can_warn_high_discharge_current);'
+
+  - platform: template
+    name: "CAN Warning High Charge Current"
+    icon: "mdi:current-dc"
+    lambda: 'return id(can_warn_high_charge_current);'
+
+  - platform: template
+    name: "CAN Warning Comms Fail"
+    device_class: problem
+    lambda: 'return id(can_warn_comms_fail);'
 
 select:
   - platform: template
@@ -2136,6 +2309,41 @@ text_sensor:
     id: sensor_flags
     name: "BMS Flags"
     icon: "mdi:flag"
+
+  - platform: template
+    name: "CAN Alarm Summary"
+    icon: "mdi:alert"
+    update_interval: 5s
+    lambda: |-
+      std::string alarms;
+
+      // Protection flags
+      if (id(can_prot_overvolt)) { if (!alarms.empty()) alarms += ","; alarms += "P:OV"; }
+      if (id(can_prot_undervolt)) { if (!alarms.empty()) alarms += ","; alarms += "P:UV"; }
+      if (id(can_prot_overtemp)) { if (!alarms.empty()) alarms += ","; alarms += "P:OT"; }
+      if (id(can_prot_undertemp)) { if (!alarms.empty()) alarms += ","; alarms += "P:UT"; }
+      if (id(can_prot_discharge_overcurrent)) { if (!alarms.empty()) alarms += ","; alarms += "P:DOC"; }
+      if (id(can_prot_charge_overcurrent)) { if (!alarms.empty()) alarms += ","; alarms += "P:COC"; }
+      if (id(can_prot_system_error)) { if (!alarms.empty()) alarms += ","; alarms += "P:SYS"; }
+
+      // Warning flags
+      if (id(can_warn_high_voltage)) { if (!alarms.empty()) alarms += ","; alarms += "W:HV"; }
+      if (id(can_warn_low_voltage)) { if (!alarms.empty()) alarms += ","; alarms += "W:LV"; }
+      if (id(can_warn_high_temp)) { if (!alarms.empty()) alarms += ","; alarms += "W:HT"; }
+      if (id(can_warn_low_temp)) { if (!alarms.empty()) alarms += ","; alarms += "W:LT"; }
+      if (id(can_warn_high_discharge_current)) { if (!alarms.empty()) alarms += ","; alarms += "W:HDI"; }
+      if (id(can_warn_high_charge_current)) { if (!alarms.empty()) alarms += ","; alarms += "W:HCI"; }
+      if (id(can_warn_comms_fail)) { if (!alarms.empty()) alarms += ","; alarms += "W:COMM"; }
+
+      // Add module count indicator if not all modules online
+      if (id(can_module_count) > 0 && id(can_module_count) < 3) {
+        char buf[16];
+        snprintf(buf, sizeof(buf), " [%d/3 mods]", id(can_module_count));
+        alarms += buf;
+      }
+
+      id(can_alarm_summary) = alarms.empty() ? "OK" : alarms;
+      return id(can_alarm_summary);
 
   - platform: template
     name: "Modbus Status (0x3127)"
