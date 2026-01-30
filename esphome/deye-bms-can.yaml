@@ -153,6 +153,10 @@ mqtt:
             id(last_cell_voltages)[i] = -1.0f;  // Reset to force publish on next update
         }
         
+        // Reset CAN tracking variables to force publish on next update
+        id(last_can_soc) = 0;
+        id(last_can_soh) = 0;
+
         // Reset RS485 tracking variables to force publish on next update
         id(last_stack_voltage) = -1.0f;
         id(last_stack_current) = -1.0f;
@@ -598,8 +602,15 @@ canbus:
               uint16_t soh = can_le_u16(x[2], x[3]);
 
               if (soc <= 100 && soh <= 100) {
-                id(sensor_soc).publish_state(soc);
-                id(sensor_soh).publish_state(soh);
+                // SOC and SOH with 1% hysteresis
+                if (id(last_can_soc) == 0 || abs(soc - id(last_can_soc)) >= 1) {
+                  id(sensor_soc).publish_state(soc);
+                  id(last_can_soc) = soc;
+                }
+                if (id(last_can_soh) == 0 || abs(soh - id(last_can_soh)) >= 1) {
+                  id(sensor_soh).publish_state(soh);
+                  id(last_can_soh) = soh;
+                }
               }
 
       # 0x359: Protection & Alarm Flags (Pylontech V1.2)
@@ -781,6 +792,14 @@ globals:
   - id: last_cell_voltages
     type: std::vector<float>
     restore_value: no
+
+  # CAN hysteresis tracking - prevent excessive MQTT updates
+  - id: last_can_soc
+    type: uint16_t
+    initial_value: '0'
+  - id: last_can_soh
+    type: uint16_t
+    initial_value: '0'
 
   # RS485 hysteresis tracking - prevent excessive MQTT updates
   - id: last_stack_voltage
