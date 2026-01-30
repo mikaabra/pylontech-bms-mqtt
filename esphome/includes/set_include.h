@@ -113,11 +113,16 @@ inline void can_track_frame(uint32_t can_id, bool received) {
 
 // Handle CAN stale state recovery
 // Checks if CAN was stale and recovers if data is flowing again
-inline void can_handle_stale_recovery(bool& can_stale, mqtt::MQTTClientComponent* mqtt_client, const char* can_prefix) {
+// Note: Caller should update last_can_status_online tracking variable separately
+inline void can_handle_stale_recovery(bool& can_stale, mqtt::MQTTClientComponent* mqtt_client, const char* can_prefix, bool& last_status_online) {
     if (can_stale && mqtt_client) {
         can_stale = false;
-        ESP_LOGI("can", "CAN data resumed, marking online");
-        mqtt_client->publish(std::string(can_prefix) + "/status", std::string("online"), (uint8_t)0, true);
+        // Only publish if status actually changed
+        if (!last_status_online) {
+            ESP_LOGI("can", "CAN data resumed, marking online");
+            mqtt_client->publish(std::string(can_prefix) + "/status", std::string("online"), (uint8_t)0, true);
+            last_status_online = true;
+        }
     }
 }
 

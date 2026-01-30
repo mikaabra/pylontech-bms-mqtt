@@ -130,40 +130,43 @@ mqtt:
 
   on_connect:
     - lambda: |-
-        // Publish RS485 availability
-        id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
-        ESP_LOGI("mqtt", "Connected, published availability");
-        
+        ESP_LOGI("mqtt", "MQTT connected");
+
+        // Track status transition - publish availability on connect
+        if (!id(last_can_status_online)) {
+          id(mqtt_client).publish(std::string("${can_prefix}/status"), std::string("online"), (uint8_t)0, true);
+          id(last_can_status_online) = true;
+        }
+        if (!id(last_rs485_status_online)) {
+          id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
+          id(last_rs485_status_online) = true;
+        }
+
         // Publish initial state of CAN sensors on connect to ensure Home Assistant gets current values
-        // This prevents "Unknown" state in HA when the device reconnects
         id(sensor_can_module_count).publish_state(id(can_module_count));
         id(sensor_can_status_byte7).publish_state(id(can_status_byte7));
         id(sensor_can_alarm_summary).publish_state(id(can_alarm_summary));
         id(sensor_can_frame_count).publish_state(id(can_frame_count));
         id(sensor_can_error_count).publish_state(id(can_error_count));
-        
+
         // Update tracking variables to current values
         id(last_module_count) = id(can_module_count);
         id(last_status_byte7) = id(can_status_byte7);
         id(last_alarm_summary) = id(can_alarm_summary);
-        
-        // Publish initial cell voltages on connect (force republish to ensure HA has current values)
+
         // Reset tracking to force next publish
-        for (int i = 0; i < id(last_cell_voltages).size(); i++) {
-            id(last_cell_voltages)[i] = -1.0f;  // Reset to force publish on next update
+        for (size_t i = 0; i < id(last_cell_voltages).size(); i++) {
+            id(last_cell_voltages)[i] = -1.0f;
         }
-        
-        // Reset CAN tracking variables to force publish on next update
+
         id(last_can_soc) = 0;
         id(last_can_soh) = 0;
-
-        // Reset RS485 tracking variables to force publish on next update
         id(last_stack_voltage) = -1.0f;
         id(last_stack_current) = -1.0f;
         id(last_stack_cell_min) = -1.0f;
         id(last_stack_cell_max) = -1.0f;
         id(last_stack_cell_delta) = -1.0f;
-        
+
         for (int i = 0; i < ${num_batteries}; i++) {
             id(last_batt_voltages)[i] = -1.0f;
             id(last_batt_currents)[i] = -1.0f;
@@ -188,13 +191,45 @@ mqtt:
             id(last_batt_cell_delta)[i] = -1.0f;
         }
 
+        // Only publish HA Discovery once per boot (not on every reconnect)
+        if (id(discovery_sent)) {
+          ESP_LOGI("mqtt", "Discovery already sent this boot, skipping");
+          return;
+        }
+
+        ESP_LOGI("mqtt", "Publishing HA Discovery configs (once per boot)...");
+
         // Publish HA Discovery configs
         // Device info shared by all entities
         const char* device_json = R"("device":{"identifiers":["pylontech_rs485"],"name":"Pylontech RS485","manufacturer":"Pylontech","model":"BMS RS485"})";
         const char* avail_json = R"("availability_topic":"${rs485_prefix}/status","payload_available":"online","payload_not_available":"offline")";
 
-        char topic[128];
-        char payload[512];
+        // Increased buffer sizes for safety
+        char topic[160];
+        char payload[768];
+        int publish_count = 0;
+        static bool truncation_warned = false;
+
+        // Helper macro: check snprintf result and skip if truncated
+        #define SAFE_SNPRINTF(buf, sz, ...) do { \
+          int ret = snprintf(buf, sz, __VA_ARGS__); \
+          if (ret >= (int)(sz)) { \
+            if (!truncation_warned) { \
+              ESP_LOGW("mqtt", "Discovery payload truncated, skipping (buffer=%d, needed=%d)", (int)(sz), ret); \
+              truncation_warned = true; \
+            } \
+            continue; \
+          } \
+        } while(0)
+
+        // Helper macro: pace publishes with yield every 20
+        #define PACE_PUBLISH() do { \
+          publish_count++; \
+          if (publish_count % 20 == 0) { \
+            delay(10); \
+            App.feed_wdt(); \
+          } \
+        } while(0)
 
         // Stack sensors
         const char* stack_sensors[][5] = {
@@ -215,33 +250,36 @@ mqtt:
         for (int i = 0; i < 12; i++) {
           snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", stack_sensors[i][0]);
           if (strlen(stack_sensors[i][3]) > 0 && strlen(stack_sensors[i][4]) > 0) {
-            snprintf(payload, sizeof(payload),
+            SAFE_SNPRINTF(payload, sizeof(payload),
               R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
               stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], stack_sensors[i][4], avail_json, device_json);
           } else if (strlen(stack_sensors[i][3]) > 0) {
-            snprintf(payload, sizeof(payload),
+            SAFE_SNPRINTF(payload, sizeof(payload),
               R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
               stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], avail_json, device_json);
           } else {
-            snprintf(payload, sizeof(payload),
+            SAFE_SNPRINTF(payload, sizeof(payload),
               R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s",%s,%s})",
               stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], avail_json, device_json);
           }
           id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+          PACE_PUBLISH();
         }
 
         // Stack binary sensors
         snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/stack_balancing_active/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"Stack Balancing Active","state_topic":"${rs485_prefix}/stack/balancing_active","unique_id":"pylontech_rs485_stack_balancing_active","payload_on":"1","payload_off":"0","icon":"mdi:scale-balance",%s,%s})",
           avail_json, device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/stack_overvolt_active/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"Stack Overvolt Active","state_topic":"${rs485_prefix}/stack/overvolt_active","unique_id":"pylontech_rs485_stack_overvolt_active","payload_on":"1","payload_off":"0","icon":"mdi:flash-alert",%s,%s})",
           avail_json, device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         // Per-battery discovery
         for (int batt = 0; batt < ${num_batteries}; batt++) {
@@ -282,19 +320,20 @@ mqtt:
 
             snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
             if (strlen(batt_sensor_names[i][2]) > 0 && strlen(batt_sensor_names[i][3]) > 0) {
-              snprintf(payload, sizeof(payload),
+              SAFE_SNPRINTF(payload, sizeof(payload),
                 R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
                 name, st, obj_id, batt_sensor_names[i][2], batt_sensor_names[i][3], avail_json, device_json);
             } else if (strlen(batt_sensor_names[i][2]) > 0) {
-              snprintf(payload, sizeof(payload),
+              SAFE_SNPRINTF(payload, sizeof(payload),
                 R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
                 name, st, obj_id, batt_sensor_names[i][2], avail_json, device_json);
             } else {
-              snprintf(payload, sizeof(payload),
+              SAFE_SNPRINTF(payload, sizeof(payload),
                 R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s",%s,%s})",
                 name, st, obj_id, avail_json, device_json);
             }
             id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            PACE_PUBLISH();
           }
 
           // Battery binary sensors
@@ -314,10 +353,11 @@ mqtt:
             snprintf(st, sizeof(st), "%s/%s", state_prefix, batt_binary_names[i][0]);
 
             snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", obj_id);
-            snprintf(payload, sizeof(payload),
+            SAFE_SNPRINTF(payload, sizeof(payload),
               R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","payload_on":"1","payload_off":"0",%s,%s})",
               name, st, obj_id, avail_json, device_json);
             id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            PACE_PUBLISH();
           }
 
           // Individual cell voltages
@@ -328,10 +368,11 @@ mqtt:
             snprintf(st, sizeof(st), "%s/cell%02d", state_prefix, cell);
 
             snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
-            snprintf(payload, sizeof(payload),
+            SAFE_SNPRINTF(payload, sizeof(payload),
               R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"V","device_class":"voltage","state_class":"measurement","suggested_display_precision":3,%s,%s})",
               name, st, obj_id, avail_json, device_json);
             id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            PACE_PUBLISH();
           }
 
           // Temperature sensors
@@ -342,10 +383,11 @@ mqtt:
             snprintf(st, sizeof(st), "%s/temp%d", state_prefix, temp);
 
             snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
-            snprintf(payload, sizeof(payload),
+            SAFE_SNPRINTF(payload, sizeof(payload),
               R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"°C","device_class":"temperature","state_class":"measurement",%s,%s})",
               name, st, obj_id, avail_json, device_json);
             id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            PACE_PUBLISH();
           }
 
           // Poll alarm binary sensor (RS485 communication failure detection)
@@ -356,10 +398,11 @@ mqtt:
             snprintf(st, sizeof(st), "%s/poll_alarm", state_prefix);
 
             snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", obj_id);
-            snprintf(payload, sizeof(payload),
+            SAFE_SNPRINTF(payload, sizeof(payload),
               R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","device_class":"problem","payload_on":"ON","payload_off":"OFF","icon":"mdi:lan-disconnect",%s,%s})",
               name, st, obj_id, avail_json, device_json);
             id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            PACE_PUBLISH();
           }
         }
 
@@ -371,55 +414,63 @@ mqtt:
 
         // CAN binary sensors (charge/discharge control from 0x35C)
         snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_charge_enabled/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"CAN Charge Enabled","state_topic":"${can_prefix}/can/charge_enabled","unique_id":"deye_bms_can_charge_enabled","payload_on":"1","payload_off":"0","icon":"mdi:battery-charging",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_discharge_enabled/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"CAN Discharge Enabled","state_topic":"${can_prefix}/can/discharge_enabled","unique_id":"deye_bms_can_discharge_enabled","payload_on":"1","payload_off":"0","icon":"mdi:battery-minus",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_force_charge/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"CAN Force Charge Request","state_topic":"${can_prefix}/can/force_charge","unique_id":"deye_bms_can_force_charge","payload_on":"1","payload_off":"0","icon":"mdi:battery-alert",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         // CAN diagnostic sensors
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_frame_count/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"CAN Frame Count","state_topic":"${can_prefix}/diag/frame_count","unique_id":"deye_bms_can_frame_count","icon":"mdi:counter","entity_category":"diagnostic",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_error_count/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"CAN Error Count","state_topic":"${can_prefix}/diag/error_count","unique_id":"deye_bms_can_error_count","icon":"mdi:alert-circle","entity_category":"diagnostic",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         // CAN 0x359 module count and status sensors
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_module_count/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"CAN Module Count","state_topic":"${can_prefix}/can/module_count","unique_id":"deye_bms_can_module_count","icon":"mdi:battery-multiple",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_status_byte7/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"CAN Status Byte 7","state_topic":"${can_prefix}/can/status_byte7","unique_id":"deye_bms_can_status_byte7","icon":"mdi:information-outline","entity_category":"diagnostic",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         // CAN alarm summary text sensor
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_alarm_summary/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"CAN Alarm Summary","state_topic":"${can_prefix}/can/alarm_summary","unique_id":"deye_bms_can_alarm_summary","icon":"mdi:alert",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         // CAN 0x359 protection binary sensors (device_class: problem)
         const char* prot_sensors[][3] = {
@@ -433,10 +484,11 @@ mqtt:
         };
         for (int i = 0; i < 7; i++) {
           snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_%s/config", prot_sensors[i][0]);
-          snprintf(payload, sizeof(payload),
+          SAFE_SNPRINTF(payload, sizeof(payload),
             R"({"name":"%s","state_topic":"${can_prefix}/can/%s","unique_id":"deye_bms_can_%s","device_class":"problem","payload_on":"1","payload_off":"0","icon":"%s",%s,%s})",
             prot_sensors[i][1], prot_sensors[i][0], prot_sensors[i][0], prot_sensors[i][2], can_avail_json, can_device_json);
           id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+          PACE_PUBLISH();
         }
 
         // CAN 0x359 warning binary sensors
@@ -453,30 +505,33 @@ mqtt:
           snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_%s/config", warn_sensors[i][0]);
           // warn_comms_fail gets device_class: problem, others don't
           if (i == 6) {
-            snprintf(payload, sizeof(payload),
+            SAFE_SNPRINTF(payload, sizeof(payload),
               R"({"name":"%s","state_topic":"${can_prefix}/can/%s","unique_id":"deye_bms_can_%s","device_class":"problem","payload_on":"1","payload_off":"0","icon":"%s",%s,%s})",
               warn_sensors[i][1], warn_sensors[i][0], warn_sensors[i][0], warn_sensors[i][2], can_avail_json, can_device_json);
           } else {
-            snprintf(payload, sizeof(payload),
+            SAFE_SNPRINTF(payload, sizeof(payload),
               R"({"name":"%s","state_topic":"${can_prefix}/can/%s","unique_id":"deye_bms_can_%s","payload_on":"1","payload_off":"0","icon":"%s",%s,%s})",
               warn_sensors[i][1], warn_sensors[i][0], warn_sensors[i][0], warn_sensors[i][2], can_avail_json, can_device_json);
           }
           id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+          PACE_PUBLISH();
         }
 
         // CAN main sensors (SOC, SOH, limits, extremes)
         // SOC and SOH
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soc/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"BMS SOC","state_topic":"${can_prefix}/soc","unique_id":"deye_bms_can_soc","unit_of_measurement":"%%","device_class":"battery","state_class":"measurement",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soh/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"BMS SOH","state_topic":"${can_prefix}/soh","unique_id":"deye_bms_can_soh","unit_of_measurement":"%%","icon":"mdi:battery-heart-variant","state_class":"measurement",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         // Charge/discharge limits
         const char* limit_sensors[][4] = {
@@ -487,10 +542,11 @@ mqtt:
         };
         for (int i = 0; i < 4; i++) {
           snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_%s/config", limit_sensors[i][0]);
-          snprintf(payload, sizeof(payload),
+          SAFE_SNPRINTF(payload, sizeof(payload),
             R"({"name":"%s","state_topic":"${can_prefix}/limit/%s","unique_id":"deye_bms_can_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
             limit_sensors[i][1], limit_sensors[i][0], limit_sensors[i][0], limit_sensors[i][2], limit_sensors[i][3], can_avail_json, can_device_json);
           id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+          PACE_PUBLISH();
         }
 
         // Cell voltage and temperature extremes
@@ -503,27 +559,32 @@ mqtt:
         };
         for (int i = 0; i < 5; i++) {
           snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_%s/config", ext_sensors[i][0]);
-          snprintf(payload, sizeof(payload),
+          SAFE_SNPRINTF(payload, sizeof(payload),
             R"({"name":"%s","state_topic":"${can_prefix}/ext/%s","unique_id":"deye_bms_can_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
             ext_sensors[i][1], ext_sensors[i][0], ext_sensors[i][0], ext_sensors[i][2], ext_sensors[i][3], can_avail_json, can_device_json);
           id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+          PACE_PUBLISH();
         }
 
         // Raw flags text sensor
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_flags/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"BMS Flags Raw","state_topic":"${can_prefix}/flags","unique_id":"deye_bms_can_flags","icon":"mdi:flag","entity_category":"diagnostic",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
         // Free heap diagnostic
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_free_heap/config");
-        snprintf(payload, sizeof(payload),
+        SAFE_SNPRINTF(payload, sizeof(payload),
           R"({"name":"ESP Free Heap","state_topic":"${can_prefix}/diag/free_heap","unique_id":"deye_bms_can_free_heap","unit_of_measurement":"bytes","icon":"mdi:memory","entity_category":"diagnostic",%s,%s})",
           can_avail_json, can_device_json);
         id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+        PACE_PUBLISH();
 
-        ESP_LOGI("mqtt", "Published HA discovery configs for CAN sensors");
+        // Mark discovery as sent - won't be repeated on reconnect
+        id(discovery_sent) = true;
+        ESP_LOGI("mqtt", "HA discovery complete (%d publishes)", publish_count);
 
 ota:
   - platform: esphome
@@ -568,7 +629,7 @@ canbus:
               can_track_frame(0x351, true);
               
               // Check for recovery from stale state
-              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}");
+              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}", id(last_can_status_online));
 
               float v_charge_max = can_le_u16(x[0], x[1]) / 10.0f;
               float i_charge_lim = can_le_u16(x[2], x[3]) / 10.0f;
@@ -596,7 +657,7 @@ canbus:
               can_track_frame(0x355, true);
               
               // Check for recovery from stale state
-              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}");
+              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}", id(last_can_status_online));
 
               uint16_t soc = can_le_u16(x[0], x[1]);
               uint16_t soh = can_le_u16(x[2], x[3]);
@@ -629,7 +690,7 @@ canbus:
               can_track_frame(0x359, true);
 
               // Check for recovery from stale state
-              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}");
+              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}", id(last_can_status_online));
 
               uint64_t flags = 0;
               for (int i = 7; i >= 0; i--) {
@@ -701,7 +762,7 @@ canbus:
               can_track_frame(0x370, true);
               
               // Check for recovery from stale state
-              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}");
+              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}", id(last_can_status_online));
 
               float t1 = can_le_u16(x[0], x[1]) / 10.0f;
               float t2 = can_le_u16(x[2], x[3]) / 10.0f;
@@ -748,7 +809,7 @@ canbus:
               can_track_frame(0x35C, true);
               
               // Check for recovery from stale state
-              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}");
+              can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}", id(last_can_status_online));
 
               uint8_t flags = x[0];
 
@@ -772,6 +833,51 @@ canbus:
 
 # Global variables
 globals:
+  # HA Discovery publish tracking - only publish once per boot
+  - id: discovery_sent
+    type: bool
+    initial_value: 'false'
+
+  # Availability status tracking - publish only on transitions
+  - id: last_can_status_online
+    type: bool
+    initial_value: 'false'
+  - id: last_rs485_status_online
+    type: bool
+    initial_value: 'false'
+  - id: last_status_heartbeat
+    type: uint32_t
+    initial_value: '0'
+
+  # RS485 non-blocking state machine
+  # States: 0=IDLE, 1=SEND_ANALOG, 2=WAIT_ANALOG, 3=PARSE_ANALOG,
+  #         4=SEND_ALARM, 5=WAIT_ALARM, 6=PARSE_ALARM
+  - id: rs485_state
+    type: int
+    initial_value: '0'
+  - id: rs485_tx_time
+    type: uint32_t
+    initial_value: '0'
+  - id: rs485_current_batt
+    type: int
+    initial_value: '0'
+  - id: rs485_alarm_batt
+    type: int
+    initial_value: '0'
+  - id: rs485_response_buf
+    type: std::string
+    restore_value: no
+  - id: rs485_last_analog_poll
+    type: uint32_t
+    initial_value: '0'
+  - id: rs485_last_alarm_poll
+    type: uint32_t
+    initial_value: '0'
+  # RS485 sensor heartbeat - force republish every 5 minutes to prevent HA "Unknown"
+  - id: rs485_last_heartbeat
+    type: uint32_t
+    initial_value: '0'
+
   # Logger level tracking
   - id: logger_level
     type: std::string
@@ -1134,16 +1240,32 @@ globals:
 
 # Intervals for stale detection and RS485 polling
 interval:
-  # CAN stale detection
+  # CAN stale detection and availability heartbeat
   - interval: 5s
     then:
       - lambda: |-
           uint32_t now = millis();
           uint32_t elapsed = now - id(last_can_rx);
+
+          // Stale detection: mark offline after 30s of no CAN frames
           if (elapsed > 30000 && !id(can_stale) && id(last_can_rx) > 0) {
             id(can_stale) = true;
             ESP_LOGW("can", "No CAN data for 30s, marking stale");
-            id(mqtt_client).publish(std::string("${can_prefix}/status"), std::string("offline"), (uint8_t)0, true);
+            // Only publish if status actually changed
+            if (id(last_can_status_online)) {
+              id(mqtt_client).publish(std::string("${can_prefix}/status"), std::string("offline"), (uint8_t)0, true);
+              id(last_can_status_online) = false;
+            }
+          }
+
+          // Availability heartbeat: publish online every 10 minutes (if not stale)
+          if (!id(can_stale) && id(last_can_rx) > 0) {
+            if (now - id(last_status_heartbeat) >= 600000) {  // 10 minutes
+              id(mqtt_client).publish(std::string("${can_prefix}/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
+              id(last_status_heartbeat) = now;
+              ESP_LOGD("mqtt", "Availability heartbeat published");
+            }
           }
 
   # CAN charge/discharge flags and diagnostics publishing
@@ -1271,7 +1393,7 @@ interval:
             id(last_can_decoded_publish) = now;
           }
 
-  # RS485 stale detection and availability
+  # RS485 stale detection (no periodic online spam - heartbeat is in CAN interval)
   - interval: 30s
     then:
       - lambda: |-
@@ -1281,491 +1403,354 @@ interval:
           if (elapsed > 90000 && !id(rs485_stale) && id(last_rs485_rx) > 0) {
             id(rs485_stale) = true;
             ESP_LOGW("rs485", "No RS485 data for 90s, marking stale");
-            id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("offline"), (uint8_t)0, true);
-          }
-          // Republish current status periodically
-          if (!id(rs485_stale)) {
-            id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
+            // Only publish if status actually changed
+            if (id(last_rs485_status_online)) {
+              id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("offline"), (uint8_t)0, true);
+              id(last_rs485_status_online) = false;
+            }
           }
 
-  # RS485 analog data polling - cycle through batteries
-  - interval: 10s
+  # RS485 non-blocking state machine (50ms tick)
+  # States: 0=IDLE, 1=SEND_ANALOG, 2=WAIT_RX, 3=SEND_ALARM, 4=WAIT_ALARM_RX
+  - interval: 50ms
     then:
       - lambda: |-
-          // Prevent overlapping RS485 transactions (10s/30s polls)
-          if (id(rs485_busy)) {
-            ESP_LOGW("rs485", "BUSY: skipping RS485 poll (another transaction in progress)");
-            return;
+          const int ADDR = ${pylontech_addr};
+          const int NUM_BATT = ${num_batteries};
+          uint32_t now = millis();
+
+          // State machine
+          switch (id(rs485_state)) {
+
+          case 0: {  // IDLE - check if time for next poll
+            // Analog poll every 10s (one battery per cycle)
+            if (now - id(rs485_last_analog_poll) >= 10000) {
+              id(rs485_state) = 1;  // SEND_ANALOG
+            }
+            // Alarm poll every 30s (all batteries in sequence)
+            else if (now - id(rs485_last_alarm_poll) >= 30000) {
+              id(rs485_alarm_batt) = 0;  // Start from battery 0
+              id(rs485_state) = 3;  // SEND_ALARM
+            }
+            break;
           }
-          Rs485BusyGuard _rs485_guard(id(rs485_busy));
 
-          int batt = id(rs485_poll_battery);
-          int addr = ${pylontech_addr};
+          case 1: {  // SEND_ANALOG - send command
+            int batt = id(rs485_current_batt);
 
-          // Send analog data request (CID2=0x42)
-          std::string cmd = rs485_make_cmd(addr, 0x42, batt);
-          ESP_LOGD("rs485", "TX analog batt %d", batt);
-
-          // Clear RX buffer
-          while (id(rs485_uart).available()) {
-            uint8_t c;
-            id(rs485_uart).read_byte(&c);
-          }
-
-          ESP_LOGD("rs485", "TX: %s", cmd.c_str());
-
-          for (char c : cmd) {
-            id(rs485_uart).write_byte((uint8_t)c);
-          }
-          id(rs485_uart).flush();
-
-          // Wait for transmission to complete (at 9600 baud, ~1ms per byte)
-          delay(20);
-
-          id(rs485_poll_battery) = (batt + 1) % ${num_batteries};
-
-          // Wait for response
-          delay(300);
-
-          // Read response (frame-based: wait for '\r')
-          std::string response;
-          response.reserve(600);
-          uint32_t start_ms = millis();
-          bool got_eof = false;
-          while (millis() - start_ms < 1200) {
+            // Clear RX buffer
             while (id(rs485_uart).available()) {
-              uint8_t c;
-              id(rs485_uart).read_byte(&c);
-              response += (char)c;
-              if (c == '\r') { got_eof = true; break; }
-            }
-            if (got_eof) break;
-            delay(5);
-          }
-          // Trim leading garbage until start marker '~' (if present)
-          auto tilde = response.find('~');
-          if (tilde != std::string::npos) response = response.substr(tilde);
-          ESP_LOGD("rs485", "RX len=%d: %s", response.length(), response.c_str());
-          
-          // Detailed response analysis for debugging
-          if (response.length() >= 18) {
-            std::string error_code = response.substr(7, 2);
-            ESP_LOGD("rs485", "Response error code: %s (00=success, 02=invalid cmd, etc.)", error_code.c_str());
-            if (error_code != "00") {
-              ESP_LOGW("rs485", "BMS returned error code %s for command: %s", error_code.c_str(), cmd.c_str());
-            }
-          }
-
-          // Helper to handle poll failure for this battery
-          auto handle_poll_failure = [&batt](const char* reason) {
-            ESP_LOGW("rs485", "Batt %d poll failed: %s", batt, reason);
-            id(batt_poll_failures)[batt]++;
-            if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
-              id(batt_poll_alarm)[batt] = true;
-              ESP_LOGW("rs485", "POLL ALARM: Battery %d not responding (10 consecutive failures)", batt);
-              char topic[64];
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
-              id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
-            }
-          };
-
-          // Validate response (checks length, error code, address, and checksum)
-          std::string error = rs485_validate_response(response, addr);
-          if (!error.empty()) {
-            handle_poll_failure(error.c_str());
-            return;
-          }
-
-          // Success! Reset poll failure counter and clear alarm if set
-          if (id(batt_poll_failures)[batt] > 0 || id(batt_poll_alarm)[batt]) {
-            id(batt_poll_failures)[batt] = 0;
-            if (id(batt_poll_alarm)[batt]) {
-              id(batt_poll_alarm)[batt] = false;
-              ESP_LOGI("rs485", "Poll alarm cleared for battery %d", batt);
-              char topic[64];
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
-              id(mqtt_client).publish(std::string(topic), std::string("OFF"), (uint8_t)0, true);
-            }
-          }
-
-          // Mark as not stale
-          id(last_rs485_rx) = millis();
-          if (id(rs485_stale)) {
-            id(rs485_stale) = false;
-            id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
-            ESP_LOGI("rs485", "RS485 data received, marking online");
-          }
-
-          // Extract INFO data (batt variable already set at start of lambda)
-          std::string data = response.substr(13, response.length() - 13 - 5);
-
-          size_t i = 0;
-
-          // Skip header (4 chars)
-          if (data.length() < 6) return;
-          i += 4;
-
-          // Number of cells
-          int num_cells = strtol(data.substr(i, 2).c_str(), nullptr, 16);
-          i += 2;
-
-          // Cell voltages
-          for (int cell = 0; cell < num_cells && cell < 16; cell++) {
-            if (data.length() < i + 4) break;
-            int mv = strtol(data.substr(i, 4).c_str(), nullptr, 16);
-            id(cell_voltages)[batt * 16 + cell] = mv / 1000.0f;
-            i += 4;
-          }
-
-          // Number of temps
-          if (data.length() < i + 2) return;
-          int num_temps = strtol(data.substr(i, 2).c_str(), nullptr, 16);
-          i += 2;
-
-          // Temperatures (Kelvin * 10 - 2731 = Celsius * 10)
-          for (int t = 0; t < num_temps && t < 6; t++) {
-            if (data.length() < i + 4) break;
-            int raw = strtol(data.substr(i, 4).c_str(), nullptr, 16);
-            id(cell_temps)[batt * 6 + t] = (raw - 2731) / 10.0f;
-            i += 4;
-          }
-
-          // Current (signed, 10mA units)
-          if (data.length() >= i + 4) {
-            int raw = strtol(data.substr(i, 4).c_str(), nullptr, 16);
-            if (raw > 0x7FFF) raw -= 0x10000;
-            id(batt_current)[batt] = raw / 100.0f;
-            i += 4;
-          }
-
-          // Voltage (10mV units, same as current)
-          if (data.length() >= i + 4) {
-            id(batt_voltage)[batt] = strtol(data.substr(i, 4).c_str(), nullptr, 16) / 100.0f;
-            i += 4;
-          }
-
-          // Remaining capacity (10mAh)
-          if (data.length() >= i + 4) {
-            id(batt_remain_ah)[batt] = strtol(data.substr(i, 4).c_str(), nullptr, 16) / 100.0f;
-            i += 4;
-          }
-
-          // Skip custom byte
-          i += 2;
-
-          // Total capacity (10mAh)
-          if (data.length() >= i + 4) {
-            id(batt_total_ah)[batt] = strtol(data.substr(i, 4).c_str(), nullptr, 16) / 100.0f;
-            i += 4;
-          }
-
-          // Cycles
-          if (data.length() >= i + 4) {
-            id(batt_cycles)[batt] = strtol(data.substr(i, 4).c_str(), nullptr, 16);
-          }
-
-          // Calculate SOC
-          if (id(batt_total_ah)[batt] > 0) {
-            id(batt_soc)[batt] = (id(batt_remain_ah)[batt] / id(batt_total_ah)[batt]) * 100.0f;
-          }
-
-          ESP_LOGI("rs485", "Batt %d: %.3fV %.2fA SOC=%.0f%% cycles=%d",
-                   batt, id(batt_voltage)[batt], id(batt_current)[batt],
-                   id(batt_soc)[batt], id(batt_cycles)[batt]);
-
-  # RS485 alarm/balancing polling
-  - interval: 30s
-    then:
-      - lambda: |-
-          // Prevent overlapping RS485 transactions (10s/30s polls)
-          if (id(rs485_busy)) {
-            ESP_LOGW("rs485", "BUSY: skipping RS485 poll (another transaction in progress)");
-            return;
-          }
-          Rs485BusyGuard _rs485_guard(id(rs485_busy));
-
-          int addr = ${pylontech_addr};
-          int total_balancing = 0;
-          int total_overvolt = 0;
-          std::set<std::string> all_alarms;
-
-          // Helper to handle poll failure for a battery
-          auto handle_poll_failure = [](int batt, const char* reason) {
-            ESP_LOGW("rs485", "Batt %d alarm poll failed: %s", batt, reason);
-            id(batt_poll_failures)[batt]++;
-            if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
-              id(batt_poll_alarm)[batt] = true;
-              ESP_LOGW("rs485", "POLL ALARM: Battery %d not responding (10 consecutive failures)", batt);
-              char topic[64];
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
-              id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
-            }
-          };
-
-          // Helper to handle poll success for a battery
-          auto handle_poll_success = [](int batt) {
-            if (id(batt_poll_failures)[batt] > 0 || id(batt_poll_alarm)[batt]) {
-              id(batt_poll_failures)[batt] = 0;
-              if (id(batt_poll_alarm)[batt]) {
-                id(batt_poll_alarm)[batt] = false;
-                ESP_LOGI("rs485", "Poll alarm cleared for battery %d", batt);
-                char topic[64];
-                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
-                id(mqtt_client).publish(std::string(topic), std::string("OFF"), (uint8_t)0, true);
-              }
-            }
-          };
-
-          for (int batt = 0; batt < ${num_batteries}; batt++) {
-            // Clear buffer
-            while (id(rs485_uart).available()) {
-              uint8_t c;
-              id(rs485_uart).read_byte(&c);
+              uint8_t c; id(rs485_uart).read_byte(&c);
             }
 
-            // Send alarm request (CID2=0x44)
-            std::string cmd = rs485_make_cmd(addr, 0x44, batt);
-            ESP_LOGD("rs485", "TX alarm batt %d", batt);
-            ESP_LOGD("rs485", "TX: %s", cmd.c_str());
+            std::string cmd = rs485_make_cmd(ADDR, 0x42, batt);
+            ESP_LOGD("rs485", "TX analog batt %d: %s", batt, cmd.c_str());
 
             for (char c : cmd) {
               id(rs485_uart).write_byte((uint8_t)c);
             }
             id(rs485_uart).flush();
 
-            // Wait for transmission to complete (at 9600 baud, ~1ms per byte)
-            delay(20);
-
-            delay(300);
-
-            // Read response (frame-based: wait for '\r')
-            std::string response;
-            response.reserve(600);
-            uint32_t start_ms = millis();
-            bool got_eof = false;
-            while (millis() - start_ms < 1200) {
-              while (id(rs485_uart).available()) {
-                uint8_t c;
-                id(rs485_uart).read_byte(&c);
-                response += (char)c;
-                if (c == '\r') { got_eof = true; break; }
-              }
-              if (got_eof) break;
-              delay(5);
-            }
-            // Trim leading garbage until start marker '~' (if present)
-            auto tilde = response.find('~');
-            if (tilde != std::string::npos) response = response.substr(tilde);
-            ESP_LOGD("rs485", "RX alarm len=%d: %s", response.length(), response.c_str());
-            
-            // Detailed response analysis for debugging
-            if (response.length() >= 18) {
-              std::string error_code = response.substr(7, 2);
-              ESP_LOGD("rs485", "Alarm response error code: %s", error_code.c_str());
-              if (error_code != "00") {
-                ESP_LOGW("rs485", "BMS returned alarm error %s for command: %s", error_code.c_str(), cmd.c_str());
-              }
-            }
-
-            // Validate response (checks length, error code, address, and checksum)
-            std::string error = rs485_validate_response(response, addr);
-            if (!error.empty()) {
-              ESP_LOGW("rs485", "Alarm poll validation failed: %s. Response: %s", error.c_str(), response.c_str());
-              handle_poll_failure(batt, error.c_str());
-              continue;
-            }
-
-            handle_poll_success(batt);
-
-            std::string data = response.substr(13, response.length() - 13 - 5);
-            if (data.length() < 40) continue;
-
-            // Parse: skip info_flag(2), battery(2), get num_cells(2)
-            int num_cells = strtol(data.substr(4, 2).c_str(), nullptr, 16);
-
-            // Cell status bytes (0x00=normal, 0x01=undervolt, 0x02=overvolt)
-            // Note: Balance flags are NOT in per-cell bytes - they're in status bytes 9-10
-            std::set<std::string> batt_warnings_set;
-            std::set<std::string> batt_alarms_set;
-            int overvolt_count = 0;
-            std::string ov_cells_str;
-
-            for (int c = 0; c < num_cells && c < 16; c++) {
-              int pos = 6 + c * 2;
-              if (pos + 2 <= (int)data.length()) {
-                int status = strtol(data.substr(pos, 2).c_str(), nullptr, 16);
-                // Cell undervolt is an alarm, overvolt at 100% SOC is just a warning
-                if (status == 0x01) { batt_alarms_set.insert("cell_undervolt"); all_alarms.insert("cell_undervolt"); }
-                if (status == 0x02) {
-                  batt_warnings_set.insert("cell_overvolt");
-                  overvolt_count++;
-                  if (!ov_cells_str.empty()) ov_cells_str += ",";
-                  ov_cells_str += std::to_string(c + 1);
-                }
-              }
-            }
-            id(batt_overvolt_count)[batt] = overvolt_count;
-            id(batt_overvolt_cells)[batt] = ov_cells_str;
-            total_overvolt += overvolt_count;
-
-            // Temperature status
-            int temp_pos = 6 + num_cells * 2;
-            if (temp_pos + 2 <= (int)data.length()) {
-              int num_temps = strtol(data.substr(temp_pos, 2).c_str(), nullptr, 16);
-              int t_start = temp_pos + 2;
-              for (int t = 0; t < num_temps; t++) {
-                int pos = t_start + t * 2;
-                if (pos + 2 <= (int)data.length()) {
-                  int status = strtol(data.substr(pos, 2).c_str(), nullptr, 16);
-                  if (status == 0x01) { batt_alarms_set.insert("undertemp"); all_alarms.insert("undertemp"); }
-                  if (status == 0x02) { batt_alarms_set.insert("overtemp"); all_alarms.insert("overtemp"); }
-                }
-              }
-
-              // Status bytes start after temp status bytes
-              // Structure: Current(1) + PackVolt(1) + ExtBitCount(1) + ExtBit data
-              int status_pos = t_start + num_temps * 2;
-              int ext_bit_start = status_pos + 6;  // Skip Current + PackVolt + Count (3 bytes = 6 hex chars)
-
-              // Byte 0-1: Current/voltage status (before Ext_Bit section)
-              if (status_pos + 2 <= (int)data.length()) {
-                int charge_current = strtol(data.substr(status_pos, 2).c_str(), nullptr, 16);
-                if (charge_current == 0x02) { batt_alarms_set.insert("charge_overcurrent"); all_alarms.insert("charge_overcurrent"); }
-              }
-              if (status_pos + 4 <= (int)data.length()) {
-                int module_voltage = strtol(data.substr(status_pos + 2, 2).c_str(), nullptr, 16);
-                if (module_voltage == 0x01) { batt_alarms_set.insert("pack_undervolt"); all_alarms.insert("pack_undervolt"); }
-                if (module_voltage == 0x02) { batt_alarms_set.insert("pack_overvolt"); all_alarms.insert("pack_overvolt"); }
-              }
-
-              // ByteIndex 0: Balance On flag (in Ext_Bit section)
-              bool balance_on = false;
-              if (ext_bit_start + 2 <= (int)data.length()) {
-                int balance_status = strtol(data.substr(ext_bit_start, 2).c_str(), nullptr, 16);
-                balance_on = (balance_status & 0x01) != 0;
-              }
-
-              // ByteIndex 4 (ext_bit_start+8): Voltage status bitfield
-              // bit0=CellOV_Alarm, bit1=CellOV_Protect, bit2=CellUV_Alarm, bit3=CellUV_Protect
-              // bit4=PackOV_Alarm, bit5=PackOV_Protect, bit6=PackUV_Alarm, bit7=PackUV_Protect
-              if (ext_bit_start + 10 <= (int)data.length()) {
-                int voltage_status = strtol(data.substr(ext_bit_start + 8, 2).c_str(), nullptr, 16);
-                // Warnings (informational - normal at 100% SOC)
-                if (voltage_status & 0x01) batt_warnings_set.insert("cell_overvolt_alarm");
-                if (voltage_status & 0x02) batt_warnings_set.insert("cell_overvolt_protect");
-                if (voltage_status & 0x04) batt_warnings_set.insert("cell_undervolt_alarm");
-                if (voltage_status & 0x10) batt_warnings_set.insert("pack_overvolt_alarm");
-                if (voltage_status & 0x20) batt_warnings_set.insert("pack_overvolt_protect");
-                if (voltage_status & 0x40) batt_warnings_set.insert("pack_undervolt_alarm");
-                // Protections (actual problems)
-                if (voltage_status & 0x08) { batt_alarms_set.insert("cell_undervolt_protect"); all_alarms.insert("cell_undervolt_protect"); }
-                if (voltage_status & 0x80) { batt_alarms_set.insert("pack_undervolt_protect"); all_alarms.insert("pack_undervolt_protect"); }
-              }
-
-              // ByteIndex 9-10 (ext_bit_start+18): Individual cell balance flags
-              // ByteIndex 9: Balance1-8 (bit0=cell1...bit7=cell8)
-              // ByteIndex 10: Balance9-16 (bit0=cell9...bit7=cell16)
-              // Only count balancing cells if Balance On flag is set
-              int balancing = 0;
-              std::string bal_cells_str;
-              if (balance_on && ext_bit_start + 22 <= (int)data.length()) {
-                int balance1_8 = strtol(data.substr(ext_bit_start + 18, 2).c_str(), nullptr, 16);
-                int balance9_16 = strtol(data.substr(ext_bit_start + 20, 2).c_str(), nullptr, 16);
-                for (int bit = 0; bit < 8; bit++) {
-                  if (balance1_8 & (1 << bit)) {
-                    balancing++;
-                    if (!bal_cells_str.empty()) bal_cells_str += ",";
-                    bal_cells_str += std::to_string(bit + 1);
-                  }
-                  if (balance9_16 & (1 << bit)) {
-                    balancing++;
-                    if (!bal_cells_str.empty()) bal_cells_str += ",";
-                    bal_cells_str += std::to_string(bit + 9);
-                  }
-                }
-              }
-              id(batt_balancing_count)[batt] = balancing;
-              id(batt_balancing_cells)[batt] = bal_cells_str;
-              total_balancing += balancing;
-
-              // ByteIndex 8 (ext_bit_start+16): MOSFET status
-              // bit0=DISCHG_MOSFET, bit1=CHG_MOSFET, bit2=LMCHG_MOSFET
-              if (ext_bit_start + 18 <= (int)data.length()) {
-                int mosfet_status = strtol(data.substr(ext_bit_start + 16, 2).c_str(), nullptr, 16);
-                id(batt_discharge_mosfet)[batt] = (mosfet_status & 0x01) != 0;
-                id(batt_charge_mosfet)[batt] = (mosfet_status & 0x02) != 0;
-                id(batt_lmcharge_mosfet)[batt] = (mosfet_status & 0x04) != 0;
-              }
-
-              // CW (Cell Warning) flag - read from OLD position (status_pos+18)
-              // This correlates with CW=Y on BMS display
-              if (status_pos + 22 <= (int)data.length()) {
-                int cw_byte1 = strtol(data.substr(status_pos + 18, 2).c_str(), nullptr, 16);
-                int cw_byte2 = strtol(data.substr(status_pos + 20, 2).c_str(), nullptr, 16);
-                id(batt_cw_active)[batt] = (cw_byte1 != 0) || (cw_byte2 != 0);
-                // Build CW cells string
-                std::string cw_str;
-                for (int bit = 0; bit < 8; bit++) {
-                  if (cw_byte1 & (1 << bit)) {
-                    if (!cw_str.empty()) cw_str += ",";
-                    cw_str += std::to_string(bit + 1);
-                  }
-                  if (cw_byte2 & (1 << bit)) {
-                    if (!cw_str.empty()) cw_str += ",";
-                    cw_str += std::to_string(bit + 9);
-                  }
-                }
-                id(batt_cw_cells)[batt] = cw_str;
-              }
-
-              // Operating state from last byte
-              // 0x01=Discharge, 0x02=Charge, 0x04=Float, 0x08=Full, 0x10=Standby, 0x20=Shutdown
-              if (data.length() >= 2) {
-                int last_byte = strtol(data.substr(data.length() - 2, 2).c_str(), nullptr, 16);
-                std::string state_str;
-                if (last_byte & 0x01) { if (!state_str.empty()) state_str += ", "; state_str += "Discharge"; }
-                if (last_byte & 0x02) { if (!state_str.empty()) state_str += ", "; state_str += "Charge"; }
-                if (last_byte & 0x04) { if (!state_str.empty()) state_str += ", "; state_str += "Float"; }
-                if (last_byte & 0x08) { if (!state_str.empty()) state_str += ", "; state_str += "Full"; }
-                if (last_byte & 0x10) { if (!state_str.empty()) state_str += ", "; state_str += "Standby"; }
-                if (last_byte & 0x20) { if (!state_str.empty()) state_str += ", "; state_str += "Shutdown"; }
-                id(batt_state)[batt] = state_str.empty() ? "Idle" : state_str;
-              }
-            }
-
-            // Build per-battery warning/alarm strings
-            std::string warn_str, alarm_str;
-            for (const auto& w : batt_warnings_set) {
-              if (!warn_str.empty()) warn_str += ",";
-              warn_str += w;
-            }
-            for (const auto& a : batt_alarms_set) {
-              if (!alarm_str.empty()) alarm_str += ",";
-              alarm_str += a;
-            }
-            id(batt_warnings)[batt] = warn_str;
-            id(batt_alarms)[batt] = alarm_str;
+            id(rs485_response_buf).clear();
+            id(rs485_response_buf).reserve(600);
+            id(rs485_tx_time) = now;
+            id(rs485_state) = 2;  // WAIT_RX
+            break;
           }
 
-          id(stack_balancing_count) = total_balancing;
-          id(stack_balancing_cells) = build_stack_cells_string(id(batt_balancing_cells), ${num_batteries});
+          case 2: {  // WAIT_RX - accumulate response, check for '\r' or timeout
+            // Read available bytes
+            while (id(rs485_uart).available()) {
+              uint8_t c;
+              id(rs485_uart).read_byte(&c);
+              id(rs485_response_buf) += (char)c;
+              if (c == '\r') {
+                // Got complete frame - parse it
+                std::string response = id(rs485_response_buf);
+                // Trim leading garbage until '~'
+                auto tilde = response.find('~');
+                if (tilde != std::string::npos) response = response.substr(tilde);
 
-          id(stack_overvolt_count) = total_overvolt;
-          id(stack_overvolt_cells) = build_stack_cells_string(id(batt_overvolt_cells), ${num_batteries});
+                int batt = id(rs485_current_batt);
+                ESP_LOGD("rs485", "RX analog len=%d", response.length());
 
-          // Build alarm string
-          std::string alarm_str;
-          for (const auto& a : all_alarms) {
-            if (!alarm_str.empty()) alarm_str += ",";
-            alarm_str += a;
+                // Validate response
+                std::string error = rs485_validate_response(response, ADDR);
+                if (!error.empty()) {
+                  ESP_LOGW("rs485", "Batt %d analog poll failed: %s", batt, error.c_str());
+                  id(batt_poll_failures)[batt]++;
+                  if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
+                    id(batt_poll_alarm)[batt] = true;
+                    char topic[64];
+                    snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+                    id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
+                  }
+                } else {
+                  // Success - parse analog data
+                  if (id(batt_poll_failures)[batt] > 0 || id(batt_poll_alarm)[batt]) {
+                    id(batt_poll_failures)[batt] = 0;
+                    if (id(batt_poll_alarm)[batt]) {
+                      id(batt_poll_alarm)[batt] = false;
+                      char topic[64];
+                      snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+                      id(mqtt_client).publish(std::string(topic), std::string("OFF"), (uint8_t)0, true);
+                    }
+                  }
+
+                  // Mark online
+                  id(last_rs485_rx) = now;
+                  if (id(rs485_stale)) {
+                    id(rs485_stale) = false;
+                    if (!id(last_rs485_status_online)) {
+                      id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
+                      id(last_rs485_status_online) = true;
+                    }
+                  }
+
+                  // Parse analog data
+                  if (response.length() > 18) {
+                    std::string data = response.substr(13, response.length() - 13 - 5);
+                    size_t idx = 4;  // Skip header
+                    if (data.length() >= 6) {
+                      int num_cells = strtol(data.substr(idx, 2).c_str(), nullptr, 16);
+                      idx += 2;
+                      for (int cell = 0; cell < num_cells && cell < 16 && data.length() >= idx + 4; cell++) {
+                        int mv = strtol(data.substr(idx, 4).c_str(), nullptr, 16);
+                        id(cell_voltages)[batt * 16 + cell] = mv / 1000.0f;
+                        idx += 4;
+                      }
+                      if (data.length() >= idx + 2) {
+                        int num_temps = strtol(data.substr(idx, 2).c_str(), nullptr, 16);
+                        idx += 2;
+                        for (int t = 0; t < num_temps && t < 6 && data.length() >= idx + 4; t++) {
+                          int raw = strtol(data.substr(idx, 4).c_str(), nullptr, 16);
+                          id(cell_temps)[batt * 6 + t] = (raw - 2731) / 10.0f;
+                          idx += 4;
+                        }
+                      }
+                      if (data.length() >= idx + 4) {
+                        int raw = strtol(data.substr(idx, 4).c_str(), nullptr, 16);
+                        if (raw > 0x7FFF) raw -= 0x10000;
+                        id(batt_current)[batt] = raw / 100.0f;
+                        idx += 4;
+                      }
+                      if (data.length() >= idx + 4) {
+                        id(batt_voltage)[batt] = strtol(data.substr(idx, 4).c_str(), nullptr, 16) / 100.0f;
+                        idx += 4;
+                      }
+                      if (data.length() >= idx + 4) {
+                        id(batt_remain_ah)[batt] = strtol(data.substr(idx, 4).c_str(), nullptr, 16) / 100.0f;
+                        idx += 4;
+                      }
+                      idx += 2;  // Skip custom byte
+                      if (data.length() >= idx + 4) {
+                        id(batt_total_ah)[batt] = strtol(data.substr(idx, 4).c_str(), nullptr, 16) / 100.0f;
+                        idx += 4;
+                      }
+                      if (data.length() >= idx + 4) {
+                        id(batt_cycles)[batt] = strtol(data.substr(idx, 4).c_str(), nullptr, 16);
+                      }
+                      if (id(batt_total_ah)[batt] > 0) {
+                        id(batt_soc)[batt] = (id(batt_remain_ah)[batt] / id(batt_total_ah)[batt]) * 100.0f;
+                      }
+                      ESP_LOGI("rs485", "Batt %d: %.3fV %.2fA SOC=%.0f%%", batt, id(batt_voltage)[batt], id(batt_current)[batt], id(batt_soc)[batt]);
+                    }
+                  }
+                }
+
+                // Move to next battery
+                id(rs485_current_batt) = (batt + 1) % NUM_BATT;
+                id(rs485_last_analog_poll) = now;
+                id(rs485_state) = 0;  // Back to IDLE
+                return;
+              }
+            }
+
+            // Check timeout (1500ms total)
+            if (now - id(rs485_tx_time) > 1500) {
+              int batt = id(rs485_current_batt);
+              ESP_LOGW("rs485", "Batt %d analog timeout (rx=%d bytes)", batt, id(rs485_response_buf).length());
+              id(batt_poll_failures)[batt]++;
+              if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
+                id(batt_poll_alarm)[batt] = true;
+                char topic[64];
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+                id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
+              }
+              id(rs485_current_batt) = (batt + 1) % NUM_BATT;
+              id(rs485_last_analog_poll) = now;
+              id(rs485_state) = 0;
+            }
+            break;
           }
-          id(stack_alarms) = alarm_str;
 
-          if (total_balancing > 0) {
-            ESP_LOGI("rs485", "Stack: %d cells balancing", total_balancing);
+          case 3: {  // SEND_ALARM - send alarm command
+            int batt = id(rs485_alarm_batt);
+
+            // Clear RX buffer
+            while (id(rs485_uart).available()) {
+              uint8_t c; id(rs485_uart).read_byte(&c);
+            }
+
+            std::string cmd = rs485_make_cmd(ADDR, 0x44, batt);
+            ESP_LOGD("rs485", "TX alarm batt %d", batt);
+
+            for (char c : cmd) {
+              id(rs485_uart).write_byte((uint8_t)c);
+            }
+            id(rs485_uart).flush();
+
+            id(rs485_response_buf).clear();
+            id(rs485_response_buf).reserve(600);
+            id(rs485_tx_time) = now;
+            id(rs485_state) = 4;  // WAIT_ALARM_RX
+            break;
           }
-          if (!alarm_str.empty()) {
-            ESP_LOGW("rs485", "Alarms: %s", alarm_str.c_str());
+
+          case 4: {  // WAIT_ALARM_RX - accumulate response
+            // Read available bytes
+            while (id(rs485_uart).available()) {
+              uint8_t c;
+              id(rs485_uart).read_byte(&c);
+              id(rs485_response_buf) += (char)c;
+              if (c == '\r') {
+                // Got complete frame - parse it
+                std::string response = id(rs485_response_buf);
+                auto tilde = response.find('~');
+                if (tilde != std::string::npos) response = response.substr(tilde);
+
+                int batt = id(rs485_alarm_batt);
+                ESP_LOGD("rs485", "RX alarm len=%d", response.length());
+
+                std::string error = rs485_validate_response(response, ADDR);
+                if (error.empty() && response.length() > 18) {
+                  std::string data = response.substr(13, response.length() - 13 - 5);
+                  if (data.length() >= 40) {
+                    // Parse alarm data (same logic as before, condensed)
+                    int num_cells = strtol(data.substr(4, 2).c_str(), nullptr, 16);
+                    int overvolt_count = 0;
+                    std::string ov_cells_str;
+                    ov_cells_str.reserve(64);
+
+                    for (int c = 0; c < num_cells && c < 16; c++) {
+                      int pos = 6 + c * 2;
+                      if (pos + 2 <= (int)data.length()) {
+                        int status = strtol(data.substr(pos, 2).c_str(), nullptr, 16);
+                        if (status == 0x02) {
+                          overvolt_count++;
+                          if (!ov_cells_str.empty()) ov_cells_str += ",";
+                          ov_cells_str += std::to_string(c + 1);
+                        }
+                      }
+                    }
+                    id(batt_overvolt_count)[batt] = overvolt_count;
+                    id(batt_overvolt_cells)[batt] = ov_cells_str;
+
+                    // Parse temperature status, MOSFET, balancing, etc.
+                    int temp_pos = 6 + num_cells * 2;
+                    if (temp_pos + 2 <= (int)data.length()) {
+                      int num_temps = strtol(data.substr(temp_pos, 2).c_str(), nullptr, 16);
+                      int status_pos = temp_pos + 2 + num_temps * 2;
+                      int ext_bit_start = status_pos + 6;
+
+                      // Balance flags
+                      bool balance_on = false;
+                      if (ext_bit_start + 2 <= (int)data.length()) {
+                        int balance_status = strtol(data.substr(ext_bit_start, 2).c_str(), nullptr, 16);
+                        balance_on = (balance_status & 0x01) != 0;
+                      }
+
+                      int balancing = 0;
+                      std::string bal_cells_str;
+                      bal_cells_str.reserve(64);
+                      if (balance_on && ext_bit_start + 22 <= (int)data.length()) {
+                        int balance1_8 = strtol(data.substr(ext_bit_start + 18, 2).c_str(), nullptr, 16);
+                        int balance9_16 = strtol(data.substr(ext_bit_start + 20, 2).c_str(), nullptr, 16);
+                        for (int bit = 0; bit < 8; bit++) {
+                          if (balance1_8 & (1 << bit)) {
+                            balancing++;
+                            if (!bal_cells_str.empty()) bal_cells_str += ",";
+                            bal_cells_str += std::to_string(bit + 1);
+                          }
+                          if (balance9_16 & (1 << bit)) {
+                            balancing++;
+                            if (!bal_cells_str.empty()) bal_cells_str += ",";
+                            bal_cells_str += std::to_string(bit + 9);
+                          }
+                        }
+                      }
+                      id(batt_balancing_count)[batt] = balancing;
+                      id(batt_balancing_cells)[batt] = bal_cells_str;
+
+                      // MOSFET status
+                      if (ext_bit_start + 18 <= (int)data.length()) {
+                        int mosfet_status = strtol(data.substr(ext_bit_start + 16, 2).c_str(), nullptr, 16);
+                        id(batt_discharge_mosfet)[batt] = (mosfet_status & 0x01) != 0;
+                        id(batt_charge_mosfet)[batt] = (mosfet_status & 0x02) != 0;
+                        id(batt_lmcharge_mosfet)[batt] = (mosfet_status & 0x04) != 0;
+                      }
+
+                      // Operating state from last byte
+                      if (data.length() >= 2) {
+                        int last_byte = strtol(data.substr(data.length() - 2, 2).c_str(), nullptr, 16);
+                        std::string state_str;
+                        state_str.reserve(32);
+                        if (last_byte & 0x01) state_str += "Discharge";
+                        if (last_byte & 0x02) { if (!state_str.empty()) state_str += ","; state_str += "Charge"; }
+                        if (last_byte & 0x04) { if (!state_str.empty()) state_str += ","; state_str += "Float"; }
+                        if (last_byte & 0x08) { if (!state_str.empty()) state_str += ","; state_str += "Full"; }
+                        if (last_byte & 0x10) { if (!state_str.empty()) state_str += ","; state_str += "Standby"; }
+                        id(batt_state)[batt] = state_str.empty() ? "Idle" : state_str;
+                      }
+                    }
+                  }
+                }
+
+                // Move to next battery or finish
+                id(rs485_alarm_batt)++;
+                if (id(rs485_alarm_batt) >= NUM_BATT) {
+                  // Finished all batteries - update stack totals
+                  int total_balancing = 0, total_overvolt = 0;
+                  for (int b = 0; b < NUM_BATT; b++) {
+                    total_balancing += id(batt_balancing_count)[b];
+                    total_overvolt += id(batt_overvolt_count)[b];
+                  }
+                  id(stack_balancing_count) = total_balancing;
+                  id(stack_balancing_cells) = build_stack_cells_string(id(batt_balancing_cells), NUM_BATT);
+                  id(stack_overvolt_count) = total_overvolt;
+                  id(stack_overvolt_cells) = build_stack_cells_string(id(batt_overvolt_cells), NUM_BATT);
+
+                  if (total_balancing > 0) {
+                    ESP_LOGI("rs485", "Stack: %d cells balancing", total_balancing);
+                  }
+
+                  id(rs485_last_alarm_poll) = now;
+                  id(rs485_state) = 0;  // Back to IDLE
+                } else {
+                  id(rs485_state) = 3;  // Next battery alarm
+                }
+                return;
+              }
+            }
+
+            // Check timeout
+            if (now - id(rs485_tx_time) > 1500) {
+              int batt = id(rs485_alarm_batt);
+              ESP_LOGW("rs485", "Batt %d alarm timeout", batt);
+              id(rs485_alarm_batt)++;
+              if (id(rs485_alarm_batt) >= NUM_BATT) {
+                id(rs485_last_alarm_poll) = now;
+                id(rs485_state) = 0;
+              } else {
+                id(rs485_state) = 3;
+              }
+            }
+            break;
+          }
+
+          default:
+            id(rs485_state) = 0;
+            break;
           }
 
   # Publish RS485 data to MQTT - matches Python topic structure exactly
@@ -1773,6 +1758,44 @@ interval:
     then:
       - lambda: |-
           char topic[80], payload[32];
+
+          // Heartbeat: force republish ALL values every 5 minutes to prevent HA "Unknown"
+          uint32_t now = millis();
+          bool force_heartbeat = (now - id(rs485_last_heartbeat) >= 300000);  // 5 minutes
+          if (force_heartbeat) {
+            id(rs485_last_heartbeat) = now;
+            ESP_LOGI("mqtt", "RS485 heartbeat: forcing republish of all values");
+            // Reset all hysteresis tracking to force publish
+            id(last_stack_voltage) = -1.0f;
+            id(last_stack_current) = -1.0f;
+            id(last_stack_cell_min) = -1.0f;
+            id(last_stack_cell_max) = -1.0f;
+            id(last_stack_cell_delta) = -1.0f;
+            id(last_stack_temp_min) = -999.0f;
+            id(last_stack_temp_max) = -999.0f;
+            id(last_stack_balancing_count) = -1;
+            id(last_stack_overvolt_count) = -1;
+            for (int i = 0; i < ${num_batteries}; i++) {
+              id(last_batt_voltages)[i] = -1.0f;
+              id(last_batt_currents)[i] = -1.0f;
+              id(last_batt_socs)[i] = -1.0f;
+              id(last_batt_remain_ah)[i] = -1.0f;
+              id(last_batt_total_ah)[i] = -1.0f;
+              id(last_batt_cycles)[i] = -1;
+              id(last_batt_cell_min)[i] = -1.0f;
+              id(last_batt_cell_max)[i] = -1.0f;
+              id(last_batt_cell_delta)[i] = -1.0f;
+              // Force string/bool fields by resetting to impossible values
+              id(last_batt_balancing_count)[i] = -1;
+              id(last_batt_overvolt_count)[i] = -1;
+            }
+            for (size_t i = 0; i < id(last_cell_voltages).size(); i++) {
+              id(last_cell_voltages)[i] = -1.0f;
+            }
+            for (size_t i = 0; i < id(last_batt_temps).size(); i++) {
+              id(last_batt_temps)[i] = -999.0f;
+            }
+          }
 
           // Calculate stack totals
           float stack_cell_min = 99.0f, stack_cell_max = 0.0f;
@@ -2466,7 +2489,22 @@ binary_sensor:
 button:
   - platform: restart
     name: "Restart"
-  
+
+  - platform: template
+    name: "Re-publish HA Discovery"
+    id: republish_discovery_button
+    icon: "mdi:home-assistant"
+    entity_category: config
+    on_press:
+      - lambda: |-
+          ESP_LOGI("mqtt", "Manual discovery re-publish requested - clearing flag and reconnecting MQTT");
+          id(discovery_sent) = false;
+          // Disconnect MQTT to trigger reconnect and re-run on_connect discovery
+          id(mqtt_client).disable();
+      - delay: 500ms
+      - lambda: |-
+          id(mqtt_client).enable();
+
   - platform: template
     name: "Toggle Debug Logging"
     id: debug_toggle_button
