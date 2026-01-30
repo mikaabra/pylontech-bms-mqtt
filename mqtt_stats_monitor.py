@@ -3,16 +3,19 @@
 MQTT Statistics Monitor - Tracks message rates and identifies top talkers.
 
 Usage:
-    ./mqtt_stats_monitor.py [--duration 3600] [--top 10] [--interval 10] [--quiet]
+    ./mqtt_stats_monitor.py [--duration 3600] [--top 10] [--interval 10] [--quiet] [--output FILE]
     
     --duration: Monitoring duration in seconds (default: 3600 = 1 hour)
     --top: Number of top talkers to display (default: 10)
     --interval: Display update interval in seconds (default: 10)
     --quiet: Suppress periodic updates, only show final summary
+    --output: Save complete statistics to file
     
 Example:
     ./mqtt_stats_monitor.py --duration 1800 --top 5
     ./mqtt_stats_monitor.py --quiet  # Quiet mode
+    ./mqtt_stats_monitor.py --output stats.txt  # Save to file
+    ./mqtt_stats_monitor.py --top 20 --output detailed_stats.txt
     """
 
 import paho.mqtt.client as mqtt
@@ -58,11 +61,12 @@ def load_secrets(secrets_path='secrets.yaml'):
         sys.exit(1)
 
 class MQTTStatsMonitor:
-    def __init__(self, duration=3600, top_n=10, update_interval=10, quiet=False):
+    def __init__(self, duration=3600, top_n=10, update_interval=10, quiet=False, output_file=None):
         self.duration = duration
         self.top_n = top_n
         self.update_interval = update_interval
         self.quiet = quiet
+        self.output_file = output_file
         self.message_counts = defaultdict(int)
         self.message_sizes = defaultdict(int)
         self.start_time = None
@@ -150,43 +154,87 @@ class MQTTStatsMonitor:
     def display_final_stats(self):
         """Display final comprehensive statistics"""
         elapsed = time.time() - self.start_time
-        print("\n" + "="*80)
-        print("FINAL MQTT STATISTICS SUMMARY")
-        print("="*80)
+        
+        # Prepare output content
+        output_lines = []
+        output_lines.append("\n" + "="*80)
+        output_lines.append("FINAL MQTT STATISTICS SUMMARY")
+        output_lines.append("="*80)
         
         if not self.message_counts:
-            print("No messages received during monitoring period")
+            line = "No messages received during monitoring period"
+            print(line)
+            output_lines.append(line)
+            self._write_output_file(output_lines)
             return
         
         # Sort by message count (descending)
         sorted_topics = sorted(self.message_counts.items(), 
                               key=lambda x: x[1], reverse=True)
         
-        print(f"\nTop {self.top_n} talkers by message count:")
-        print("-" * 80)
-        print(f"{'Rank':<5} {'Topic':<55} {'Count':<10} {'% Total':<10} {'Rate':<12}")
-        print("-" * 80)
+        output_lines.append(f"\nTop {self.top_n} talkers by message count:")
+        output_lines.append("-" * 80)
+        output_lines.append(f"{'Rank':<5} {'Topic':<55} {'Count':<10} {'% Total':<10} {'Rate':<12}")
+        output_lines.append("-" * 80)
         
         total_messages = sum(self.message_counts.values())
         for rank, (topic, count) in enumerate(sorted_topics[:self.top_n], 1):
             percentage = (count / total_messages * 100) if total_messages > 0 else 0
             rate = count / elapsed if elapsed > 0 else 0
-            print(f"{rank:<5} {topic[:52]:<55} {count:<10} {percentage:.1f}% {rate:<12.2f}")
+            line = f"{rank:<5} {topic[:52]:<55} {count:<10} {percentage:.1f}% {rate:<12.2f}"
+            print(line)
+            output_lines.append(line)
         
         # Additional statistics
-        print(f"\nDetailed Statistics:")
-        print(f"  Monitoring duration: {elapsed:.0f} seconds ({elapsed/60:.1f} minutes)")
-        print(f"  Total messages received: {total_messages}")
-        print(f"  Total data received: {sum(self.message_sizes.values()) / 1024:.2f} KB")
-        print(f"  Average message rate: {total_messages / elapsed:.2f} msg/s")
-        print(f"  Unique topics: {len(self.message_counts)}")
+        output_lines.append(f"\nDetailed Statistics:")
+        output_lines.append(f"  Monitoring duration: {elapsed:.0f} seconds ({elapsed/60:.1f} minutes)")
+        output_lines.append(f"  Total messages received: {total_messages}")
+        output_lines.append(f"  Total data received: {sum(self.message_sizes.values()) / 1024:.2f} KB")
+        output_lines.append(f"  Average message rate: {total_messages / elapsed:.2f} msg/s")
+        output_lines.append(f"  Unique topics: {len(self.message_counts)}")
         
         # Find most active topics
         if self.message_counts:
             max_count = max(self.message_counts.values())
             most_active = [t for t, c in self.message_counts.items() if c == max_count]
-            print(f"  Most active topic(s): {', '.join(most_active[:3])}")
-            print(f"  Max messages from single topic: {max_count}")
+            line = f"  Most active topic(s): {', '.join(most_active[:3])}"
+            print(line)
+            output_lines.append(line)
+            line = f"  Max messages from single topic: {max_count}"
+            print(line)
+            output_lines.append(line)
+        
+        # Complete statistics - all topics
+        output_lines.append(f"\n{'='*80}")
+        output_lines.append("COMPLETE TOPIC LISTING")
+        output_lines.append("="*80)
+        output_lines.append(f"{'Topic':<60} {'Count':<10} {'Rate (msg/s)':<15} {'Avg Size':<10} {'Total Size':<12}")
+        output_lines.append("-" * 80)
+        
+        for topic, count in sorted_topics:
+            rate = count / elapsed if elapsed > 0 else 0
+            avg_size = self.message_sizes[topic] / count if count > 0 else 0
+            total_size = self.message_sizes[topic] / 1024  # Convert to KB
+            line = f"{topic[:57]:<60} {count:<10} {rate:<15.2f} {avg_size:<10.0f} {total_size:<12.2f}"
+            output_lines.append(line)
+        
+        # Print all output lines to console
+        for line in output_lines:
+            print(line)
+        
+        # Write to file if specified
+        self._write_output_file(output_lines)
+    
+    def _write_output_file(self, lines):
+        """Write output to file if output_file is specified"""
+        if self.output_file:
+            try:
+                with open(self.output_file, 'w') as f:
+                    for line in lines:
+                        f.write(line + '\n')
+                print(f"\n📝 Statistics saved to: {self.output_file}")
+            except Exception as e:
+                print(f"\n❌ Error writing to output file: {e}")
     
     def run(self):
         """Start the MQTT monitoring"""
@@ -195,6 +243,10 @@ class MQTTStatsMonitor:
         print(f"Update interval: {self.update_interval} seconds")
         print(f"Top N talkers to display: {self.top_n}")
         print(f"Connecting to: {self.secrets['host']}:{self.secrets['port']}")
+        if self.quiet:
+            print("Quiet mode: periodic updates suppressed")
+        if self.output_file:
+            print(f"Output file: {self.output_file}")
         
         try:
             self.client.connect(self.secrets['host'], self.secrets['port'], 60)
@@ -218,6 +270,8 @@ def main():
                        help='Display update interval in seconds (default: 10)')
     parser.add_argument('--quiet', action='store_true',
                        help='Quiet mode - suppress periodic updates, only show final summary')
+    parser.add_argument('--output', type=str, default=None,
+                       help='Output file to save complete statistics (default: no file output)')
     parser.add_argument('--secrets', type=str, default='secrets.yaml',
                        help='Path to secrets.yaml file (default: secrets.yaml)')
     
@@ -228,7 +282,8 @@ def main():
         duration=args.duration,
         top_n=args.top,
         update_interval=args.interval,
-        quiet=args.quiet
+        quiet=args.quiet,
+        output_file=args.output
     )
     monitor.run()
 
