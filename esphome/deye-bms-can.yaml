@@ -107,6 +107,19 @@ mqtt:
         // Publish RS485 availability
         id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
         ESP_LOGI("mqtt", "Connected, published availability");
+        
+        // Publish initial state of CAN sensors on connect to ensure Home Assistant gets current values
+        // This prevents "Unknown" state in HA when the device reconnects
+        id(sensor_can_module_count).publish_state(id(can_module_count));
+        id(sensor_can_status_byte7).publish_state(id(can_status_byte7));
+        id(sensor_can_alarm_summary).publish_state(id(can_alarm_summary));
+        id(sensor_can_frame_count).publish_state(id(can_frame_count));
+        id(sensor_can_error_count).publish_state(id(can_error_count));
+        
+        // Update tracking variables to current values
+        id(last_module_count) = id(can_module_count);
+        id(last_status_byte7) = id(can_status_byte7);
+        id(last_alarm_summary) = id(can_alarm_summary);
 
         // Publish HA Discovery configs
         // Device info shared by all entities
@@ -690,6 +703,17 @@ globals:
     type: std::string
     initial_value: '"WARN"'  # Default to minimal logging
 
+  # CAN sensor hysteresis tracking - prevent excessive MQTT updates
+  - id: last_module_count
+    type: int
+    initial_value: '-1'
+  - id: last_status_byte7
+    type: int
+    initial_value: '-1'
+  - id: last_alarm_summary
+    type: std::string
+    initial_value: '""'
+
   # CAN stale detection
   - id: last_can_rx
     type: uint32_t
@@ -1056,6 +1080,25 @@ interval:
             // Publish alarm summary
             id(mqtt_client).publish(std::string("${can_prefix}/can/alarm_summary"),
                 id(can_alarm_summary).empty() ? std::string("OK") : id(can_alarm_summary));
+
+            // Update template sensors on change (for Home Assistant integration)
+            // Module count - only update if changed
+            if (id(can_module_count) != id(last_module_count)) {
+                id(sensor_can_module_count).publish_state(id(can_module_count));
+                id(last_module_count) = id(can_module_count);
+            }
+            
+            // Status byte 7 - only update if changed
+            if (id(can_status_byte7) != id(last_status_byte7)) {
+                id(sensor_can_status_byte7).publish_state(id(can_status_byte7));
+                id(last_status_byte7) = id(can_status_byte7);
+            }
+            
+            // Alarm summary - only update if changed
+            if (id(can_alarm_summary) != id(last_alarm_summary)) {
+                id(sensor_can_alarm_summary).publish_state(id(can_alarm_summary));
+                id(last_alarm_summary) = id(can_alarm_summary);
+            }
 
             id(last_can_decoded_state) = current_state;
             id(last_can_decoded_publish) = now;
@@ -1943,7 +1986,7 @@ sensor:
     id: sensor_can_frame_count
     icon: "mdi:counter"
     entity_category: diagnostic
-    update_interval: 10s
+    update_interval: 60s  # Reduced from 10s to 60s
     lambda: 'return id(can_frame_count);'
 
   - platform: template
@@ -1951,7 +1994,7 @@ sensor:
     id: sensor_can_error_count
     icon: "mdi:alert-circle"
     entity_category: diagnostic
-    update_interval: 10s
+    update_interval: 60s  # Reduced from 10s to 60s
     lambda: 'return id(can_error_count);'
 
   # CAN 0x359 module count (byte 4) - shows number of active modules
@@ -1960,7 +2003,7 @@ sensor:
     id: sensor_can_module_count
     icon: "mdi:battery-multiple"
     state_topic: ${can_prefix}/can/module_count
-    update_interval: 10s
+    update_interval: never  # Changed from 10s to never (on-change only)
     lambda: 'return id(can_module_count);'
 
   # CAN 0x359 status byte 7 (Shoto-specific diagnostic)
@@ -1970,7 +2013,7 @@ sensor:
     icon: "mdi:information-outline"
     entity_category: diagnostic
     state_topic: ${can_prefix}/can/status_byte7
-    update_interval: 10s
+    update_interval: never  # Changed from 10s to never (on-change only)
     lambda: 'return id(can_status_byte7);'
 
 text_sensor:
@@ -1985,7 +2028,7 @@ text_sensor:
     name: "CAN Alarm Summary"
     icon: "mdi:alert"
     state_topic: ${can_prefix}/can/alarm_summary
-    update_interval: 10s
+    update_interval: never  # Changed from 10s to never (on-change only)
     lambda: |-
       std::string alarms;
       // Protection flags (critical)
