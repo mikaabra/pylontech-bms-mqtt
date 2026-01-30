@@ -65,6 +65,29 @@ esphome:
           
           // Initialize cell voltage hysteresis tracking (16 cells per battery, use -1 as invalid)
           id(last_cell_voltages).resize(16 * num_batt, -1.0f);
+          
+          // Initialize RS485 hysteresis tracking
+          id(last_batt_voltages).resize(num_batt, -1.0f);
+          id(last_batt_currents).resize(num_batt, -1.0f);
+          id(last_batt_socs).resize(num_batt, -1.0f);
+          id(last_batt_remain_ah).resize(num_batt, -1.0f);
+          id(last_batt_total_ah).resize(num_batt, -1.0f);
+          id(last_batt_states).resize(num_batt, "");
+          id(last_batt_warnings).resize(num_batt, "");
+          id(last_batt_alarms).resize(num_batt, "");
+          id(last_batt_cycles).resize(num_batt, -1);
+          id(last_batt_balancing_count).resize(num_batt, -1);
+          id(last_batt_balancing_cells).resize(num_batt, "");
+          id(last_batt_overvolt_count).resize(num_batt, -1);
+          id(last_batt_overvolt_cells).resize(num_batt, "");
+          id(last_batt_charge_mosfet).resize(num_batt, false);
+          id(last_batt_discharge_mosfet).resize(num_batt, false);
+          id(last_batt_lmcharge_mosfet).resize(num_batt, false);
+          id(last_batt_cw_active).resize(num_batt, false);
+          id(last_batt_cw_cells).resize(num_batt, "");
+          id(last_batt_cell_min).resize(num_batt, -1.0f);
+          id(last_batt_cell_max).resize(num_batt, -1.0f);
+          id(last_batt_cell_delta).resize(num_batt, -1.0f);
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -128,6 +151,37 @@ mqtt:
         // Reset tracking to force next publish
         for (int i = 0; i < id(last_cell_voltages).size(); i++) {
             id(last_cell_voltages)[i] = -1.0f;  // Reset to force publish on next update
+        }
+        
+        // Reset RS485 tracking variables to force publish on next update
+        id(last_stack_voltage) = -1.0f;
+        id(last_stack_current) = -1.0f;
+        id(last_stack_cell_min) = -1.0f;
+        id(last_stack_cell_max) = -1.0f;
+        id(last_stack_cell_delta) = -1.0f;
+        
+        for (int i = 0; i < ${num_batteries}; i++) {
+            id(last_batt_voltages)[i] = -1.0f;
+            id(last_batt_currents)[i] = -1.0f;
+            id(last_batt_socs)[i] = -1.0f;
+            id(last_batt_remain_ah)[i] = -1.0f;
+            id(last_batt_total_ah)[i] = -1.0f;
+            id(last_batt_states)[i] = "";
+            id(last_batt_warnings)[i] = "";
+            id(last_batt_alarms)[i] = "";
+            id(last_batt_cycles)[i] = -1;
+            id(last_batt_balancing_count)[i] = -1;
+            id(last_batt_balancing_cells)[i] = "";
+            id(last_batt_overvolt_count)[i] = -1;
+            id(last_batt_overvolt_cells)[i] = "";
+            id(last_batt_charge_mosfet)[i] = false;
+            id(last_batt_discharge_mosfet)[i] = false;
+            id(last_batt_lmcharge_mosfet)[i] = false;
+            id(last_batt_cw_active)[i] = false;
+            id(last_batt_cw_cells)[i] = "";
+            id(last_batt_cell_min)[i] = -1.0f;
+            id(last_batt_cell_max)[i] = -1.0f;
+            id(last_batt_cell_delta)[i] = -1.0f;
         }
 
         // Publish HA Discovery configs
@@ -725,6 +779,86 @@ globals:
 
   # Cell voltage hysteresis tracking - prevent excessive MQTT updates
   - id: last_cell_voltages
+    type: std::vector<float>
+    restore_value: no
+
+  # RS485 hysteresis tracking - prevent excessive MQTT updates
+  - id: last_stack_voltage
+    type: float
+    initial_value: '-1.0'
+  - id: last_stack_current
+    type: float
+    initial_value: '-1.0'
+  - id: last_stack_cell_min
+    type: float
+    initial_value: '-1.0'
+  - id: last_stack_cell_max
+    type: float
+    initial_value: '-1.0'
+  - id: last_stack_cell_delta
+    type: float
+    initial_value: '-1.0'
+  - id: last_batt_voltages
+    type: std::vector<float>
+    restore_value: no
+  - id: last_batt_currents
+    type: std::vector<float>
+    restore_value: no
+  - id: last_batt_socs
+    type: std::vector<float>
+    restore_value: no
+  - id: last_batt_remain_ah
+    type: std::vector<float>
+    restore_value: no
+  - id: last_batt_total_ah
+    type: std::vector<float>
+    restore_value: no
+  - id: last_batt_states
+    type: std::vector<std::string>
+    restore_value: no
+  - id: last_batt_warnings
+    type: std::vector<std::string>
+    restore_value: no
+  - id: last_batt_alarms
+    type: std::vector<std::string>
+    restore_value: no
+  - id: last_batt_cycles
+    type: std::vector<int>
+    restore_value: no
+  - id: last_batt_balancing_count
+    type: std::vector<int>
+    restore_value: no
+  - id: last_batt_balancing_cells
+    type: std::vector<std::string>
+    restore_value: no
+  - id: last_batt_overvolt_count
+    type: std::vector<int>
+    restore_value: no
+  - id: last_batt_overvolt_cells
+    type: std::vector<std::string>
+    restore_value: no
+  - id: last_batt_charge_mosfet
+    type: std::vector<bool>
+    restore_value: no
+  - id: last_batt_discharge_mosfet
+    type: std::vector<bool>
+    restore_value: no
+  - id: last_batt_lmcharge_mosfet
+    type: std::vector<bool>
+    restore_value: no
+  - id: last_batt_cw_active
+    type: std::vector<bool>
+    restore_value: no
+  - id: last_batt_cw_cells
+    type: std::vector<std::string>
+    restore_value: no
+  - id: last_batt_cell_min
+    type: std::vector<float>
+    restore_value: no
+  - id: last_batt_cell_max
+    type: std::vector<float>
+    restore_value: no
+  - id: last_batt_cell_delta
     type: std::vector<float>
     restore_value: no
 
@@ -1658,96 +1792,152 @@ interval:
             }
             stack_current += id(batt_current)[batt];
 
-            // Publish per-battery data
+            // Publish per-battery data with hysteresis
             if (batt_min < 99.0f) {
-              // Cell min/max/delta
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cell_min", batt);
-              snprintf(payload, sizeof(payload), "%.3f", batt_min);
-              id(mqtt_client).publish(topic, payload);
+              // Cell min/max/delta with 5mV hysteresis
+              if (id(last_batt_cell_min)[batt] < 0 || fabsf(batt_min - id(last_batt_cell_min)[batt]) >= 0.005f) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cell_min", batt);
+                snprintf(payload, sizeof(payload), "%.3f", batt_min);
+                id(mqtt_client).publish(topic, payload);
+                id(last_batt_cell_min)[batt] = batt_min;
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cell_max", batt);
-              snprintf(payload, sizeof(payload), "%.3f", batt_max);
-              id(mqtt_client).publish(topic, payload);
+              if (id(last_batt_cell_max)[batt] < 0 || fabsf(batt_max - id(last_batt_cell_max)[batt]) >= 0.005f) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cell_max", batt);
+                snprintf(payload, sizeof(payload), "%.3f", batt_max);
+                id(mqtt_client).publish(topic, payload);
+                id(last_batt_cell_max)[batt] = batt_max;
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cell_delta_mv", batt);
-              snprintf(payload, sizeof(payload), "%.1f", (batt_max - batt_min) * 1000.0f);
-              id(mqtt_client).publish(topic, payload);
+              float cell_delta = (batt_max - batt_min) * 1000.0f;
+              if (id(last_batt_cell_delta)[batt] < 0 || fabsf(cell_delta - id(last_batt_cell_delta)[batt]) >= 5.0f) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cell_delta_mv", batt);
+                snprintf(payload, sizeof(payload), "%.1f", cell_delta);
+                id(mqtt_client).publish(topic, payload);
+                id(last_batt_cell_delta)[batt] = cell_delta;
+              }
 
-              // Voltage, current, SOC, cycles
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/voltage", batt);
-              snprintf(payload, sizeof(payload), "%.2f", id(batt_voltage)[batt]);
-              id(mqtt_client).publish(topic, payload);
+              // Voltage with 100mV hysteresis, current with 50mA hysteresis
+              if (id(last_batt_voltages)[batt] < 0 || fabsf(id(batt_voltage)[batt] - id(last_batt_voltages)[batt]) >= 0.1f) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/voltage", batt);
+                snprintf(payload, sizeof(payload), "%.2f", id(batt_voltage)[batt]);
+                id(mqtt_client).publish(topic, payload);
+                id(last_batt_voltages)[batt] = id(batt_voltage)[batt];
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/current", batt);
-              snprintf(payload, sizeof(payload), "%.2f", id(batt_current)[batt]);
-              id(mqtt_client).publish(topic, payload);
+              if (id(last_batt_currents)[batt] < 0 || fabsf(id(batt_current)[batt] - id(last_batt_currents)[batt]) >= 0.05f) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/current", batt);
+                snprintf(payload, sizeof(payload), "%.2f", id(batt_current)[batt]);
+                id(mqtt_client).publish(topic, payload);
+                id(last_batt_currents)[batt] = id(batt_current)[batt];
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/soc", batt);
-              snprintf(payload, sizeof(payload), "%.0f", id(batt_soc)[batt]);
-              id(mqtt_client).publish(topic, payload);
+              // SOC with 1% hysteresis, capacity with 0.5Ah hysteresis
+              if (id(last_batt_socs)[batt] < 0 || fabsf(id(batt_soc)[batt] - id(last_batt_socs)[batt]) >= 1.0f) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/soc", batt);
+                snprintf(payload, sizeof(payload), "%.0f", id(batt_soc)[batt]);
+                id(mqtt_client).publish(topic, payload);
+                id(last_batt_socs)[batt] = id(batt_soc)[batt];
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/remain_ah", batt);
-              snprintf(payload, sizeof(payload), "%.1f", id(batt_remain_ah)[batt]);
-              id(mqtt_client).publish(topic, payload);
+              if (id(last_batt_remain_ah)[batt] < 0 || fabsf(id(batt_remain_ah)[batt] - id(last_batt_remain_ah)[batt]) >= 0.5f) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/remain_ah", batt);
+                snprintf(payload, sizeof(payload), "%.1f", id(batt_remain_ah)[batt]);
+                id(mqtt_client).publish(topic, payload);
+                id(last_batt_remain_ah)[batt] = id(batt_remain_ah)[batt];
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/total_ah", batt);
-              snprintf(payload, sizeof(payload), "%.1f", id(batt_total_ah)[batt]);
-              id(mqtt_client).publish(topic, payload);
+              if (id(last_batt_total_ah)[batt] < 0 || fabsf(id(batt_total_ah)[batt] - id(last_batt_total_ah)[batt]) >= 0.5f) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/total_ah", batt);
+                snprintf(payload, sizeof(payload), "%.1f", id(batt_total_ah)[batt]);
+                id(mqtt_client).publish(topic, payload);
+                id(last_batt_total_ah)[batt] = id(batt_total_ah)[batt];
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cycles", batt);
-              snprintf(payload, sizeof(payload), "%d", id(batt_cycles)[batt]);
-              id(mqtt_client).publish(topic, payload);
+              // Cycles only publish on change (integer value)
+              if (id(batt_cycles)[batt] != id(last_batt_cycles)[batt]) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cycles", batt);
+                snprintf(payload, sizeof(payload), "%d", id(batt_cycles)[batt]);
+                id(mqtt_client).publish(topic, payload);
+                id(last_batt_cycles)[batt] = id(batt_cycles)[batt];
+              }
 
-              // Balancing
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/balancing_count", batt);
-              snprintf(payload, sizeof(payload), "%d", id(batt_balancing_count)[batt]);
-              id(mqtt_client).publish(topic, payload);
+              // Balancing with change detection
+              if (id(batt_balancing_count)[batt] != id(last_batt_balancing_count)[batt] ||
+                  id(batt_balancing_cells)[batt] != id(last_batt_balancing_cells)[batt]) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/balancing_count", batt);
+                snprintf(payload, sizeof(payload), "%d", id(batt_balancing_count)[batt]);
+                id(mqtt_client).publish(topic, payload);
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/balancing_active", batt);
+                id(mqtt_client).publish(topic, id(batt_balancing_count)[batt] > 0 ? "1" : "0");
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/balancing_cells", batt);
+                id(mqtt_client).publish(topic, id(batt_balancing_cells)[batt].c_str());
+                id(last_batt_balancing_count)[batt] = id(batt_balancing_count)[batt];
+                id(last_batt_balancing_cells)[batt] = id(batt_balancing_cells)[batt];
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/balancing_active", batt);
-              snprintf(payload, sizeof(payload), "%d", id(batt_balancing_count)[batt] > 0 ? 1 : 0);
-              id(mqtt_client).publish(topic, payload);
+              // Overvolt with change detection
+              if (id(batt_overvolt_count)[batt] != id(last_batt_overvolt_count)[batt] ||
+                  id(batt_overvolt_cells)[batt] != id(last_batt_overvolt_cells)[batt]) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/overvolt_count", batt);
+                snprintf(payload, sizeof(payload), "%d", id(batt_overvolt_count)[batt]);
+                id(mqtt_client).publish(topic, payload);
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/overvolt_active", batt);
+                id(mqtt_client).publish(topic, id(batt_overvolt_count)[batt] > 0 ? "1" : "0");
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/overvolt_cells", batt);
+                id(mqtt_client).publish(topic, id(batt_overvolt_cells)[batt].c_str());
+                id(last_batt_overvolt_count)[batt] = id(batt_overvolt_count)[batt];
+                id(last_batt_overvolt_cells)[batt] = id(batt_overvolt_cells)[batt];
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/balancing_cells", batt);
-              id(mqtt_client).publish(topic, id(batt_balancing_cells)[batt].c_str());
+              // State, warnings, alarms with change detection
+              if (id(batt_state)[batt] != id(last_batt_states)[batt]) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/state", batt);
+                id(mqtt_client).publish(topic, id(batt_state)[batt].c_str());
+                id(last_batt_states)[batt] = id(batt_state)[batt];
+              }
 
-              // Overvolt
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/overvolt_count", batt);
-              snprintf(payload, sizeof(payload), "%d", id(batt_overvolt_count)[batt]);
-              id(mqtt_client).publish(topic, payload);
+              if (id(batt_warnings)[batt] != id(last_batt_warnings)[batt]) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/warnings", batt);
+                id(mqtt_client).publish(topic, id(batt_warnings)[batt].c_str());
+                id(last_batt_warnings)[batt] = id(batt_warnings)[batt];
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/overvolt_active", batt);
-              snprintf(payload, sizeof(payload), "%d", id(batt_overvolt_count)[batt] > 0 ? 1 : 0);
-              id(mqtt_client).publish(topic, payload);
+              if (id(batt_alarms)[batt] != id(last_batt_alarms)[batt]) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/alarms", batt);
+                id(mqtt_client).publish(topic, id(batt_alarms)[batt].c_str());
+                id(last_batt_alarms)[batt] = id(batt_alarms)[batt];
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/overvolt_cells", batt);
-              id(mqtt_client).publish(topic, id(batt_overvolt_cells)[batt].c_str());
+              // MOSFET status with change detection
+              if (id(batt_charge_mosfet)[batt] != id(last_batt_charge_mosfet)[batt]) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/charge_mosfet", batt);
+                id(mqtt_client).publish(topic, id(batt_charge_mosfet)[batt] ? "1" : "0");
+                id(last_batt_charge_mosfet)[batt] = id(batt_charge_mosfet)[batt];
+              }
 
-              // State, warnings, alarms
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/state", batt);
-              id(mqtt_client).publish(topic, id(batt_state)[batt].c_str());
+              if (id(batt_discharge_mosfet)[batt] != id(last_batt_discharge_mosfet)[batt]) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/discharge_mosfet", batt);
+                id(mqtt_client).publish(topic, id(batt_discharge_mosfet)[batt] ? "1" : "0");
+                id(last_batt_discharge_mosfet)[batt] = id(batt_discharge_mosfet)[batt];
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/warnings", batt);
-              id(mqtt_client).publish(topic, id(batt_warnings)[batt].c_str());
+              if (id(batt_lmcharge_mosfet)[batt] != id(last_batt_lmcharge_mosfet)[batt]) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/lmcharge_mosfet", batt);
+                id(mqtt_client).publish(topic, id(batt_lmcharge_mosfet)[batt] ? "1" : "0");
+                id(last_batt_lmcharge_mosfet)[batt] = id(batt_lmcharge_mosfet)[batt];
+              }
 
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/alarms", batt);
-              id(mqtt_client).publish(topic, id(batt_alarms)[batt].c_str());
-
-              // MOSFET status
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/charge_mosfet", batt);
-              id(mqtt_client).publish(topic, id(batt_charge_mosfet)[batt] ? "1" : "0");
-
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/discharge_mosfet", batt);
-              id(mqtt_client).publish(topic, id(batt_discharge_mosfet)[batt] ? "1" : "0");
-
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/lmcharge_mosfet", batt);
-              id(mqtt_client).publish(topic, id(batt_lmcharge_mosfet)[batt] ? "1" : "0");
-
-              // CW (Cell Warning) flag
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cw_active", batt);
-              id(mqtt_client).publish(topic, id(batt_cw_active)[batt] ? "1" : "0");
-
-              snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cw_cells", batt);
-              id(mqtt_client).publish(topic, id(batt_cw_cells)[batt].c_str());
+              // CW (Cell Warning) flag with change detection
+              if (id(batt_cw_active)[batt] != id(last_batt_cw_active)[batt] ||
+                  id(batt_cw_cells)[batt] != id(last_batt_cw_cells)[batt]) {
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cw_active", batt);
+                id(mqtt_client).publish(topic, id(batt_cw_active)[batt] ? "1" : "0");
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cw_cells", batt);
+                id(mqtt_client).publish(topic, id(batt_cw_cells)[batt].c_str());
+                id(last_batt_cw_active)[batt] = id(batt_cw_active)[batt];
+                id(last_batt_cw_cells)[batt] = id(batt_cw_cells)[batt];
+              }
 
               // Individual cell voltages with 10mV hysteresis
               for (int cell = 0; cell < 16; cell++) {
@@ -1784,20 +1974,42 @@ interval:
             }
           }
 
-          // Publish stack totals
+          // Publish stack totals with hysteresis
           if (stack_cell_min < 99.0f && valid_batts > 0) {
             stack_voltage /= valid_batts;  // Average for parallel config
 
-            snprintf(payload, sizeof(payload), "%.3f", stack_cell_min);
-            id(mqtt_client).publish("${rs485_prefix}/stack/cell_min", payload);
-            snprintf(payload, sizeof(payload), "%.3f", stack_cell_max);
-            id(mqtt_client).publish("${rs485_prefix}/stack/cell_max", payload);
-            snprintf(payload, sizeof(payload), "%.1f", (stack_cell_max - stack_cell_min) * 1000.0f);
-            id(mqtt_client).publish("${rs485_prefix}/stack/cell_delta_mv", payload);
-            snprintf(payload, sizeof(payload), "%.2f", stack_voltage);
-            id(mqtt_client).publish("${rs485_prefix}/stack/voltage", payload);
-            snprintf(payload, sizeof(payload), "%.2f", stack_current);
-            id(mqtt_client).publish("${rs485_prefix}/stack/current", payload);
+            // Cell min/max/delta with 5mV hysteresis
+            if (id(last_stack_cell_min) < 0 || fabsf(stack_cell_min - id(last_stack_cell_min)) >= 0.005f) {
+              snprintf(payload, sizeof(payload), "%.3f", stack_cell_min);
+              id(mqtt_client).publish("${rs485_prefix}/stack/cell_min", payload);
+              id(last_stack_cell_min) = stack_cell_min;
+            }
+
+            if (id(last_stack_cell_max) < 0 || fabsf(stack_cell_max - id(last_stack_cell_max)) >= 0.005f) {
+              snprintf(payload, sizeof(payload), "%.3f", stack_cell_max);
+              id(mqtt_client).publish("${rs485_prefix}/stack/cell_max", payload);
+              id(last_stack_cell_max) = stack_cell_max;
+            }
+
+            float stack_cell_delta = (stack_cell_max - stack_cell_min) * 1000.0f;
+            if (id(last_stack_cell_delta) < 0 || fabsf(stack_cell_delta - id(last_stack_cell_delta)) >= 5.0f) {
+              snprintf(payload, sizeof(payload), "%.1f", stack_cell_delta);
+              id(mqtt_client).publish("${rs485_prefix}/stack/cell_delta_mv", payload);
+              id(last_stack_cell_delta) = stack_cell_delta;
+            }
+
+            // Voltage with 100mV hysteresis, current with 50mA hysteresis
+            if (id(last_stack_voltage) < 0 || fabsf(stack_voltage - id(last_stack_voltage)) >= 0.1f) {
+              snprintf(payload, sizeof(payload), "%.2f", stack_voltage);
+              id(mqtt_client).publish("${rs485_prefix}/stack/voltage", payload);
+              id(last_stack_voltage) = stack_voltage;
+            }
+
+            if (id(last_stack_current) < 0 || fabsf(stack_current - id(last_stack_current)) >= 0.05f) {
+              snprintf(payload, sizeof(payload), "%.2f", stack_current);
+              id(mqtt_client).publish("${rs485_prefix}/stack/current", payload);
+              id(last_stack_current) = stack_current;
+            }
 
             // Stack temperatures with 0.2°C hysteresis
             if (stack_temp_min < 99.0f) {
