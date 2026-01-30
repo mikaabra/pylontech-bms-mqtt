@@ -60,6 +60,8 @@ esphome:
           id(batt_cw_cells).resize(num_batt, std::string(""));
           id(batt_poll_failures).resize(num_batt, 0);
           id(batt_poll_alarm).resize(num_batt, false);
+          // Initialize temperature hysteresis tracking (6 temps per battery, use -999 as invalid)
+          id(last_batt_temps).resize(6 * num_batt, -999.0f);
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -790,6 +792,44 @@ globals:
     type: uint32_t
     initial_value: '0'
 
+  # CAN diagnostic counters hysteresis (60s interval)
+  - id: last_can_diag_publish
+    type: uint32_t
+    initial_value: '0'
+
+  # CAN charge/discharge flags hysteresis
+  - id: last_can_charge_state
+    type: uint8_t
+    initial_value: '0xFF'  # Invalid initial to force first publish
+
+  # RS485 temperature hysteresis tracking (0.2°C threshold)
+  - id: last_batt_temps
+    type: std::vector<float>
+    restore_value: no
+
+  # RS485 stack hysteresis tracking
+  - id: last_stack_temp_min
+    type: float
+    initial_value: '-999.0'
+  - id: last_stack_temp_max
+    type: float
+    initial_value: '-999.0'
+  - id: last_stack_balancing_count
+    type: int
+    initial_value: '-1'
+  - id: last_stack_balancing_cells
+    type: std::string
+    restore_value: no
+  - id: last_stack_overvolt_count
+    type: int
+    initial_value: '-1'
+  - id: last_stack_overvolt_cells
+    type: std::string
+    restore_value: no
+  - id: last_stack_alarms
+    type: std::string
+    restore_value: no
+
   # RS485 stale detection
   - id: last_rs485_rx
     type: uint32_t
@@ -920,20 +960,32 @@ interval:
     then:
       - lambda: |-
           char payload[16];
+          uint32_t now = millis();
 
-          // Publish charge/discharge enable flags from 0x35C
-          id(mqtt_client).publish(std::string("${can_prefix}/can/charge_enabled"),
-              id(can_charge_enabled) ? std::string("1") : std::string("0"));
-          id(mqtt_client).publish(std::string("${can_prefix}/can/discharge_enabled"),
-              id(can_discharge_enabled) ? std::string("1") : std::string("0"));
-          id(mqtt_client).publish(std::string("${can_prefix}/can/force_charge"),
-              id(can_force_charge_request) ? std::string("1") : std::string("0"));
+          // Charge/discharge flags hysteresis - pack into byte: bit0=charge, bit1=discharge, bit2=force
+          uint8_t charge_state = 0;
+          if (id(can_charge_enabled)) charge_state |= 0x01;
+          if (id(can_discharge_enabled)) charge_state |= 0x02;
+          if (id(can_force_charge_request)) charge_state |= 0x04;
 
-          // Publish diagnostic counters
-          snprintf(payload, sizeof(payload), "%d", id(can_frame_count));
-          id(mqtt_client).publish(std::string("${can_prefix}/diag/frame_count"), std::string(payload));
-          snprintf(payload, sizeof(payload), "%d", id(can_error_count));
-          id(mqtt_client).publish(std::string("${can_prefix}/diag/error_count"), std::string(payload));
+          if (charge_state != id(last_can_charge_state)) {
+            id(mqtt_client).publish(std::string("${can_prefix}/can/charge_enabled"),
+                id(can_charge_enabled) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/discharge_enabled"),
+                id(can_discharge_enabled) ? std::string("1") : std::string("0"));
+            id(mqtt_client).publish(std::string("${can_prefix}/can/force_charge"),
+                id(can_force_charge_request) ? std::string("1") : std::string("0"));
+            id(last_can_charge_state) = charge_state;
+          }
+
+          // Publish diagnostic counters every 60s (not on change - they always change)
+          if (now - id(last_can_diag_publish) >= 60000) {
+            snprintf(payload, sizeof(payload), "%d", id(can_frame_count));
+            id(mqtt_client).publish(std::string("${can_prefix}/diag/frame_count"), std::string(payload));
+            snprintf(payload, sizeof(payload), "%d", id(can_error_count));
+            id(mqtt_client).publish(std::string("${can_prefix}/diag/error_count"), std::string(payload));
+            id(last_can_diag_publish) = now;
+          }
 
           // Build combined state for hysteresis check (protection + warning + module count)
           uint32_t current_state = 0;
@@ -958,7 +1010,7 @@ interval:
           current_state |= ((uint32_t)id(can_status_byte7) << 24);
 
           // Hysteresis: only publish if state changed OR 60s heartbeat
-          uint32_t now = millis();
+          // (reuse 'now' from above)
           bool state_changed = (current_state != id(last_can_decoded_state));
           bool heartbeat = (now - id(last_can_decoded_publish) >= 60000);
 
@@ -1650,13 +1702,19 @@ interval:
                 }
               }
 
-              // Temperature sensors
+              // Temperature sensors with 0.2°C hysteresis
               for (int t = 0; t < 6; t++) {
                 float temp = id(cell_temps)[batt * 6 + t];
                 if (temp > -40.0f && temp < 100.0f) {
-                  snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/temp%d", batt, t + 1);
-                  snprintf(payload, sizeof(payload), "%.1f", temp);
-                  id(mqtt_client).publish(topic, payload);
+                  int temp_idx = batt * 6 + t;
+                  float last_temp = id(last_batt_temps)[temp_idx];
+                  // Publish if first time (last=-999) or changed by >= 0.2°C
+                  if (last_temp < -900.0f || fabsf(temp - last_temp) >= 0.2f) {
+                    snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/temp%d", batt, t + 1);
+                    snprintf(payload, sizeof(payload), "%.1f", temp);
+                    id(mqtt_client).publish(topic, payload);
+                    id(last_batt_temps)[temp_idx] = temp;
+                  }
                 }
               }
             }
@@ -1677,32 +1735,52 @@ interval:
             snprintf(payload, sizeof(payload), "%.2f", stack_current);
             id(mqtt_client).publish("${rs485_prefix}/stack/current", payload);
 
+            // Stack temperatures with 0.2°C hysteresis
             if (stack_temp_min < 99.0f) {
-              snprintf(payload, sizeof(payload), "%.1f", stack_temp_min);
-              id(mqtt_client).publish("${rs485_prefix}/stack/temp_min", payload);
-              snprintf(payload, sizeof(payload), "%.1f", stack_temp_max);
-              id(mqtt_client).publish("${rs485_prefix}/stack/temp_max", payload);
+              if (id(last_stack_temp_min) < -900.0f || fabsf(stack_temp_min - id(last_stack_temp_min)) >= 0.2f) {
+                snprintf(payload, sizeof(payload), "%.1f", stack_temp_min);
+                id(mqtt_client).publish("${rs485_prefix}/stack/temp_min", payload);
+                id(last_stack_temp_min) = stack_temp_min;
+              }
+              if (id(last_stack_temp_max) < -900.0f || fabsf(stack_temp_max - id(last_stack_temp_max)) >= 0.2f) {
+                snprintf(payload, sizeof(payload), "%.1f", stack_temp_max);
+                id(mqtt_client).publish("${rs485_prefix}/stack/temp_max", payload);
+                id(last_stack_temp_max) = stack_temp_max;
+              }
             }
 
-            // Balancing
-            snprintf(payload, sizeof(payload), "%d", id(stack_balancing_count));
-            id(mqtt_client).publish("${rs485_prefix}/stack/balancing_count", payload);
-            id(mqtt_client).publish("${rs485_prefix}/stack/balancing_active",
-                id(stack_balancing_count) > 0 ? "1" : "0");
-            id(mqtt_client).publish("${rs485_prefix}/stack/balancing_cells",
-                id(stack_balancing_cells).c_str());
+            // Balancing with change detection
+            if (id(stack_balancing_count) != id(last_stack_balancing_count) ||
+                id(stack_balancing_cells) != id(last_stack_balancing_cells)) {
+              snprintf(payload, sizeof(payload), "%d", id(stack_balancing_count));
+              id(mqtt_client).publish("${rs485_prefix}/stack/balancing_count", payload);
+              id(mqtt_client).publish("${rs485_prefix}/stack/balancing_active",
+                  id(stack_balancing_count) > 0 ? "1" : "0");
+              id(mqtt_client).publish("${rs485_prefix}/stack/balancing_cells",
+                  id(stack_balancing_cells).c_str());
+              id(last_stack_balancing_count) = id(stack_balancing_count);
+              id(last_stack_balancing_cells) = id(stack_balancing_cells);
+            }
 
-            // Overvolt
-            snprintf(payload, sizeof(payload), "%d", id(stack_overvolt_count));
-            id(mqtt_client).publish("${rs485_prefix}/stack/overvolt_count", payload);
-            id(mqtt_client).publish("${rs485_prefix}/stack/overvolt_active",
-                id(stack_overvolt_count) > 0 ? "1" : "0");
-            id(mqtt_client).publish("${rs485_prefix}/stack/overvolt_cells",
-                id(stack_overvolt_cells).c_str());
+            // Overvolt with change detection
+            if (id(stack_overvolt_count) != id(last_stack_overvolt_count) ||
+                id(stack_overvolt_cells) != id(last_stack_overvolt_cells)) {
+              snprintf(payload, sizeof(payload), "%d", id(stack_overvolt_count));
+              id(mqtt_client).publish("${rs485_prefix}/stack/overvolt_count", payload);
+              id(mqtt_client).publish("${rs485_prefix}/stack/overvolt_active",
+                  id(stack_overvolt_count) > 0 ? "1" : "0");
+              id(mqtt_client).publish("${rs485_prefix}/stack/overvolt_cells",
+                  id(stack_overvolt_cells).c_str());
+              id(last_stack_overvolt_count) = id(stack_overvolt_count);
+              id(last_stack_overvolt_cells) = id(stack_overvolt_cells);
+            }
 
-            // Alarms
-            id(mqtt_client).publish("${rs485_prefix}/stack/alarms",
-                id(stack_alarms).empty() ? "" : id(stack_alarms).c_str());
+            // Alarms with change detection
+            if (id(stack_alarms) != id(last_stack_alarms)) {
+              id(mqtt_client).publish("${rs485_prefix}/stack/alarms",
+                  id(stack_alarms).empty() ? "" : id(stack_alarms).c_str());
+              id(last_stack_alarms) = id(stack_alarms);
+            }
           }
 
           ESP_LOGI("mqtt", "Published RS485 data for %d batteries", ${num_batteries});
