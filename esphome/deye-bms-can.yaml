@@ -668,6 +668,16 @@ canbus:
                 id(sensor_v_low).publish_state(v_low_lim);
                 id(sensor_i_charge).publish_state(i_charge_lim);
                 id(sensor_i_discharge).publish_state(i_dis_lim);
+                // Publish to HA discovery topics using static buffer
+                static char val[16];
+                snprintf(val, sizeof(val), "%.1f", v_charge_max);
+                id(mqtt_client).publish("${can_prefix}/limit/v_charge_max", val);
+                snprintf(val, sizeof(val), "%.1f", v_low_lim);
+                id(mqtt_client).publish("${can_prefix}/limit/v_low", val);
+                snprintf(val, sizeof(val), "%.1f", i_charge_lim);
+                id(mqtt_client).publish("${can_prefix}/limit/i_charge", val);
+                snprintf(val, sizeof(val), "%.1f", i_dis_lim);
+                id(mqtt_client).publish("${can_prefix}/limit/i_discharge", val);
               }
 
       # 0x355: SOC/SOH
@@ -686,14 +696,19 @@ canbus:
               uint16_t soh = can_le_u16(x[2], x[3]);
 
               if (soc <= 100 && soh <= 100) {
+                static char val[8];
                 // SOC and SOH with 1% hysteresis
                 if (id(last_can_soc) == 0 || abs(soc - id(last_can_soc)) >= 1) {
                   id(sensor_soc).publish_state(soc);
                   id(last_can_soc) = soc;
+                  snprintf(val, sizeof(val), "%d", soc);
+                  id(mqtt_client).publish("${can_prefix}/soc", val);
                 }
                 if (id(last_can_soh) == 0 || abs(soh - id(last_can_soh)) >= 1) {
                   id(sensor_soh).publish_state(soh);
                   id(last_can_soh) = soh;
+                  snprintf(val, sizeof(val), "%d", soh);
+                  id(mqtt_client).publish("${can_prefix}/soh", val);
                 }
               }
 
@@ -767,6 +782,7 @@ canbus:
                 char buf[32];
                 snprintf(buf, sizeof(buf), "0x%016llX", flags);
                 id(sensor_flags).publish_state(buf);
+                id(mqtt_client).publish("${can_prefix}/flags", buf);
                 id(last_flags_value) = flags;
                 id(last_flags_publish) = now;
 
@@ -795,9 +811,14 @@ canbus:
               float v1 = can_le_u16(x[4], x[5]) / 1000.0f;
               float v2 = can_le_u16(x[6], x[7]) / 1000.0f;
 
+              static char val[16];
               if (tmin >= -10.0f && tmax <= 50.0f) {
                 id(sensor_temp_min).publish_state(tmin);
                 id(sensor_temp_max).publish_state(tmax);
+                snprintf(val, sizeof(val), "%.1f", tmin);
+                id(mqtt_client).publish("${can_prefix}/ext/temp_min", val);
+                snprintf(val, sizeof(val), "%.1f", tmax);
+                id(mqtt_client).publish("${can_prefix}/ext/temp_max", val);
               }
 
               float vmin = 0, vmax = 0;
@@ -816,7 +837,14 @@ canbus:
               if (vmin > 0) {
                 id(sensor_cell_v_min).publish_state(vmin);
                 id(sensor_cell_v_max).publish_state(vmax);
-                id(sensor_cell_v_delta).publish_state(vmax - vmin);
+                float delta = vmax - vmin;
+                id(sensor_cell_v_delta).publish_state(delta);
+                snprintf(val, sizeof(val), "%.3f", vmin);
+                id(mqtt_client).publish("${can_prefix}/ext/cell_v_min", val);
+                snprintf(val, sizeof(val), "%.3f", vmax);
+                id(mqtt_client).publish("${can_prefix}/ext/cell_v_max", val);
+                snprintf(val, sizeof(val), "%.3f", delta);
+                id(mqtt_client).publish("${can_prefix}/ext/cell_v_delta", val);
               }
 
       # 0x35C: Battery Charge Request Flags (V1.2)
@@ -1316,9 +1344,11 @@ interval:
           // Publish diagnostic counters every 60s (not on change - they always change)
           if (now - id(last_can_diag_publish) >= 60000) {
             snprintf(payload, sizeof(payload), "%d", id(can_frame_count));
-            id(mqtt_client).publish(std::string("${can_prefix}/diag/frame_count"), std::string(payload));
+            id(mqtt_client).publish("${can_prefix}/diag/frame_count", payload);
             snprintf(payload, sizeof(payload), "%d", id(can_error_count));
-            id(mqtt_client).publish(std::string("${can_prefix}/diag/error_count"), std::string(payload));
+            id(mqtt_client).publish("${can_prefix}/diag/error_count", payload);
+            snprintf(payload, sizeof(payload), "%lu", (unsigned long)esp_get_free_heap_size());
+            id(mqtt_client).publish("${can_prefix}/diag/free_heap", payload);
             id(last_can_diag_publish) = now;
           }
 
@@ -1384,13 +1414,13 @@ interval:
 
             // Publish 0x359 module count and status byte 7
             snprintf(payload, sizeof(payload), "%d", id(can_module_count));
-            id(mqtt_client).publish(std::string("${can_prefix}/can/module_count"), std::string(payload));
+            id(mqtt_client).publish("${can_prefix}/can/module_count", payload);
             snprintf(payload, sizeof(payload), "%d", id(can_status_byte7));
-            id(mqtt_client).publish(std::string("${can_prefix}/can/status_byte7"), std::string(payload));
+            id(mqtt_client).publish("${can_prefix}/can/status_byte7", payload);
 
             // Publish alarm summary
-            id(mqtt_client).publish(std::string("${can_prefix}/can/alarm_summary"),
-                id(can_alarm_summary).empty() ? std::string("OK") : id(can_alarm_summary));
+            id(mqtt_client).publish("${can_prefix}/can/alarm_summary",
+                id(can_alarm_summary).empty() ? "OK" : id(can_alarm_summary).c_str());
 
             // Update template sensors on change (for Home Assistant integration)
             // Module count - only update if changed
@@ -1487,8 +1517,14 @@ interval:
             int bytes_read = 0;
             while (id(rs485_uart).available() && bytes_read < MAX_BYTES_PER_TICK) {
               if (id(rs485_response_buf).length() >= MAX_BUFFER_SIZE) {
-                ESP_LOGW("rs485", "Buffer overflow, clearing");
-                id(rs485_response_buf).clear();
+                // Buffer overflow - mark poll failed and skip to next battery
+                int batt = id(rs485_current_batt);
+                ESP_LOGW("rs485", "Batt %d buffer overflow, marking poll failed", batt);
+                id(batt_poll_failures)[batt]++;
+                id(rs485_current_batt) = (batt + 1) % NUM_BATT;
+                id(rs485_last_analog_poll) = now;
+                id(rs485_state) = 0;  // Back to IDLE
+                return;
               }
               uint8_t c;
               id(rs485_uart).read_byte(&c);
@@ -1644,8 +1680,17 @@ interval:
             int bytes_read = 0;
             while (id(rs485_uart).available() && bytes_read < MAX_BYTES_PER_TICK) {
               if (id(rs485_response_buf).length() >= MAX_BUFFER_SIZE) {
-                ESP_LOGW("rs485", "Buffer overflow, clearing");
-                id(rs485_response_buf).clear();
+                // Buffer overflow - skip this battery's alarm poll
+                int batt = id(rs485_alarm_batt);
+                ESP_LOGW("rs485", "Batt %d alarm buffer overflow, skipping", batt);
+                id(rs485_alarm_batt)++;
+                if (id(rs485_alarm_batt) >= NUM_BATT) {
+                  id(rs485_last_alarm_poll) = now;
+                  id(rs485_state) = 0;  // Back to IDLE
+                } else {
+                  id(rs485_state) = 3;  // Next battery alarm
+                }
+                return;
               }
               uint8_t c;
               id(rs485_uart).read_byte(&c);
@@ -1806,6 +1851,7 @@ interval:
             // Availability heartbeat: republish online status if not stale
             if (!id(rs485_stale)) {
               id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
+              id(last_rs485_status_online) = true;
             }
             // Reset all hysteresis tracking to force publish
             id(last_stack_voltage) = -1.0f;
