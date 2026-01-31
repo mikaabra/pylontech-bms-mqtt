@@ -8,9 +8,10 @@ Supports **CAN bus**, **RS485**, and **Modbus-TCP** interfaces for comprehensive
 
 **📁 Repository Structure**: This repository contains THREE separate implementations for TWO different sites:
 
-1. **Deye Site - Python Scripts** (this directory): Monitor Pylontech + Deye inverter on Raspberry Pi
-2. **Deye Site - ESPHome Firmware** (`esphome/`): Same functionality as Python, ESP32 platform (migration option)
-3. **EPever Site - ESPHome Firmware** (`esphome-epever/`): Translate Pylontech to EPever BMS-Link protocol (different site)
+1. **Deye Site - ESPHome Firmware** (`esphome/`): Same functionality as Python, ESP32 platform (in production)
+2. **EPever Site - ESPHome Firmware** (`esphome-epever/`): Translate Pylontech to EPever BMS-Link protocol (different site)
+3. **Deye Site - Python Scripts** (this directory): Monitor Pylontech + Deye inverter on Raspberry Pi (was used for initial development/testing)
+
 
 **See [ENVIRONMENTS.md](ENVIRONMENTS.md) for full documentation of all implementations.**
 
