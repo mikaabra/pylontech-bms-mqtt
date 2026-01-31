@@ -132,12 +132,12 @@ mqtt:
     - lambda: |-
         ESP_LOGI("mqtt", "MQTT connected");
 
-        // Track status transition - publish availability on connect
-        if (!id(last_can_status_online)) {
+        // Track status transition - publish availability on connect (only if not stale)
+        if (!id(can_stale) && !id(last_can_status_online)) {
           id(mqtt_client).publish(std::string("${can_prefix}/status"), std::string("online"), (uint8_t)0, true);
           id(last_can_status_online) = true;
         }
-        if (!id(last_rs485_status_online)) {
+        if (!id(rs485_stale) && !id(last_rs485_status_online)) {
           id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
           id(last_rs485_status_online) = true;
         }
@@ -192,399 +192,422 @@ mqtt:
         }
 
         // Only publish HA Discovery once per boot (not on every reconnect)
-        if (id(discovery_sent)) {
+        if (!id(discovery_sent)) {
+          id(publish_discovery).execute();
+        } else {
           ESP_LOGI("mqtt", "Discovery already sent this boot, skipping");
-          return;
         }
 
-        ESP_LOGI("mqtt", "Publishing HA Discovery configs (once per boot)...");
+# HA Discovery publishing script (called from on_connect and manual button)
+script:
+  - id: publish_discovery
+    mode: single
+    then:
+      - lambda: |-
+          ESP_LOGI("mqtt", "Publishing HA Discovery configs...");
 
-        // Publish HA Discovery configs
-        // Device info shared by all entities
-        const char* device_json = R"("device":{"identifiers":["pylontech_rs485"],"name":"Pylontech RS485","manufacturer":"Pylontech","model":"BMS RS485"})";
-        const char* avail_json = R"("availability_topic":"${rs485_prefix}/status","payload_available":"online","payload_not_available":"offline")";
+          // Publish HA Discovery configs
+          // Device info shared by all entities
+          const char* device_json = R"("device":{"identifiers":["pylontech_rs485"],"name":"Pylontech RS485","manufacturer":"Pylontech","model":"BMS RS485"})";
+          const char* avail_json = R"("availability_topic":"${rs485_prefix}/status","payload_available":"online","payload_not_available":"offline")";
 
-        // Increased buffer sizes for safety
-        char topic[160];
-        char payload[768];
-        int publish_count = 0;
-        static bool truncation_warned = false;
+          // Increased buffer sizes for safety
+          char topic[160];
+          char payload[768];
+          int publish_count = 0;
 
-        // Helper macro: check snprintf result and skip if truncated
-        #define SAFE_SNPRINTF(buf, sz, ...) do { \
-          int ret = snprintf(buf, sz, __VA_ARGS__); \
-          if (ret >= (int)(sz)) { \
-            if (!truncation_warned) { \
-              ESP_LOGW("mqtt", "Discovery payload truncated, skipping (buffer=%d, needed=%d)", (int)(sz), ret); \
-              truncation_warned = true; \
-            } \
-            continue; \
-          } \
-        } while(0)
-
-        // Helper macro: pace publishes with yield every 20
-        #define PACE_PUBLISH() do { \
-          publish_count++; \
-          if (publish_count % 20 == 0) { \
-            delay(10); \
-            App.feed_wdt(); \
-          } \
-        } while(0)
-
-        // Stack sensors
-        const char* stack_sensors[][5] = {
-          {"stack_cell_min", "Stack Cell Min", "${rs485_prefix}/stack/cell_min", "V", "voltage"},
-          {"stack_cell_max", "Stack Cell Max", "${rs485_prefix}/stack/cell_max", "V", "voltage"},
-          {"stack_cell_delta", "Stack Cell Delta", "${rs485_prefix}/stack/cell_delta_mv", "mV", ""},
-          {"stack_voltage", "Stack Voltage", "${rs485_prefix}/stack/voltage", "V", "voltage"},
-          {"stack_current", "Stack Current", "${rs485_prefix}/stack/current", "A", "current"},
-          {"stack_temp_min", "Stack Temp Min", "${rs485_prefix}/stack/temp_min", "°C", "temperature"},
-          {"stack_temp_max", "Stack Temp Max", "${rs485_prefix}/stack/temp_max", "°C", "temperature"},
-          {"stack_balancing_count", "Stack Balancing Cells", "${rs485_prefix}/stack/balancing_count", "", ""},
-          {"stack_balancing_cells", "Stack Balancing Cells List", "${rs485_prefix}/stack/balancing_cells", "", ""},
-          {"stack_overvolt_count", "Stack Overvolt Cells", "${rs485_prefix}/stack/overvolt_count", "", ""},
-          {"stack_overvolt_cells", "Stack Overvolt Cells List", "${rs485_prefix}/stack/overvolt_cells", "", ""},
-          {"stack_alarms", "Stack Alarms", "${rs485_prefix}/stack/alarms", "", ""},
-        };
-
-        for (int i = 0; i < 12; i++) {
-          snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", stack_sensors[i][0]);
-          if (strlen(stack_sensors[i][3]) > 0 && strlen(stack_sensors[i][4]) > 0) {
-            SAFE_SNPRINTF(payload, sizeof(payload),
-              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
-              stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], stack_sensors[i][4], avail_json, device_json);
-          } else if (strlen(stack_sensors[i][3]) > 0) {
-            SAFE_SNPRINTF(payload, sizeof(payload),
-              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
-              stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], avail_json, device_json);
-          } else {
-            SAFE_SNPRINTF(payload, sizeof(payload),
-              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s",%s,%s})",
-              stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], avail_json, device_json);
-          }
-          id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-          PACE_PUBLISH();
-        }
-
-        // Stack binary sensors
-        snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/stack_balancing_active/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"Stack Balancing Active","state_topic":"${rs485_prefix}/stack/balancing_active","unique_id":"pylontech_rs485_stack_balancing_active","payload_on":"1","payload_off":"0","icon":"mdi:scale-balance",%s,%s})",
-          avail_json, device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
-
-        snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/stack_overvolt_active/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"Stack Overvolt Active","state_topic":"${rs485_prefix}/stack/overvolt_active","unique_id":"pylontech_rs485_stack_overvolt_active","payload_on":"1","payload_off":"0","icon":"mdi:flash-alert",%s,%s})",
-          avail_json, device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
-
-        // Per-battery discovery
-        for (int batt = 0; batt < ${num_batteries}; batt++) {
-          char prefix[16], state_prefix[48];
-          snprintf(prefix, sizeof(prefix), "batt%d", batt);
-          snprintf(state_prefix, sizeof(state_prefix), "${rs485_prefix}/battery%d", batt);
-
-          // Battery sensors
-          const char* batt_sensor_names[][4] = {
-            {"cell_min", "Cell Min", "V", "voltage"},
-            {"cell_max", "Cell Max", "V", "voltage"},
-            {"cell_delta", "Cell Delta", "mV", ""},
-            {"voltage", "Voltage", "V", "voltage"},
-            {"current", "Current", "A", "current"},
-            {"soc", "SOC", "%", ""},
-            {"remain_ah", "Remaining Capacity", "Ah", ""},
-            {"total_ah", "Total Capacity", "Ah", ""},
-            {"cycles", "Cycles", "", ""},
-            {"balancing_count", "Balancing Cells", "", ""},
-            {"balancing_cells", "Balancing Cells List", "", ""},
-            {"overvolt_count", "Overvolt Cells", "", ""},
-            {"overvolt_cells", "Overvolt Cells List", "", ""},
-            {"state", "State", "", ""},
-            {"warnings", "Warnings", "", ""},
-            {"alarms", "Alarms", "", ""},
-            {"cw_cells", "CW Cells List", "", ""},
+          // Helper lambda: pace publishes with yield every 20
+          auto pace_publish = [&publish_count]() {
+            publish_count++;
+            if (publish_count % 20 == 0) {
+              delay(10);
+            }
           };
 
-          for (int i = 0; i < 17; i++) {
-            char obj_id[32], name[48], st[64];
-            snprintf(obj_id, sizeof(obj_id), "%s_%s", prefix, batt_sensor_names[i][0]);
-            snprintf(name, sizeof(name), "Battery %d %s", batt, batt_sensor_names[i][1]);
-            snprintf(st, sizeof(st), "%s/%s", state_prefix, batt_sensor_names[i][0]);
-            // Fix topic names for cell_delta
-            if (strcmp(batt_sensor_names[i][0], "cell_delta") == 0) {
-              snprintf(st, sizeof(st), "%s/cell_delta_mv", state_prefix);
-            }
+          // Stack sensors
+          const char* stack_sensors[][5] = {
+            {"stack_cell_min", "Stack Cell Min", "${rs485_prefix}/stack/cell_min", "V", "voltage"},
+            {"stack_cell_max", "Stack Cell Max", "${rs485_prefix}/stack/cell_max", "V", "voltage"},
+            {"stack_cell_delta", "Stack Cell Delta", "${rs485_prefix}/stack/cell_delta_mv", "mV", ""},
+            {"stack_voltage", "Stack Voltage", "${rs485_prefix}/stack/voltage", "V", "voltage"},
+            {"stack_current", "Stack Current", "${rs485_prefix}/stack/current", "A", "current"},
+            {"stack_temp_min", "Stack Temp Min", "${rs485_prefix}/stack/temp_min", "°C", "temperature"},
+            {"stack_temp_max", "Stack Temp Max", "${rs485_prefix}/stack/temp_max", "°C", "temperature"},
+            {"stack_balancing_count", "Stack Balancing Cells", "${rs485_prefix}/stack/balancing_count", "", ""},
+            {"stack_balancing_cells", "Stack Balancing Cells List", "${rs485_prefix}/stack/balancing_cells", "", ""},
+            {"stack_overvolt_count", "Stack Overvolt Cells", "${rs485_prefix}/stack/overvolt_count", "", ""},
+            {"stack_overvolt_cells", "Stack Overvolt Cells List", "${rs485_prefix}/stack/overvolt_cells", "", ""},
+            {"stack_alarms", "Stack Alarms", "${rs485_prefix}/stack/alarms", "", ""},
+          };
 
-            snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
-            if (strlen(batt_sensor_names[i][2]) > 0 && strlen(batt_sensor_names[i][3]) > 0) {
-              SAFE_SNPRINTF(payload, sizeof(payload),
+          for (int i = 0; i < 12; i++) {
+            snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", stack_sensors[i][0]);
+            bool ok = false;
+            if (strlen(stack_sensors[i][3]) > 0 && strlen(stack_sensors[i][4]) > 0) {
+              ok = safe_snprintf(payload, sizeof(payload),
                 R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
-                name, st, obj_id, batt_sensor_names[i][2], batt_sensor_names[i][3], avail_json, device_json);
-            } else if (strlen(batt_sensor_names[i][2]) > 0) {
-              SAFE_SNPRINTF(payload, sizeof(payload),
+                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], stack_sensors[i][4], avail_json, device_json);
+            } else if (strlen(stack_sensors[i][3]) > 0) {
+              ok = safe_snprintf(payload, sizeof(payload),
                 R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
-                name, st, obj_id, batt_sensor_names[i][2], avail_json, device_json);
+                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], avail_json, device_json);
             } else {
-              SAFE_SNPRINTF(payload, sizeof(payload),
+              ok = safe_snprintf(payload, sizeof(payload),
                 R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s",%s,%s})",
-                name, st, obj_id, avail_json, device_json);
+                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], avail_json, device_json);
             }
-            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-            PACE_PUBLISH();
+            if (ok) {
+              id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+              pace_publish();
+            }
           }
 
-          // Battery binary sensors
-          const char* batt_binary_names[][2] = {
-            {"balancing_active", "Balancing Active"},
-            {"overvolt_active", "Overvolt Active"},
-            {"charge_mosfet", "Charge MOSFET"},
-            {"discharge_mosfet", "Discharge MOSFET"},
-            {"lmcharge_mosfet", "LM Charge MOSFET"},
-            {"cw_active", "Cell Warning"},
+          // Stack binary sensors
+          snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/stack_balancing_active/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"Stack Balancing Active","state_topic":"${rs485_prefix}/stack/balancing_active","unique_id":"pylontech_rs485_stack_balancing_active","payload_on":"1","payload_off":"0","icon":"mdi:scale-balance",%s,%s})",
+            avail_json, device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
+
+          snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/stack_overvolt_active/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"Stack Overvolt Active","state_topic":"${rs485_prefix}/stack/overvolt_active","unique_id":"pylontech_rs485_stack_overvolt_active","payload_on":"1","payload_off":"0","icon":"mdi:flash-alert",%s,%s})",
+            avail_json, device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
+
+          // Per-battery discovery
+          for (int batt = 0; batt < ${num_batteries}; batt++) {
+            char prefix[16], state_prefix[48];
+            snprintf(prefix, sizeof(prefix), "batt%d", batt);
+            snprintf(state_prefix, sizeof(state_prefix), "${rs485_prefix}/battery%d", batt);
+
+            // Battery sensors
+            const char* batt_sensor_names[][4] = {
+              {"cell_min", "Cell Min", "V", "voltage"},
+              {"cell_max", "Cell Max", "V", "voltage"},
+              {"cell_delta", "Cell Delta", "mV", ""},
+              {"voltage", "Voltage", "V", "voltage"},
+              {"current", "Current", "A", "current"},
+              {"soc", "SOC", "%", ""},
+              {"remain_ah", "Remaining Capacity", "Ah", ""},
+              {"total_ah", "Total Capacity", "Ah", ""},
+              {"cycles", "Cycles", "", ""},
+              {"balancing_count", "Balancing Cells", "", ""},
+              {"balancing_cells", "Balancing Cells List", "", ""},
+              {"overvolt_count", "Overvolt Cells", "", ""},
+              {"overvolt_cells", "Overvolt Cells List", "", ""},
+              {"state", "State", "", ""},
+              {"warnings", "Warnings", "", ""},
+              {"alarms", "Alarms", "", ""},
+              {"cw_cells", "CW Cells List", "", ""},
+            };
+
+            for (int i = 0; i < 17; i++) {
+              char obj_id[32], name[48], st[64];
+              snprintf(obj_id, sizeof(obj_id), "%s_%s", prefix, batt_sensor_names[i][0]);
+              snprintf(name, sizeof(name), "Battery %d %s", batt, batt_sensor_names[i][1]);
+              snprintf(st, sizeof(st), "%s/%s", state_prefix, batt_sensor_names[i][0]);
+              // Fix topic names for cell_delta
+              if (strcmp(batt_sensor_names[i][0], "cell_delta") == 0) {
+                snprintf(st, sizeof(st), "%s/cell_delta_mv", state_prefix);
+              }
+
+              snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
+              bool ok = false;
+              if (strlen(batt_sensor_names[i][2]) > 0 && strlen(batt_sensor_names[i][3]) > 0) {
+                ok = safe_snprintf(payload, sizeof(payload),
+                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+                  name, st, obj_id, batt_sensor_names[i][2], batt_sensor_names[i][3], avail_json, device_json);
+              } else if (strlen(batt_sensor_names[i][2]) > 0) {
+                ok = safe_snprintf(payload, sizeof(payload),
+                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
+                  name, st, obj_id, batt_sensor_names[i][2], avail_json, device_json);
+              } else {
+                ok = safe_snprintf(payload, sizeof(payload),
+                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s",%s,%s})",
+                  name, st, obj_id, avail_json, device_json);
+              }
+              if (ok) {
+                id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+                pace_publish();
+              }
+            }
+
+            // Battery binary sensors
+            const char* batt_binary_names[][2] = {
+              {"balancing_active", "Balancing Active"},
+              {"overvolt_active", "Overvolt Active"},
+              {"charge_mosfet", "Charge MOSFET"},
+              {"discharge_mosfet", "Discharge MOSFET"},
+              {"lmcharge_mosfet", "LM Charge MOSFET"},
+              {"cw_active", "Cell Warning"},
+            };
+
+            for (int i = 0; i < 6; i++) {
+              char obj_id[32], name[48], st[64];
+              snprintf(obj_id, sizeof(obj_id), "%s_%s", prefix, batt_binary_names[i][0]);
+              snprintf(name, sizeof(name), "Battery %d %s", batt, batt_binary_names[i][1]);
+              snprintf(st, sizeof(st), "%s/%s", state_prefix, batt_binary_names[i][0]);
+
+              snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", obj_id);
+              if (safe_snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","payload_on":"1","payload_off":"0",%s,%s})",
+                name, st, obj_id, avail_json, device_json)) {
+                id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+                pace_publish();
+              }
+            }
+
+            // Individual cell voltages
+            for (int cell = 1; cell <= 16; cell++) {
+              char obj_id[32], name[48], st[64];
+              snprintf(obj_id, sizeof(obj_id), "%s_cell%02d", prefix, cell);
+              snprintf(name, sizeof(name), "Battery %d Cell %d", batt, cell);
+              snprintf(st, sizeof(st), "%s/cell%02d", state_prefix, cell);
+
+              snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
+              if (safe_snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"V","device_class":"voltage","state_class":"measurement","suggested_display_precision":3,%s,%s})",
+                name, st, obj_id, avail_json, device_json)) {
+                id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+                pace_publish();
+              }
+            }
+
+            // Temperature sensors
+            for (int temp = 1; temp <= 6; temp++) {
+              char obj_id[32], name[48], st[64];
+              snprintf(obj_id, sizeof(obj_id), "%s_temp%d", prefix, temp);
+              snprintf(name, sizeof(name), "Battery %d Temp %d", batt, temp);
+              snprintf(st, sizeof(st), "%s/temp%d", state_prefix, temp);
+
+              snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
+              if (safe_snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"°C","device_class":"temperature","state_class":"measurement",%s,%s})",
+                name, st, obj_id, avail_json, device_json)) {
+                id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+                pace_publish();
+              }
+            }
+
+            // Poll alarm binary sensor (RS485 communication failure detection)
+            {
+              char obj_id[32], name[48], st[64];
+              snprintf(obj_id, sizeof(obj_id), "%s_poll_alarm", prefix);
+              snprintf(name, sizeof(name), "Battery %d Poll Alarm", batt);
+              snprintf(st, sizeof(st), "%s/poll_alarm", state_prefix);
+
+              snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", obj_id);
+              if (safe_snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","device_class":"problem","payload_on":"ON","payload_off":"OFF","icon":"mdi:lan-disconnect",%s,%s})",
+                name, st, obj_id, avail_json, device_json)) {
+                id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+                pace_publish();
+              }
+            }
+          }
+
+          ESP_LOGI("mqtt", "Published HA discovery configs for %d batteries", ${num_batteries});
+
+          // CAN bus device - separate from RS485 batteries
+          const char* can_device_json = R"("device":{"identifiers":["deye_bms_can"],"name":"Deye BMS CAN","manufacturer":"Pylontech","model":"BMS CAN"})";
+          const char* can_avail_json = R"("availability_topic":"${can_prefix}/status","payload_available":"online","payload_not_available":"offline")";
+
+          // CAN binary sensors (charge/discharge control from 0x35C)
+          snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_charge_enabled/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"CAN Charge Enabled","state_topic":"${can_prefix}/can/charge_enabled","unique_id":"deye_bms_can_charge_enabled","payload_on":"1","payload_off":"0","icon":"mdi:battery-charging",%s,%s})",
+            can_avail_json, can_device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
+
+          snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_discharge_enabled/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"CAN Discharge Enabled","state_topic":"${can_prefix}/can/discharge_enabled","unique_id":"deye_bms_can_discharge_enabled","payload_on":"1","payload_off":"0","icon":"mdi:battery-minus",%s,%s})",
+            can_avail_json, can_device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
+
+          snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_force_charge/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"CAN Force Charge Request","state_topic":"${can_prefix}/can/force_charge","unique_id":"deye_bms_can_force_charge","payload_on":"1","payload_off":"0","icon":"mdi:battery-alert",%s,%s})",
+            can_avail_json, can_device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
+
+          // CAN diagnostic sensors
+          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_frame_count/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"CAN Frame Count","state_topic":"${can_prefix}/diag/frame_count","unique_id":"deye_bms_can_frame_count","icon":"mdi:counter","entity_category":"diagnostic",%s,%s})",
+            can_avail_json, can_device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
+
+          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_error_count/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"CAN Error Count","state_topic":"${can_prefix}/diag/error_count","unique_id":"deye_bms_can_error_count","icon":"mdi:alert-circle","entity_category":"diagnostic",%s,%s})",
+            can_avail_json, can_device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
+
+          // CAN 0x359 module count and status sensors
+          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_module_count/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"CAN Module Count","state_topic":"${can_prefix}/can/module_count","unique_id":"deye_bms_can_module_count","icon":"mdi:battery-multiple",%s,%s})",
+            can_avail_json, can_device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
+
+          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_status_byte7/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"CAN Status Byte 7","state_topic":"${can_prefix}/can/status_byte7","unique_id":"deye_bms_can_status_byte7","icon":"mdi:information-outline","entity_category":"diagnostic",%s,%s})",
+            can_avail_json, can_device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
+
+          // CAN alarm summary text sensor
+          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_alarm_summary/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"CAN Alarm Summary","state_topic":"${can_prefix}/can/alarm_summary","unique_id":"deye_bms_can_alarm_summary","icon":"mdi:alert",%s,%s})",
+            can_avail_json, can_device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
+
+          // CAN 0x359 protection binary sensors (device_class: problem)
+          const char* prot_sensors[][3] = {
+            {"prot_overvolt", "CAN Protection Overvolt", "mdi:flash-alert"},
+            {"prot_undervolt", "CAN Protection Undervolt", "mdi:flash-off"},
+            {"prot_overtemp", "CAN Protection Overtemp", "mdi:thermometer-alert"},
+            {"prot_undertemp", "CAN Protection Undertemp", "mdi:snowflake-alert"},
+            {"prot_discharge_overcurrent", "CAN Protection Discharge OC", "mdi:current-dc"},
+            {"prot_charge_overcurrent", "CAN Protection Charge OC", "mdi:current-dc"},
+            {"prot_system_error", "CAN Protection System Error", "mdi:alert-circle"},
           };
-
-          for (int i = 0; i < 6; i++) {
-            char obj_id[32], name[48], st[64];
-            snprintf(obj_id, sizeof(obj_id), "%s_%s", prefix, batt_binary_names[i][0]);
-            snprintf(name, sizeof(name), "Battery %d %s", batt, batt_binary_names[i][1]);
-            snprintf(st, sizeof(st), "%s/%s", state_prefix, batt_binary_names[i][0]);
-
-            snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", obj_id);
-            SAFE_SNPRINTF(payload, sizeof(payload),
-              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","payload_on":"1","payload_off":"0",%s,%s})",
-              name, st, obj_id, avail_json, device_json);
-            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-            PACE_PUBLISH();
-          }
-
-          // Individual cell voltages
-          for (int cell = 1; cell <= 16; cell++) {
-            char obj_id[32], name[48], st[64];
-            snprintf(obj_id, sizeof(obj_id), "%s_cell%02d", prefix, cell);
-            snprintf(name, sizeof(name), "Battery %d Cell %d", batt, cell);
-            snprintf(st, sizeof(st), "%s/cell%02d", state_prefix, cell);
-
-            snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
-            SAFE_SNPRINTF(payload, sizeof(payload),
-              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"V","device_class":"voltage","state_class":"measurement","suggested_display_precision":3,%s,%s})",
-              name, st, obj_id, avail_json, device_json);
-            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-            PACE_PUBLISH();
-          }
-
-          // Temperature sensors
-          for (int temp = 1; temp <= 6; temp++) {
-            char obj_id[32], name[48], st[64];
-            snprintf(obj_id, sizeof(obj_id), "%s_temp%d", prefix, temp);
-            snprintf(name, sizeof(name), "Battery %d Temp %d", batt, temp);
-            snprintf(st, sizeof(st), "%s/temp%d", state_prefix, temp);
-
-            snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
-            SAFE_SNPRINTF(payload, sizeof(payload),
-              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"°C","device_class":"temperature","state_class":"measurement",%s,%s})",
-              name, st, obj_id, avail_json, device_json);
-            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-            PACE_PUBLISH();
-          }
-
-          // Poll alarm binary sensor (RS485 communication failure detection)
-          {
-            char obj_id[32], name[48], st[64];
-            snprintf(obj_id, sizeof(obj_id), "%s_poll_alarm", prefix);
-            snprintf(name, sizeof(name), "Battery %d Poll Alarm", batt);
-            snprintf(st, sizeof(st), "%s/poll_alarm", state_prefix);
-
-            snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", obj_id);
-            SAFE_SNPRINTF(payload, sizeof(payload),
-              R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","device_class":"problem","payload_on":"ON","payload_off":"OFF","icon":"mdi:lan-disconnect",%s,%s})",
-              name, st, obj_id, avail_json, device_json);
-            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-            PACE_PUBLISH();
-          }
-        }
-
-        ESP_LOGI("mqtt", "Published HA discovery configs for %d batteries", ${num_batteries});
-
-        // CAN bus device - separate from RS485 batteries
-        const char* can_device_json = R"("device":{"identifiers":["deye_bms_can"],"name":"Deye BMS CAN","manufacturer":"Pylontech","model":"BMS CAN"})";
-        const char* can_avail_json = R"("availability_topic":"${can_prefix}/status","payload_available":"online","payload_not_available":"offline")";
-
-        // CAN binary sensors (charge/discharge control from 0x35C)
-        snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_charge_enabled/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"CAN Charge Enabled","state_topic":"${can_prefix}/can/charge_enabled","unique_id":"deye_bms_can_charge_enabled","payload_on":"1","payload_off":"0","icon":"mdi:battery-charging",%s,%s})",
-          can_avail_json, can_device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
-
-        snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_discharge_enabled/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"CAN Discharge Enabled","state_topic":"${can_prefix}/can/discharge_enabled","unique_id":"deye_bms_can_discharge_enabled","payload_on":"1","payload_off":"0","icon":"mdi:battery-minus",%s,%s})",
-          can_avail_json, can_device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
-
-        snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_force_charge/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"CAN Force Charge Request","state_topic":"${can_prefix}/can/force_charge","unique_id":"deye_bms_can_force_charge","payload_on":"1","payload_off":"0","icon":"mdi:battery-alert",%s,%s})",
-          can_avail_json, can_device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
-
-        // CAN diagnostic sensors
-        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_frame_count/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"CAN Frame Count","state_topic":"${can_prefix}/diag/frame_count","unique_id":"deye_bms_can_frame_count","icon":"mdi:counter","entity_category":"diagnostic",%s,%s})",
-          can_avail_json, can_device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
-
-        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_error_count/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"CAN Error Count","state_topic":"${can_prefix}/diag/error_count","unique_id":"deye_bms_can_error_count","icon":"mdi:alert-circle","entity_category":"diagnostic",%s,%s})",
-          can_avail_json, can_device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
-
-        // CAN 0x359 module count and status sensors
-        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_module_count/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"CAN Module Count","state_topic":"${can_prefix}/can/module_count","unique_id":"deye_bms_can_module_count","icon":"mdi:battery-multiple",%s,%s})",
-          can_avail_json, can_device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
-
-        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_status_byte7/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"CAN Status Byte 7","state_topic":"${can_prefix}/can/status_byte7","unique_id":"deye_bms_can_status_byte7","icon":"mdi:information-outline","entity_category":"diagnostic",%s,%s})",
-          can_avail_json, can_device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
-
-        // CAN alarm summary text sensor
-        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_alarm_summary/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"CAN Alarm Summary","state_topic":"${can_prefix}/can/alarm_summary","unique_id":"deye_bms_can_alarm_summary","icon":"mdi:alert",%s,%s})",
-          can_avail_json, can_device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
-
-        // CAN 0x359 protection binary sensors (device_class: problem)
-        const char* prot_sensors[][3] = {
-          {"prot_overvolt", "CAN Protection Overvolt", "mdi:flash-alert"},
-          {"prot_undervolt", "CAN Protection Undervolt", "mdi:flash-off"},
-          {"prot_overtemp", "CAN Protection Overtemp", "mdi:thermometer-alert"},
-          {"prot_undertemp", "CAN Protection Undertemp", "mdi:snowflake-alert"},
-          {"prot_discharge_overcurrent", "CAN Protection Discharge OC", "mdi:current-dc"},
-          {"prot_charge_overcurrent", "CAN Protection Charge OC", "mdi:current-dc"},
-          {"prot_system_error", "CAN Protection System Error", "mdi:alert-circle"},
-        };
-        for (int i = 0; i < 7; i++) {
-          snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_%s/config", prot_sensors[i][0]);
-          SAFE_SNPRINTF(payload, sizeof(payload),
-            R"({"name":"%s","state_topic":"${can_prefix}/can/%s","unique_id":"deye_bms_can_%s","device_class":"problem","payload_on":"1","payload_off":"0","icon":"%s",%s,%s})",
-            prot_sensors[i][1], prot_sensors[i][0], prot_sensors[i][0], prot_sensors[i][2], can_avail_json, can_device_json);
-          id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-          PACE_PUBLISH();
-        }
-
-        // CAN 0x359 warning binary sensors
-        const char* warn_sensors[][3] = {
-          {"warn_high_voltage", "CAN Warning High Voltage", "mdi:flash"},
-          {"warn_low_voltage", "CAN Warning Low Voltage", "mdi:flash-outline"},
-          {"warn_high_temp", "CAN Warning High Temp", "mdi:thermometer-high"},
-          {"warn_low_temp", "CAN Warning Low Temp", "mdi:thermometer-low"},
-          {"warn_high_discharge_current", "CAN Warning High Discharge", "mdi:current-dc"},
-          {"warn_high_charge_current", "CAN Warning High Charge", "mdi:current-dc"},
-          {"warn_comms_fail", "CAN Warning Comms Fail", "mdi:lan-disconnect"},
-        };
-        for (int i = 0; i < 7; i++) {
-          snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_%s/config", warn_sensors[i][0]);
-          // warn_comms_fail gets device_class: problem, others don't
-          if (i == 6) {
-            SAFE_SNPRINTF(payload, sizeof(payload),
+          for (int i = 0; i < 7; i++) {
+            snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_%s/config", prot_sensors[i][0]);
+            if (safe_snprintf(payload, sizeof(payload),
               R"({"name":"%s","state_topic":"${can_prefix}/can/%s","unique_id":"deye_bms_can_%s","device_class":"problem","payload_on":"1","payload_off":"0","icon":"%s",%s,%s})",
-              warn_sensors[i][1], warn_sensors[i][0], warn_sensors[i][0], warn_sensors[i][2], can_avail_json, can_device_json);
-          } else {
-            SAFE_SNPRINTF(payload, sizeof(payload),
-              R"({"name":"%s","state_topic":"${can_prefix}/can/%s","unique_id":"deye_bms_can_%s","payload_on":"1","payload_off":"0","icon":"%s",%s,%s})",
-              warn_sensors[i][1], warn_sensors[i][0], warn_sensors[i][0], warn_sensors[i][2], can_avail_json, can_device_json);
+              prot_sensors[i][1], prot_sensors[i][0], prot_sensors[i][0], prot_sensors[i][2], can_avail_json, can_device_json)) {
+              id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+              pace_publish();
+            }
           }
-          id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-          PACE_PUBLISH();
-        }
 
-        // CAN main sensors (SOC, SOH, limits, extremes)
-        // SOC and SOH
-        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soc/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"BMS SOC","state_topic":"${can_prefix}/soc","unique_id":"deye_bms_can_soc","unit_of_measurement":"%%","device_class":"battery","state_class":"measurement",%s,%s})",
-          can_avail_json, can_device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
+          // CAN 0x359 warning binary sensors
+          const char* warn_sensors[][3] = {
+            {"warn_high_voltage", "CAN Warning High Voltage", "mdi:flash"},
+            {"warn_low_voltage", "CAN Warning Low Voltage", "mdi:flash-outline"},
+            {"warn_high_temp", "CAN Warning High Temp", "mdi:thermometer-high"},
+            {"warn_low_temp", "CAN Warning Low Temp", "mdi:thermometer-low"},
+            {"warn_high_discharge_current", "CAN Warning High Discharge", "mdi:current-dc"},
+            {"warn_high_charge_current", "CAN Warning High Charge", "mdi:current-dc"},
+            {"warn_comms_fail", "CAN Warning Comms Fail", "mdi:lan-disconnect"},
+          };
+          for (int i = 0; i < 7; i++) {
+            snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_%s/config", warn_sensors[i][0]);
+            bool ok = false;
+            // warn_comms_fail gets device_class: problem, others don't
+            if (i == 6) {
+              ok = safe_snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"${can_prefix}/can/%s","unique_id":"deye_bms_can_%s","device_class":"problem","payload_on":"1","payload_off":"0","icon":"%s",%s,%s})",
+                warn_sensors[i][1], warn_sensors[i][0], warn_sensors[i][0], warn_sensors[i][2], can_avail_json, can_device_json);
+            } else {
+              ok = safe_snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"${can_prefix}/can/%s","unique_id":"deye_bms_can_%s","payload_on":"1","payload_off":"0","icon":"%s",%s,%s})",
+                warn_sensors[i][1], warn_sensors[i][0], warn_sensors[i][0], warn_sensors[i][2], can_avail_json, can_device_json);
+            }
+            if (ok) {
+              id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+              pace_publish();
+            }
+          }
 
-        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soh/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"BMS SOH","state_topic":"${can_prefix}/soh","unique_id":"deye_bms_can_soh","unit_of_measurement":"%%","icon":"mdi:battery-heart-variant","state_class":"measurement",%s,%s})",
-          can_avail_json, can_device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
+          // CAN main sensors (SOC, SOH, limits, extremes)
+          // SOC and SOH
+          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soc/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"BMS SOC","state_topic":"${can_prefix}/soc","unique_id":"deye_bms_can_soc","unit_of_measurement":"%%","device_class":"battery","state_class":"measurement",%s,%s})",
+            can_avail_json, can_device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
 
-        // Charge/discharge limits
-        const char* limit_sensors[][4] = {
-          {"v_charge_max", "BMS Charge Voltage Max", "V", "voltage"},
-          {"v_low", "BMS Discharge Voltage Min", "V", "voltage"},
-          {"i_charge", "BMS Charge Current Limit", "A", "current"},
-          {"i_discharge", "BMS Discharge Current Limit", "A", "current"},
-        };
-        for (int i = 0; i < 4; i++) {
-          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_%s/config", limit_sensors[i][0]);
-          SAFE_SNPRINTF(payload, sizeof(payload),
-            R"({"name":"%s","state_topic":"${can_prefix}/limit/%s","unique_id":"deye_bms_can_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
-            limit_sensors[i][1], limit_sensors[i][0], limit_sensors[i][0], limit_sensors[i][2], limit_sensors[i][3], can_avail_json, can_device_json);
-          id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-          PACE_PUBLISH();
-        }
+          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soh/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"BMS SOH","state_topic":"${can_prefix}/soh","unique_id":"deye_bms_can_soh","unit_of_measurement":"%%","icon":"mdi:battery-heart-variant","state_class":"measurement",%s,%s})",
+            can_avail_json, can_device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
 
-        // Cell voltage and temperature extremes
-        const char* ext_sensors[][4] = {
-          {"cell_v_min", "BMS Cell Voltage Min", "V", "voltage"},
-          {"cell_v_max", "BMS Cell Voltage Max", "V", "voltage"},
-          {"cell_v_delta", "BMS Cell Voltage Delta", "V", "voltage"},
-          {"temp_min", "BMS Temperature Min", "°C", "temperature"},
-          {"temp_max", "BMS Temperature Max", "°C", "temperature"},
-        };
-        for (int i = 0; i < 5; i++) {
-          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_%s/config", ext_sensors[i][0]);
-          SAFE_SNPRINTF(payload, sizeof(payload),
-            R"({"name":"%s","state_topic":"${can_prefix}/ext/%s","unique_id":"deye_bms_can_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
-            ext_sensors[i][1], ext_sensors[i][0], ext_sensors[i][0], ext_sensors[i][2], ext_sensors[i][3], can_avail_json, can_device_json);
-          id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-          PACE_PUBLISH();
-        }
+          // Charge/discharge limits
+          const char* limit_sensors[][4] = {
+            {"v_charge_max", "BMS Charge Voltage Max", "V", "voltage"},
+            {"v_low", "BMS Discharge Voltage Min", "V", "voltage"},
+            {"i_charge", "BMS Charge Current Limit", "A", "current"},
+            {"i_discharge", "BMS Discharge Current Limit", "A", "current"},
+          };
+          for (int i = 0; i < 4; i++) {
+            snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_%s/config", limit_sensors[i][0]);
+            if (safe_snprintf(payload, sizeof(payload),
+              R"({"name":"%s","state_topic":"${can_prefix}/limit/%s","unique_id":"deye_bms_can_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+              limit_sensors[i][1], limit_sensors[i][0], limit_sensors[i][0], limit_sensors[i][2], limit_sensors[i][3], can_avail_json, can_device_json)) {
+              id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+              pace_publish();
+            }
+          }
 
-        // Raw flags text sensor
-        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_flags/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"BMS Flags Raw","state_topic":"${can_prefix}/flags","unique_id":"deye_bms_can_flags","icon":"mdi:flag","entity_category":"diagnostic",%s,%s})",
-          can_avail_json, can_device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
+          // Cell voltage and temperature extremes
+          const char* ext_sensors[][4] = {
+            {"cell_v_min", "BMS Cell Voltage Min", "V", "voltage"},
+            {"cell_v_max", "BMS Cell Voltage Max", "V", "voltage"},
+            {"cell_v_delta", "BMS Cell Voltage Delta", "V", "voltage"},
+            {"temp_min", "BMS Temperature Min", "°C", "temperature"},
+            {"temp_max", "BMS Temperature Max", "°C", "temperature"},
+          };
+          for (int i = 0; i < 5; i++) {
+            snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_%s/config", ext_sensors[i][0]);
+            if (safe_snprintf(payload, sizeof(payload),
+              R"({"name":"%s","state_topic":"${can_prefix}/ext/%s","unique_id":"deye_bms_can_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+              ext_sensors[i][1], ext_sensors[i][0], ext_sensors[i][0], ext_sensors[i][2], ext_sensors[i][3], can_avail_json, can_device_json)) {
+              id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+              pace_publish();
+            }
+          }
 
-        // Free heap diagnostic
-        snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_free_heap/config");
-        SAFE_SNPRINTF(payload, sizeof(payload),
-          R"({"name":"ESP Free Heap","state_topic":"${can_prefix}/diag/free_heap","unique_id":"deye_bms_can_free_heap","unit_of_measurement":"bytes","icon":"mdi:memory","entity_category":"diagnostic",%s,%s})",
-          can_avail_json, can_device_json);
-        id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
-        PACE_PUBLISH();
+          // Raw flags text sensor
+          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_flags/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"BMS Flags Raw","state_topic":"${can_prefix}/flags","unique_id":"deye_bms_can_flags","icon":"mdi:flag","entity_category":"diagnostic",%s,%s})",
+            can_avail_json, can_device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
 
-        // Mark discovery as sent - won't be repeated on reconnect
-        id(discovery_sent) = true;
-        ESP_LOGI("mqtt", "HA discovery complete (%d publishes)", publish_count);
+          // Free heap diagnostic
+          snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_free_heap/config");
+          if (safe_snprintf(payload, sizeof(payload),
+            R"({"name":"ESP Free Heap","state_topic":"${can_prefix}/diag/free_heap","unique_id":"deye_bms_can_free_heap","unit_of_measurement":"bytes","icon":"mdi:memory","entity_category":"diagnostic",%s,%s})",
+            can_avail_json, can_device_json)) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
+            pace_publish();
+          }
+
+          // Mark discovery as sent - won't be repeated on reconnect
+          id(discovery_sent) = true;
+          ESP_LOGI("mqtt", "HA discovery complete (%d publishes)", publish_count);
 
 ota:
   - platform: esphome
@@ -1258,13 +1281,12 @@ interval:
             }
           }
 
-          // Availability heartbeat: publish online every 10 minutes (if not stale)
+          // CAN availability heartbeat: publish online every 10 minutes (if not stale)
           if (!id(can_stale) && id(last_can_rx) > 0) {
             if (now - id(last_status_heartbeat) >= 600000) {  // 10 minutes
               id(mqtt_client).publish(std::string("${can_prefix}/status"), std::string("online"), (uint8_t)0, true);
-              id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
               id(last_status_heartbeat) = now;
-              ESP_LOGD("mqtt", "Availability heartbeat published");
+              ESP_LOGD("mqtt", "CAN availability heartbeat published");
             }
           }
 
@@ -1393,7 +1415,7 @@ interval:
             id(last_can_decoded_publish) = now;
           }
 
-  # RS485 stale detection (no periodic online spam - heartbeat is in CAN interval)
+  # RS485 stale detection
   - interval: 30s
     then:
       - lambda: |-
@@ -1438,8 +1460,8 @@ interval:
           case 1: {  // SEND_ANALOG - send command
             int batt = id(rs485_current_batt);
 
-            // Clear RX buffer
-            while (id(rs485_uart).available()) {
+            // Clear RX buffer (limit to 256 bytes to prevent infinite loop)
+            for (int drain = 0; drain < 256 && id(rs485_uart).available(); drain++) {
               uint8_t c; id(rs485_uart).read_byte(&c);
             }
 
@@ -1459,11 +1481,19 @@ interval:
           }
 
           case 2: {  // WAIT_RX - accumulate response, check for '\r' or timeout
-            // Read available bytes
-            while (id(rs485_uart).available()) {
+            // Read available bytes (max 64 per tick, max 1024 buffer)
+            const int MAX_BYTES_PER_TICK = 64;
+            const size_t MAX_BUFFER_SIZE = 1024;
+            int bytes_read = 0;
+            while (id(rs485_uart).available() && bytes_read < MAX_BYTES_PER_TICK) {
+              if (id(rs485_response_buf).length() >= MAX_BUFFER_SIZE) {
+                ESP_LOGW("rs485", "Buffer overflow, clearing");
+                id(rs485_response_buf).clear();
+              }
               uint8_t c;
               id(rs485_uart).read_byte(&c);
               id(rs485_response_buf) += (char)c;
+              bytes_read++;
               if (c == '\r') {
                 // Got complete frame - parse it
                 std::string response = id(rs485_response_buf);
@@ -1587,8 +1617,8 @@ interval:
           case 3: {  // SEND_ALARM - send alarm command
             int batt = id(rs485_alarm_batt);
 
-            // Clear RX buffer
-            while (id(rs485_uart).available()) {
+            // Clear RX buffer (limit to 256 bytes to prevent infinite loop)
+            for (int drain = 0; drain < 256 && id(rs485_uart).available(); drain++) {
               uint8_t c; id(rs485_uart).read_byte(&c);
             }
 
@@ -1608,11 +1638,19 @@ interval:
           }
 
           case 4: {  // WAIT_ALARM_RX - accumulate response
-            // Read available bytes
-            while (id(rs485_uart).available()) {
+            // Read available bytes (max 64 per tick, max 1024 buffer)
+            const int MAX_BYTES_PER_TICK = 64;
+            const size_t MAX_BUFFER_SIZE = 1024;
+            int bytes_read = 0;
+            while (id(rs485_uart).available() && bytes_read < MAX_BYTES_PER_TICK) {
+              if (id(rs485_response_buf).length() >= MAX_BUFFER_SIZE) {
+                ESP_LOGW("rs485", "Buffer overflow, clearing");
+                id(rs485_response_buf).clear();
+              }
               uint8_t c;
               id(rs485_uart).read_byte(&c);
               id(rs485_response_buf) += (char)c;
+              bytes_read++;
               if (c == '\r') {
                 // Got complete frame - parse it
                 std::string response = id(rs485_response_buf);
@@ -1765,6 +1803,10 @@ interval:
           if (force_heartbeat) {
             id(rs485_last_heartbeat) = now;
             ESP_LOGI("mqtt", "RS485 heartbeat: forcing republish of all values");
+            // Availability heartbeat: republish online status if not stale
+            if (!id(rs485_stale)) {
+              id(mqtt_client).publish(std::string("${rs485_prefix}/status"), std::string("online"), (uint8_t)0, true);
+            }
             // Reset all hysteresis tracking to force publish
             id(last_stack_voltage) = -1.0f;
             id(last_stack_current) = -1.0f;
@@ -2112,7 +2154,6 @@ sensor:
     unit_of_measurement: "%"
     accuracy_decimals: 0
     icon: "mdi:battery"
-    state_topic: ${can_prefix}/soc
     filters:
       - or:
         - heartbeat: 60s
@@ -2124,7 +2165,6 @@ sensor:
     unit_of_measurement: "%"
     accuracy_decimals: 0
     icon: "mdi:battery-heart"
-    state_topic: ${can_prefix}/soh
     filters:
       - or:
         - heartbeat: 60s
@@ -2136,7 +2176,6 @@ sensor:
     unit_of_measurement: "V"
     device_class: voltage
     accuracy_decimals: 1
-    state_topic: ${can_prefix}/limit/v_charge_max
     filters:
       - or:
         - heartbeat: 60s
@@ -2148,7 +2187,6 @@ sensor:
     unit_of_measurement: "V"
     device_class: voltage
     accuracy_decimals: 1
-    state_topic: ${can_prefix}/limit/v_low
     filters:
       - or:
         - heartbeat: 60s
@@ -2160,7 +2198,6 @@ sensor:
     unit_of_measurement: "A"
     device_class: current
     accuracy_decimals: 1
-    state_topic: ${can_prefix}/limit/i_charge
     filters:
       - or:
         - heartbeat: 60s
@@ -2172,7 +2209,6 @@ sensor:
     unit_of_measurement: "A"
     device_class: current
     accuracy_decimals: 1
-    state_topic: ${can_prefix}/limit/i_discharge
     filters:
       - or:
         - heartbeat: 60s
@@ -2184,7 +2220,6 @@ sensor:
     unit_of_measurement: "V"
     device_class: voltage
     accuracy_decimals: 3
-    state_topic: ${can_prefix}/ext/cell_v_min
     filters:
       - or:
         - heartbeat: 60s
@@ -2196,7 +2231,6 @@ sensor:
     unit_of_measurement: "V"
     device_class: voltage
     accuracy_decimals: 3
-    state_topic: ${can_prefix}/ext/cell_v_max
     filters:
       - or:
         - heartbeat: 60s
@@ -2208,7 +2242,6 @@ sensor:
     unit_of_measurement: "V"
     accuracy_decimals: 3
     icon: "mdi:chart-bell-curve-cumulative"
-    state_topic: ${can_prefix}/ext/cell_v_delta
     filters:
       - or:
         - heartbeat: 60s
@@ -2220,7 +2253,6 @@ sensor:
     unit_of_measurement: "°C"
     device_class: temperature
     accuracy_decimals: 1
-    state_topic: ${can_prefix}/ext/temp_min
     filters:
       - or:
         - heartbeat: 60s
@@ -2232,7 +2264,6 @@ sensor:
     unit_of_measurement: "°C"
     device_class: temperature
     accuracy_decimals: 1
-    state_topic: ${can_prefix}/ext/temp_max
     filters:
       - or:
         - heartbeat: 60s
@@ -2251,7 +2282,6 @@ sensor:
     unit_of_measurement: "bytes"
     icon: "mdi:memory"
     entity_category: diagnostic
-    state_topic: ${can_prefix}/diag/free_heap
     update_interval: 60s
     lambda: 'return heap_caps_get_free_size(MALLOC_CAP_INTERNAL);'
 
@@ -2277,7 +2307,6 @@ sensor:
     name: "CAN Module Count"
     id: sensor_can_module_count
     icon: "mdi:battery-multiple"
-    state_topic: ${can_prefix}/can/module_count
     update_interval: never  # Changed from 10s to never (on-change only)
     lambda: 'return id(can_module_count);'
 
@@ -2287,7 +2316,6 @@ sensor:
     id: sensor_can_status_byte7
     icon: "mdi:information-outline"
     entity_category: diagnostic
-    state_topic: ${can_prefix}/can/status_byte7
     update_interval: never  # Changed from 10s to never (on-change only)
     lambda: 'return id(can_status_byte7);'
 
@@ -2296,13 +2324,11 @@ text_sensor:
     id: sensor_flags
     name: "BMS Flags"
     icon: "mdi:flag"
-    state_topic: ${can_prefix}/flags
 
   - platform: template
     id: sensor_can_alarm_summary
     name: "CAN Alarm Summary"
     icon: "mdi:alert"
-    state_topic: ${can_prefix}/can/alarm_summary
     update_interval: never  # Changed from 10s to never (on-change only)
     lambda: |-
       std::string alarms;
@@ -2377,19 +2403,16 @@ binary_sensor:
   - platform: template
     name: "Battery 0 Poll Alarm"
     device_class: problem
-    state_topic: ${rs485_prefix}/battery0/poll_alarm
     lambda: 'return id(batt_poll_alarm).size() > 0 ? id(batt_poll_alarm)[0] : false;'
 
   - platform: template
     name: "Battery 1 Poll Alarm"
     device_class: problem
-    state_topic: ${rs485_prefix}/battery1/poll_alarm
     lambda: 'return id(batt_poll_alarm).size() > 1 ? id(batt_poll_alarm)[1] : false;'
 
   - platform: template
     name: "Battery 2 Poll Alarm"
     device_class: problem
-    state_topic: ${rs485_prefix}/battery2/poll_alarm
     lambda: 'return id(batt_poll_alarm).size() > 2 ? id(batt_poll_alarm)[2] : false;'
 
   # CAN 0x359 Protection flags (device_class: problem for alerts)
@@ -2497,13 +2520,9 @@ button:
     entity_category: config
     on_press:
       - lambda: |-
-          ESP_LOGI("mqtt", "Manual discovery re-publish requested - clearing flag and reconnecting MQTT");
+          ESP_LOGI("mqtt", "Manual discovery re-publish requested");
           id(discovery_sent) = false;
-          // Disconnect MQTT to trigger reconnect and re-run on_connect discovery
-          id(mqtt_client).disable();
-      - delay: 500ms
-      - lambda: |-
-          id(mqtt_client).enable();
+          id(publish_discovery).execute();
 
   - platform: template
     name: "Toggle Debug Logging"

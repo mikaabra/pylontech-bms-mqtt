@@ -4,6 +4,26 @@
 #include <sstream>
 #include <vector>
 #include <cstdint>
+#include <cstdarg>
+
+// Safe snprintf wrapper - returns true if successful, false if truncated
+// Logs warning once on first truncation
+inline bool safe_snprintf(char* buf, size_t size, const char* fmt, ...) {
+    static bool truncation_warned = false;
+    va_list args;
+    va_start(args, fmt);
+    int ret = vsnprintf(buf, size, fmt, args);
+    va_end(args);
+
+    if (ret < 0 || (size_t)ret >= size) {
+        if (!truncation_warned) {
+            ESP_LOGW("mqtt", "Buffer truncated (need %d, have %zu) - some discovery may be incomplete", ret, size);
+            truncation_warned = true;
+        }
+        return false;
+    }
+    return true;
+}
 
 // RAII guard for RS485 bus busy flag
 struct Rs485BusyGuard {
