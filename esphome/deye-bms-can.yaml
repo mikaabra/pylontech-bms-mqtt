@@ -39,7 +39,7 @@ esphome:
           // Initialize arrays based on num_batteries
           const int num_batt = ${num_batteries};
           id(cell_voltages).resize(16 * num_batt, 0.0f);  // 16 cells per battery
-          id(cell_temps).resize(6 * num_batt, 0.0f);      // 6 temps per battery
+          id(cell_temps).resize(6 * num_batt, -999.0f);   // 6 temps per battery (invalid until data received)
           id(batt_current).resize(num_batt, 0.0f);
           id(batt_voltage).resize(num_batt, 0.0f);
           id(batt_soc).resize(num_batt, 0.0f);
