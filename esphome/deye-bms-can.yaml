@@ -173,23 +173,27 @@ mqtt:
             id(last_batt_socs)[i] = -1.0f;
             id(last_batt_remain_ah)[i] = -1.0f;
             id(last_batt_total_ah)[i] = -1.0f;
-            id(last_batt_states)[i] = "";
-            id(last_batt_warnings)[i] = "";
-            id(last_batt_alarms)[i] = "";
+            id(last_batt_states)[i] = "\x01";  // Sentinel to force publish
+            id(last_batt_warnings)[i] = "\x01";
+            id(last_batt_alarms)[i] = "\x01";
             id(last_batt_cycles)[i] = -1;
             id(last_batt_balancing_count)[i] = -1;
-            id(last_batt_balancing_cells)[i] = "";
+            id(last_batt_balancing_cells)[i] = "\x01";
             id(last_batt_overvolt_count)[i] = -1;
-            id(last_batt_overvolt_cells)[i] = "";
+            id(last_batt_overvolt_cells)[i] = "\x01";
             id(last_batt_charge_mosfet)[i] = false;
             id(last_batt_discharge_mosfet)[i] = false;
             id(last_batt_lmcharge_mosfet)[i] = false;
             id(last_batt_cw_active)[i] = false;
-            id(last_batt_cw_cells)[i] = "";
+            id(last_batt_cw_cells)[i] = "\x01";
             id(last_batt_cell_min)[i] = -1.0f;
             id(last_batt_cell_max)[i] = -1.0f;
             id(last_batt_cell_delta)[i] = -1.0f;
         }
+        // Reset stack string fields with sentinel
+        id(last_stack_balancing_cells) = "\x01";
+        id(last_stack_overvolt_cells) = "\x01";
+        id(last_stack_alarms) = "\x01";
 
         // Only publish HA Discovery once per boot (not on every reconnect)
         if (!id(discovery_sent)) {
@@ -2011,7 +2015,18 @@ interval:
               // Force string/bool fields by resetting to impossible values
               id(last_batt_balancing_count)[i] = -1;
               id(last_batt_overvolt_count)[i] = -1;
+              // Reset string fields with sentinel to force publish
+              id(last_batt_states)[i] = "\x01";
+              id(last_batt_warnings)[i] = "\x01";
+              id(last_batt_alarms)[i] = "\x01";
+              id(last_batt_balancing_cells)[i] = "\x01";
+              id(last_batt_overvolt_cells)[i] = "\x01";
+              id(last_batt_cw_cells)[i] = "\x01";
             }
+            // Also reset stack string fields
+            id(last_stack_balancing_cells) = "\x01";
+            id(last_stack_overvolt_cells) = "\x01";
+            id(last_stack_alarms) = "\x01";
             for (size_t i = 0; i < id(last_cell_voltages).size(); i++) {
               id(last_cell_voltages)[i] = -1.0f;
             }
