@@ -1573,6 +1573,9 @@ interval:
           case 1: {  // SEND_ANALOG - send command
             int batt = id(rs485_current_batt);
 
+            // Clear any lingering discard state from previous overflow
+            id(rs485_discard_until_tilde) = false;
+
             // Clear RX buffer (limit to 256 bytes to prevent infinite loop)
             for (int drain = 0; drain < 256 && id(rs485_uart).available(); drain++) {
               uint8_t c; id(rs485_uart).read_byte(&c);
@@ -1608,6 +1611,7 @@ interval:
                 if (c == '~') {
                   id(rs485_discard_until_tilde) = false;
                   id(rs485_response_buf) = "~";  // Start fresh with frame marker
+                  id(rs485_tx_time) = now;  // Reset timeout window for new frame
                   break;
                 }
               }
@@ -1758,6 +1762,9 @@ interval:
           case 3: {  // SEND_ALARM - send alarm command
             int batt = id(rs485_alarm_batt);
 
+            // Clear any lingering discard state from previous overflow
+            id(rs485_discard_until_tilde) = false;
+
             // Clear RX buffer (limit to 256 bytes to prevent infinite loop)
             for (int drain = 0; drain < 256 && id(rs485_uart).available(); drain++) {
               uint8_t c; id(rs485_uart).read_byte(&c);
@@ -1793,6 +1800,7 @@ interval:
                 if (c == '~') {
                   id(rs485_discard_until_tilde) = false;
                   id(rs485_response_buf) = "~";  // Start fresh with frame marker
+                  id(rs485_tx_time) = now;  // Reset timeout window for new frame
                   break;
                 }
               }
