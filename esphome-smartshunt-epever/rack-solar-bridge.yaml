@@ -17,15 +17,11 @@ esphome:
   includes:
     - includes/solar_helpers.h
   on_boot:
-    priority: -100
+    priority: 100
     then:
       - logger.log:
-          format: "Rack Solar Bridge booting - Refactored version"
+          format: "=== BOOT LOGGER ==="
           level: INFO
-      - lambda: |-
-          id(discovery_sent) = false;
-          ESP_LOGI("boot", "Globals: smartshunt_stale=%d, last_smartshunt_online=%d, epever_stale=%d, last_epever_online=%d",
-                   id(smartshunt_stale), id(last_smartshunt_online), id(epever_stale), id(last_epever_online));
       - lambda: |-
           // Start with INFO level to see discovery logs, can be toggled to WARN at runtime
           id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_INFO);
@@ -84,13 +80,10 @@ mqtt:
   discovery: false
   
   on_connect:
-    - logger.log:
-        format: "MQTT connected to broker"
-        level: INFO
-    - logger.log:
-        format: "on_connect executing"
-        level: INFO
     - lambda: |-
+        ESP_LOGI("mqtt", "=== FIRST LAMBDA ===");
+    - lambda: |-
+        ESP_LOGI("mqtt", "=== on_connect START ===");
         // SmartShunt: Check state on connect
         bool ss_stale = id(smartshunt_stale);
         bool ss_was_online = id(last_smartshunt_online);
@@ -1767,6 +1760,28 @@ interval:
             }
             id(last_availability_heartbeat) = now;
             ESP_LOGD("mqtt", "Availability heartbeat published");
+          }
+
+  # One-time initialization 3s after boot
+  - interval: 3s
+    then:
+      - lambda: |-
+          static bool initialized = false;
+          if (!initialized) {
+            initialized = true;
+            // Publish initial availability states
+            if (id(smartshunt_stale)) {
+              id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
+            } else {
+              id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("online"), (uint8_t)0, true);
+              id(last_smartshunt_online) = true;
+            }
+            if (id(epever_stale)) {
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("offline"), (uint8_t)0, true);
+            } else {
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
+              id(last_epever_online) = true;
+            }
           }
 
   - interval: 10s
