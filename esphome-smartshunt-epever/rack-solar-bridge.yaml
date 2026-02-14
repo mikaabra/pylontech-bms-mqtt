@@ -144,7 +144,7 @@ script:
             {"ss_amount_charged_energy", "SmartShunt Charged Energy", "${mqtt_prefix}/smartshunt/amount_charged_energy", "Wh", "energy"},
           };
           
-          for (int i = 0; i < 18; i++) {
+          for (int i = 0; i < 19; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", smartshunt_sensors[i][0]);
             bool ok = false;
             if (strlen(smartshunt_sensors[i][3]) > 0 && strlen(smartshunt_sensors[i][4]) > 0) {
@@ -264,18 +264,39 @@ text_sensor:
     victron_id: smartshunt
     model_description:
       id: ss_model_description_internal
+      on_value:
+        then:
+          - lambda: "if (!x.empty()) id(ss_model_description_val) = x;"
     firmware_version:
       id: ss_firmware_version_internal
+      on_value:
+        then:
+          - lambda: "if (!x.empty()) id(ss_firmware_version_val) = x;"
     device_type:
       id: ss_device_type_internal
+      on_value:
+        then:
+          - lambda: "if (!x.empty()) id(ss_device_type_val) = x;"
     serial_number:
       id: ss_serial_number_internal
+      on_value:
+        then:
+          - lambda: "if (!x.empty()) id(ss_serial_number_val) = x;"
     dc_monitor_mode:
       id: ss_dc_monitor_mode_internal
+      on_value:
+        then:
+          - lambda: "if (!x.empty()) id(ss_dc_monitor_mode_val) = x;"
     alarm_condition_active:
       id: ss_alarm_condition_internal
+      on_value:
+        then:
+          - lambda: "if (!x.empty()) id(ss_alarm_condition_val) = x;"
     alarm_reason:
       id: ss_alarm_reason_internal
+      on_value:
+        then:
+          - lambda: "if (!x.empty()) id(ss_alarm_reason_val) = x;"
 
   # Template text sensors for MQTT/HA (update_interval: never - manual updates only)
   - platform: template
@@ -283,56 +304,65 @@ text_sensor:
     id: ss_model_description
     icon: "mdi:information"
     update_interval: never
-    lambda: return id(ss_model_description_internal).state;
+    lambda: return id(ss_model_description_val);
 
   - platform: template
     name: "SmartShunt Firmware"
     id: ss_firmware_version
     icon: "mdi:information"
     update_interval: never
-    lambda: return id(ss_firmware_version_internal).state;
+    lambda: return id(ss_firmware_version_val);
 
   - platform: template
     name: "SmartShunt Device Type"
     id: ss_device_type
     icon: "mdi:information"
     update_interval: never
-    lambda: return id(ss_device_type_internal).state;
+    lambda: return id(ss_device_type_val);
 
   - platform: template
     name: "SmartShunt Serial"
     id: ss_serial_number
     icon: "mdi:numeric"
     update_interval: never
-    lambda: return id(ss_serial_number_internal).state;
+    lambda: return id(ss_serial_number_val);
 
   - platform: template
     name: "SmartShunt Monitor Mode"
     id: ss_dc_monitor_mode
     icon: "mdi:cog"
     update_interval: never
-    lambda: return id(ss_dc_monitor_mode_internal).state;
+    lambda: return id(ss_dc_monitor_mode_val);
 
   - platform: template
     name: "SmartShunt Alarm Condition"
     id: ss_alarm_condition
     icon: "mdi:alert"
     update_interval: never
-    lambda: return id(ss_alarm_condition_internal).state;
+    lambda: return id(ss_alarm_condition_val);
 
   - platform: template
     name: "SmartShunt Alarm Reason"
     id: ss_alarm_reason
     icon: "mdi:alert-circle"
     update_interval: never
-    lambda: return id(ss_alarm_reason_internal).state;
+    lambda: return id(ss_alarm_reason_val);
 
-# Internal binary sensor (receive from SmartShunt)
+# Internal binary sensor (receive from SmartShunt) + Template for MQTT/HA
 binary_sensor:
   - platform: victron
     victron_id: smartshunt
     relay_state:
       id: ss_relay_state_internal
+      on_state:
+        then:
+          - lambda: "id(ss_relay_state_val) = x;"
+
+  - platform: template
+    name: "SmartShunt Relay State"
+    id: ss_relay_state
+    device_class: power
+    lambda: return id(ss_relay_state_val);
 
 # Modbus controller for EPEVER - 30s update_interval (kept as-is)
 modbus:
@@ -1213,6 +1243,130 @@ globals:
     initial_value: '0'
 
   # ============================================================
-  # TEXT AND BINARY SENSORS
-  # No globals needed - ESPHome MQTT discovery handles state tracking
+  # TEXT SENSOR VALUES (current state from SmartShunt)
   # ============================================================
+  - id: ss_model_description_val
+    type: std::string
+    initial_value: '""'
+  - id: ss_firmware_version_val
+    type: std::string
+    initial_value: '""'
+  - id: ss_device_type_val
+    type: std::string
+    initial_value: '""'
+  - id: ss_serial_number_val
+    type: std::string
+    initial_value: '""'
+  - id: ss_dc_monitor_mode_val
+    type: std::string
+    initial_value: '""'
+  - id: ss_alarm_condition_val
+    type: std::string
+    initial_value: '""'
+  - id: ss_alarm_reason_val
+    type: std::string
+    initial_value: '""'
+
+  # ============================================================
+  # TEXT SENSOR LAST PUBLISHED VALUES (for change detection)
+  # ============================================================
+  - id: last_ss_model_description
+    type: std::string
+    initial_value: '"UNINITIALIZED"'
+  - id: last_ss_firmware_version
+    type: std::string
+    initial_value: '"UNINITIALIZED"'
+  - id: last_ss_device_type
+    type: std::string
+    initial_value: '"UNINITIALIZED"'
+  - id: last_ss_serial_number
+    type: std::string
+    initial_value: '"UNINITIALIZED"'
+  - id: last_ss_dc_monitor_mode
+    type: std::string
+    initial_value: '"UNINITIALIZED"'
+  - id: last_ss_alarm_condition
+    type: std::string
+    initial_value: '"UNINITIALIZED"'
+  - id: last_ss_alarm_reason
+    type: std::string
+    initial_value: '"UNINITIALIZED"'
+
+  # ============================================================
+  # BINARY SENSOR VALUES
+  # ============================================================
+  - id: ss_relay_state_val
+    type: bool
+    initial_value: 'false'
+  - id: last_ss_relay_state
+    type: int
+    initial_value: '-1'
+
+# =============================================================================
+# INTERVAL-BASED PUBLISHING FOR TEXT/BINARY SENSORS
+# Publishes to MQTT only when values change (following deye-bms-can.yaml pattern)
+# =============================================================================
+
+interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          // Helper lambda to publish text sensor with change detection
+          auto publish_text = [&](const char* topic, 
+                                  const std::string& current_val, 
+                                  std::string& last_val,
+                                  esphome::text_sensor::TextSensor* sensor) {
+            if (current_val != last_val) {
+              // Publish to MQTT
+              id(mqtt_client).publish(topic, current_val.c_str());
+              // Update entity state for HA
+              sensor->publish_state(current_val);
+              // Track last published value
+              last_val = current_val;
+            }
+          };
+          
+          // Publish all 7 text sensors
+          publish_text("${mqtt_prefix}/smartshunt/model_description",
+                       id(ss_model_description_val),
+                       id(last_ss_model_description),
+                       id(ss_model_description));
+          
+          publish_text("${mqtt_prefix}/smartshunt/firmware_version",
+                       id(ss_firmware_version_val),
+                       id(last_ss_firmware_version),
+                       id(ss_firmware_version));
+          
+          publish_text("${mqtt_prefix}/smartshunt/device_type",
+                       id(ss_device_type_val),
+                       id(last_ss_device_type),
+                       id(ss_device_type));
+          
+          publish_text("${mqtt_prefix}/smartshunt/serial_number",
+                       id(ss_serial_number_val),
+                       id(last_ss_serial_number),
+                       id(ss_serial_number));
+          
+          publish_text("${mqtt_prefix}/smartshunt/dc_monitor_mode",
+                       id(ss_dc_monitor_mode_val),
+                       id(last_ss_dc_monitor_mode),
+                       id(ss_dc_monitor_mode));
+          
+          publish_text("${mqtt_prefix}/smartshunt/alarm_condition",
+                       id(ss_alarm_condition_val),
+                       id(last_ss_alarm_condition),
+                       id(ss_alarm_condition));
+          
+          publish_text("${mqtt_prefix}/smartshunt/alarm_reason",
+                       id(ss_alarm_reason_val),
+                       id(last_ss_alarm_reason),
+                       id(ss_alarm_reason));
+          
+          // Publish binary sensor with tristate logic
+          int current_relay = id(ss_relay_state_val) ? 1 : 0;
+          if (current_relay != id(last_ss_relay_state)) {
+            const char* payload = id(ss_relay_state_val) ? "ON" : "OFF";
+            id(mqtt_client).publish("${mqtt_prefix}/smartshunt/relay_state", payload);
+            id(ss_relay_state).publish_state(id(ss_relay_state_val));
+            id(last_ss_relay_state) = current_relay;
+          }
