@@ -5,6 +5,20 @@
 
 #include <cmath>
 #include <string>
+#include <cstdarg>
+
+// Safe snprintf - returns false if buffer would overflow, logs warning
+inline bool safe_snprintf(char* buf, size_t size, const char* fmt, ...) {
+  va_list args;
+  va_start(args, fmt);
+  int ret = vsnprintf(buf, size, fmt, args);
+  va_end(args);
+  if (ret < 0 || (size_t)ret >= size) {
+    ESP_LOGW("safe_snprintf", "Buffer truncation detected! Needed %d bytes, have %zu", ret, size);
+    return false;
+  }
+  return true;
+}
 
 // Paced publishing: 20 messages, then 10ms delay
 inline void publish_solar(int &publish_count) {
