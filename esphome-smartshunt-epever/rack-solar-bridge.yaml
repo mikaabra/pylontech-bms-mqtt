@@ -88,47 +88,33 @@ mqtt:
         format: "MQTT connected to broker"
         level: INFO
     - lambda: |-
-        ESP_LOGI("mqtt", "on_connect executing: smartshunt_stale=%d last_smartshunt_online=%d",
-                 id(smartshunt_stale), id(last_smartshunt_online));
-        // On MQTT connect, handle SmartShunt availability based on current state
-        // State machine: stale (bool) x was_online (bool) = 4 possible states
-        // NOTE: Must hardcode topic - ESPHome substitutions don't work in lambdas
-        if (id(smartshunt_stale) && id(last_smartshunt_online)) {
-          // CASE 1: Stale now, was online before → Transition to offline
+        ESP_LOGI("state", "on_connect lambda START");
+        // SmartShunt: Check state on connect
+        bool ss_stale = id(smartshunt_stale);
+        bool ss_was_online = id(last_smartshunt_online);
+        if (ss_stale && ss_was_online) {
+          // Transition: online → offline
           id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
           id(last_smartshunt_online) = false;
-          ESP_LOGI("mqtt", "SmartShunt: was online, now stale → publishing offline");
-        } else if (!id(smartshunt_stale) && !id(last_smartshunt_online)) {
-          // CASE 2: Not stale, wasn't online before → Transition to online
+        } else if (!ss_stale && !ss_was_online) {
+          // Transition: offline → online  
           id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("online"), (uint8_t)0, true);
           id(last_smartshunt_online) = true;
-          ESP_LOGI("mqtt", "SmartShunt: has data → publishing online");
-        } else if (id(smartshunt_stale) && !id(last_smartshunt_online)) {
-          // CASE 3: Stale, never been online (fresh boot) → Publish offline so HA shows unavailable
+        } else if (ss_stale && !ss_was_online) {
+          // Fresh boot, stale: publish offline
           id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
-          ESP_LOGI("mqtt", "SmartShunt: fresh boot, stale → publishing offline");
-        } else {
-          // CASE 4: Not stale, was online → No change needed
-          ESP_LOGI("mqtt", "SmartShunt: online and has data → no change");
         }
-        // EPEVER state machine on connect (hardcoded topic - substitutions don't work in lambdas)
-        if (id(epever_stale) && id(last_epever_online)) {
-          // CASE 1: Stale now, was online before → Transition to offline
+        // EPEVER: Check state on connect
+        bool ep_stale = id(epever_stale);
+        bool ep_was_online = id(last_epever_online);
+        if (ep_stale && ep_was_online) {
           id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("offline"), (uint8_t)0, true);
           id(last_epever_online) = false;
-          ESP_LOGI("mqtt", "EPEVER: was online, now stale → publishing offline");
-        } else if (!id(epever_stale) && !id(last_epever_online)) {
-          // CASE 2: Not stale, wasn't online before → Transition to online
+        } else if (!ep_stale && !ep_was_online) {
           id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
           id(last_epever_online) = true;
-          ESP_LOGI("mqtt", "EPEVER: has data → publishing online");
-        } else if (id(epever_stale) && !id(last_epever_online)) {
-          // CASE 3: Stale, never been online (fresh boot) → Publish offline so HA shows unavailable
+        } else if (ep_stale && !ep_was_online) {
           id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("offline"), (uint8_t)0, true);
-          ESP_LOGI("mqtt", "EPEVER: fresh boot, stale → publishing offline");
-        } else {
-          // CASE 4: Not stale, was online → No change needed
-          ESP_LOGI("mqtt", "EPEVER: online and has data → no change");
         }
     - delay: 500ms
     - lambda: |-
