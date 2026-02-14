@@ -455,7 +455,9 @@ sensor:
               if (check_threshold_float(x, id(last_ss_battery_voltage),
                                          id(last_ss_battery_voltage_publish),
                                          0.1f, 15.0f, 30.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_voltage", to_string(x));
+                static char val[16];
+                snprintf(val, sizeof(val), "%.2f", x);
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_voltage", val);
               }
     battery_current:
       name: "SmartShunt Battery Current"
@@ -469,7 +471,9 @@ sensor:
               if (check_threshold_float(x, id(last_ss_battery_current),
                                          id(last_ss_battery_current_publish),
                                          0.1f, -500.0f, 500.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_current", to_string(x));
+                static char val[16];
+                snprintf(val, sizeof(val), "%.2f", x);
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_current", val);
               }
     state_of_charge:
       name: "SmartShunt State of Charge"
@@ -498,7 +502,9 @@ sensor:
               if (check_threshold_float(x, id(last_ss_instantaneous_power),
                                          id(last_ss_instantaneous_power_publish),
                                          1.0f, -10000.0f, 10000.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/instantaneous_power", to_string(x));
+                static char val[16];
+                snprintf(val, sizeof(val), "%.0f", x);  // Whole watts
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/instantaneous_power", val);
               }
     battery_temperature:
       name: "SmartShunt Battery Temperature"
@@ -512,7 +518,9 @@ sensor:
               if (check_threshold_float(x, id(last_ss_battery_temperature),
                                          id(last_ss_battery_temperature_publish),
                                          0.5f, -40.0f, 100.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_temperature", to_string(x));
+                static char val[16];
+                snprintf(val, sizeof(val), "%.1f", x);
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_temperature", val);
               }
     consumed_amp_hours:
       name: "SmartShunt Consumed Ah"
@@ -522,10 +530,13 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              // Cumulative counter - use 1.0 Ah threshold to update on whole numbers only
               if (check_threshold_float(x, id(last_ss_consumed_amp_hours),
                                          id(last_ss_consumed_amp_hours_publish),
-                                         0.1f, -999999.0f, 999999.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/consumed_amp_hours", to_string(x));
+                                         1.0f, -999999.0f, 999999.0f)) {
+                static char val[16];
+                snprintf(val, sizeof(val), "%.0f", x);  // Whole Ah
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/consumed_amp_hours", val);
               }
     time_to_go:
       name: "SmartShunt Time To Go"
@@ -613,10 +624,13 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              // Cumulative counter - use 1.0 Ah threshold to update on whole numbers only
               if (check_threshold_float(x, id(last_ss_cumulative_amp_hours),
                                          id(last_ss_cumulative_amp_hours_publish),
-                                         0.1f, 0.0f, 999999.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/cumulative_amp_hours", to_string(x));
+                                         1.0f, 0.0f, 999999.0f)) {
+                static char val[16];
+                snprintf(val, sizeof(val), "%.0f", x);  // Whole Ah
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/cumulative_amp_hours", val);
               }
     min_battery_voltage:
       name: "SmartShunt Min Voltage"
@@ -668,10 +682,13 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              // Cumulative energy counter - use 10 Wh threshold for whole tens
               if (check_threshold_float(x, id(last_ss_amount_discharged_energy),
                                          id(last_ss_amount_discharged_energy_publish),
-                                         0.1f, 0.0f, 999999.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_discharged_energy", to_string(x));
+                                         10.0f, 0.0f, 999999.0f)) {
+                static char val[16];
+                snprintf(val, sizeof(val), "%.0f", x);  // Whole Wh
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_discharged_energy", val);
               }
     amount_of_charged_energy:
       name: "SmartShunt Charged Energy"
@@ -682,10 +699,13 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              // Cumulative energy counter - use 10 Wh threshold for whole tens
               if (check_threshold_float(x, id(last_ss_amount_charged_energy),
                                          id(last_ss_amount_charged_energy_publish),
-                                         0.1f, 0.0f, 999999.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_charged_energy", to_string(x));
+                                         10.0f, 0.0f, 999999.0f)) {
+                static char val[16];
+                snprintf(val, sizeof(val), "%.0f", x);  // Whole Wh
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_charged_energy", val);
               }
 
   # ============================================================
