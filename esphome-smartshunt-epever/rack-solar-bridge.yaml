@@ -686,9 +686,10 @@ sensor:
         then:
           - lambda: |-
               id(last_smartshunt_data_rx) = millis();
-              if (check_threshold_float(x, id(last_ss_instantaneous_power),
+              // Use robust check with 500W/sec rate limit to reject corrupted spikes
+              if (check_threshold_float_robust(x, id(last_ss_instantaneous_power),
                                          id(last_ss_instantaneous_power_publish),
-                                         1.0f, -10000.0f, 10000.0f)) {
+                                         5.0f, 500.0f, -10000.0f, 10000.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.0f", x);  // Whole watts
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/instantaneous_power", val);
@@ -906,10 +907,11 @@ sensor:
         then:
           - lambda: |-
               id(last_smartshunt_data_rx) = millis();
-              // Cumulative energy counter - use 10 Wh threshold for whole tens
-              if (check_threshold_float(x, id(last_ss_amount_discharged_energy),
+              // Cumulative energy counter - use robust check with 1000 Wh/sec rate limit
+              // Max realistic: 10kW for 1 hour = 10,000 Wh, so 1000 Wh/sec is very conservative
+              if (check_threshold_float_robust(x, id(last_ss_amount_discharged_energy),
                                          id(last_ss_amount_discharged_energy_publish),
-                                         10.0f, 0.0f, 999999.0f)) {
+                                         10.0f, 1000.0f, 0.0f, 999999.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.0f", x);  // Whole Wh
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_discharged_energy", val);
@@ -924,10 +926,10 @@ sensor:
         then:
           - lambda: |-
               id(last_smartshunt_data_rx) = millis();
-              // Cumulative energy counter - use 10 Wh threshold for whole tens
-              if (check_threshold_float(x, id(last_ss_amount_charged_energy),
+              // Cumulative energy counter - use robust check with 1000 Wh/sec rate limit
+              if (check_threshold_float_robust(x, id(last_ss_amount_charged_energy),
                                          id(last_ss_amount_charged_energy_publish),
-                                         10.0f, 0.0f, 999999.0f)) {
+                                         10.0f, 1000.0f, 0.0f, 999999.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.0f", x);  // Whole Wh
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_charged_energy", val);
