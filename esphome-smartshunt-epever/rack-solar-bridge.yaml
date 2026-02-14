@@ -295,6 +295,9 @@ uart:
   - id: vedirect_uart
     rx_pin: GPIO4
     baud_rate: 19200
+    data_bits: 8
+    parity: NONE
+    stop_bits: 1
     rx_buffer_size: 1024
   
   - id: rs485_uart
@@ -445,7 +448,14 @@ binary_sensor:
       id: ss_relay_state_internal
       on_state:
         then:
-          - lambda: "id(ss_relay_state_val) = x;"
+          - lambda: |-
+              // Validate relay state - reject corrupted values like "NFF"
+              if (x == "ON" || x == "OFF") {
+                id(ss_relay_state_val) = x;
+                id(last_smartshunt_data_rx) = millis();
+              } else {
+                ESP_LOGW("smartshunt", "Invalid relay state received: '%s' (possible bit flip)", x.c_str());
+              }
 
   - platform: template
     name: "SmartShunt Relay State"
@@ -511,6 +521,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               if (check_threshold_float(x, id(last_ss_battery_voltage),
                                          id(last_ss_battery_voltage_publish),
                                          0.1f, 15.0f, 30.0f)) {
@@ -527,6 +538,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               if (check_threshold_float(x, id(last_ss_battery_current),
                                          id(last_ss_battery_current_publish),
                                          0.1f, -500.0f, 500.0f)) {
@@ -543,6 +555,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               int val = (int) roundf(x);
               if (val < 0 || val > 100) return;
               if (check_threshold_int(val, id(last_ss_state_of_charge),
@@ -999,6 +1012,14 @@ globals:
     type: uint32_t
     initial_value: '0'
 
+  # SmartShunt data staleness detection
+  - id: last_smartshunt_data_rx
+    type: uint32_t
+    initial_value: '0'
+  - id: smartshunt_stale
+    type: bool
+    initial_value: 'true'
+
   # ============================================================
   # SMARTSHUNT SENSOR VALUES (19 sensors * 2 each = 38: value + timestamp)
   # ============================================================
@@ -1306,6 +1327,24 @@ interval:
             }
             id(last_availability_heartbeat) = now;
             ESP_LOGD("mqtt", "Availability heartbeat published");
+          }
+
+  - interval: 10s
+    then:
+      - lambda: |-
+          uint32_t now = millis();
+          uint32_t elapsed = now - id(last_smartshunt_data_rx);
+          
+          if (elapsed > 30000 && !id(smartshunt_stale) && id(last_smartshunt_data_rx) > 0) {
+            id(smartshunt_stale) = true;
+            ESP_LOGW("smartshunt", "No valid data for %d seconds, marking stale", elapsed / 1000);
+            id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
+            id(last_smartshunt_online) = false;
+          } else if (elapsed <= 30000 && id(smartshunt_stale)) {
+            id(smartshunt_stale) = false;
+            ESP_LOGI("smartshunt", "Data received after stale period, marking online");
+            id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("online"), (uint8_t)0, true);
+            id(last_smartshunt_online) = true;
           }
 
 # =============================================================================
