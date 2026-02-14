@@ -698,39 +698,39 @@ sensor:
     id: rs485_crc_errors_sensor
     state_topic: null
     lambda: |-
-      return id(rs485_crc_errors);
+      return (float)id(rs485_crc_errors);
     update_interval: 5s
     entity_category: diagnostic
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/rs485_crc_errors", to_string(x));
+            id(mqtt_client).publish("${mqtt_prefix}/rs485_crc_errors", to_string((int)x));
 
   - platform: template
     name: "RS485 Timeout Errors"
     id: rs485_timeout_errors_sensor
     state_topic: null
     lambda: |-
-      return id(rs485_timeout_errors);
+      return (float)id(rs485_timeout_errors);
     update_interval: 5s
     entity_category: diagnostic
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/rs485_timeout_errors", to_string(x));
+            id(mqtt_client).publish("${mqtt_prefix}/rs485_timeout_errors", to_string((int)x));
 
   - platform: template
     name: "RS485 Frame Errors"
     id: rs485_frame_errors_sensor
     state_topic: null
     lambda: |-
-      return id(rs485_frame_errors);
+      return (float)id(rs485_frame_errors);
     update_interval: 5s
     entity_category: diagnostic
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/rs485_frame_errors", to_string(x));
+            id(mqtt_client).publish("${mqtt_prefix}/rs485_frame_errors", to_string((int)x));
 
   # ============================================================
   # DATA QUALITY SENSORS (Phase 2 hardening)
