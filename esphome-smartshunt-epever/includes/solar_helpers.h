@@ -5,6 +5,10 @@
 #include <cstdarg>
 #include <algorithm>
 
+// NOTE: MQTT topic prefix is "rack-solar" - hardcoded in YAML because
+// ESPHome substitutions like ${mqtt_prefix} don't work in C++ lambdas.
+// If changing the prefix, search/replace all "rack-solar/" occurrences.
+
 inline uint32_t safe_elapsed(uint32_t now, uint32_t last) {
     return now - last;
 }
