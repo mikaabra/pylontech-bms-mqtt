@@ -86,30 +86,44 @@ mqtt:
         format: "MQTT connected to broker"
         level: INFO
     - lambda: |-
-        // On MQTT connect, DON'T auto-publish online for SmartShunt
-        // Let the interval handle it based on actual data availability
-        // Only publish offline if we know we're stale
+        // On MQTT connect, handle SmartShunt availability based on current state
+        // State machine: stale (bool) x was_online (bool) = 4 possible states
         if (id(smartshunt_stale) && id(last_smartshunt_online)) {
-          // We were previously online but now stale - publish offline
+          // CASE 1: Stale now, was online before → Transition to offline
           id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
           id(last_smartshunt_online) = false;
-          ESP_LOGI("mqtt", "SmartShunt stale on connect, publishing offline");
+          ESP_LOGI("mqtt", "SmartShunt: was online, now stale → publishing offline");
         } else if (!id(smartshunt_stale) && !id(last_smartshunt_online)) {
-          // We have data and weren't online - publish online
+          // CASE 2: Not stale, wasn't online before → Transition to online
           id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("online"), (uint8_t)0, true);
           id(last_smartshunt_online) = true;
-          ESP_LOGI("mqtt", "SmartShunt has data, publishing online");
+          ESP_LOGI("mqtt", "SmartShunt: has data → publishing online");
+        } else if (id(smartshunt_stale) && !id(last_smartshunt_online)) {
+          // CASE 3: Stale, never been online (fresh boot) → Publish offline so HA shows unavailable
+          id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
+          ESP_LOGI("mqtt", "SmartShunt: fresh boot, stale → publishing offline");
         } else {
-          ESP_LOGI("mqtt", "SmartShunt state: stale=%d, online=%d - no change", 
-                   id(smartshunt_stale), id(last_smartshunt_online));
+          // CASE 4: Not stale, was online → No change needed
+          ESP_LOGI("mqtt", "SmartShunt: online and has data → no change");
         }
-        // Only publish EPEVER online if not stale and we have recent data
-        if (!id(last_epever_online) && !id(epever_stale)) {
+        // EPEVER state machine on connect
+        if (id(epever_stale) && id(last_epever_online)) {
+          // CASE 1: Stale now, was online before → Transition to offline
+          id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("offline"), (uint8_t)0, true);
+          id(last_epever_online) = false;
+          ESP_LOGI("mqtt", "EPEVER: was online, now stale → publishing offline");
+        } else if (!id(epever_stale) && !id(last_epever_online)) {
+          // CASE 2: Not stale, wasn't online before → Transition to online
           id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
           id(last_epever_online) = true;
-          ESP_LOGI("mqtt", "EPEVER availability: online");
-        } else if (id(epever_stale)) {
-          ESP_LOGI("mqtt", "EPEVER is stale, not publishing online on connect");
+          ESP_LOGI("mqtt", "EPEVER: has data → publishing online");
+        } else if (id(epever_stale) && !id(last_epever_online)) {
+          // CASE 3: Stale, never been online (fresh boot) → Publish offline so HA shows unavailable
+          id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("offline"), (uint8_t)0, true);
+          ESP_LOGI("mqtt", "EPEVER: fresh boot, stale → publishing offline");
+        } else {
+          // CASE 4: Not stale, was online → No change needed
+          ESP_LOGI("mqtt", "EPEVER: online and has data → no change");
         }
     - delay: 500ms
     - lambda: |-
