@@ -101,12 +101,12 @@ mqtt:
           ESP_LOGI("mqtt", "EPEVER is stale, not publishing online on connect");
         }
     - lambda: |-
-        if (!id(discovery_sent)) {
-          id(publish_discovery).execute();
-          id(discovery_sent) = true;
-        } else {
-          ESP_LOGI("mqtt", "Discovery already sent this boot, skipping");
-        }
+        // Always republish discovery on MQTT reconnect
+        // This ensures HA gets discovery config if HA restarts
+        id(discovery_sent) = false;
+        id(publish_discovery).execute();
+        id(discovery_sent) = true;
+        ESP_LOGI("mqtt", "Discovery republished on reconnect");
     - lambda: |-
         // Reset publish timestamps on MQTT reconnect to trigger re-publish of all values.
         // This prevents "Unknown" states in Home Assistant after MQTT broker restart.
