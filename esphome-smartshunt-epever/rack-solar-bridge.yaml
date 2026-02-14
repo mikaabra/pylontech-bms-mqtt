@@ -92,10 +92,13 @@ mqtt:
           id(last_smartshunt_online) = true;
           ESP_LOGI("mqtt", "SmartShunt availability: online");
         }
-        if (!id(last_epever_online)) {
+        // Only publish EPEVER online if not stale and we have recent data
+        if (!id(last_epever_online) && !id(epever_stale)) {
           id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
           id(last_epever_online) = true;
           ESP_LOGI("mqtt", "EPEVER availability: online");
+        } else if (id(epever_stale)) {
+          ESP_LOGI("mqtt", "EPEVER is stale, not publishing online on connect");
         }
     - lambda: |-
         if (!id(discovery_sent)) {
@@ -841,6 +844,14 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            id(last_epever_data_rx) = millis();
+            id(epever_consecutive_failures) = 0;
+            if (id(epever_stale)) {
+              id(epever_stale) = false;
+              id(last_epever_online) = true;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              ESP_LOGI("epever", "Data received after stale period, marking online");
+            }
             if (check_threshold_float(x, id(last_epever_solar_voltage),
                                        id(last_epever_solar_voltage_publish),
                                        0.1f, 0.0f, 100.0f)) {
@@ -1037,6 +1048,17 @@ globals:
   - id: smartshunt_stale
     type: bool
     initial_value: 'true'
+
+  # EPEVER data staleness detection (3-strike policy)
+  - id: last_epever_data_rx
+    type: uint32_t
+    initial_value: '0'
+  - id: epever_stale
+    type: bool
+    initial_value: 'true'
+  - id: epever_consecutive_failures
+    type: int
+    initial_value: '0'
 
   # ============================================================
   # SMARTSHUNT SENSOR VALUES (19 sensors * 2 each = 38: value + timestamp)
@@ -1363,6 +1385,34 @@ interval:
             ESP_LOGI("smartshunt", "Data received after stale period, marking online");
             id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("online"), (uint8_t)0, true);
             id(last_smartshunt_online) = true;
+          }
+
+  # EPEVER staleness check - 3-strike policy (30s * 3 = 90s timeout)
+  - interval: 30s
+    then:
+      - lambda: |-
+          uint32_t now = millis();
+          uint32_t elapsed = now - id(last_epever_data_rx);
+          
+          // Check if we've received data since last interval
+          if (elapsed < 30000) {
+            // Data received within last 30s, reset failures
+            if (id(epever_consecutive_failures) > 0) {
+              id(epever_consecutive_failures) = 0;
+              ESP_LOGD("epever", "Data received, reset failure count");
+            }
+          } else {
+            // No data received, increment failure count
+            id(epever_consecutive_failures)++;
+            ESP_LOGW("epever", "No data for %d seconds (failure %d/3)", elapsed / 1000, id(epever_consecutive_failures));
+            
+            // After 3 consecutive failures (90s total), mark stale
+            if (id(epever_consecutive_failures) >= 3 && !id(epever_stale)) {
+              id(epever_stale) = true;
+              id(last_epever_online) = false;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("offline"), (uint8_t)0, true);
+              ESP_LOGW("epever", "3 consecutive poll failures, marking stale");
+            }
           }
 
 # =============================================================================
