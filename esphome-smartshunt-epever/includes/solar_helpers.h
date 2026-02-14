@@ -101,11 +101,13 @@ inline bool check_threshold_float_robust(float new_val, float& last_val,
     return false;
 }
 
-inline bool check_threshold_int(int new_val, int &last_val, uint32_t &last_publish, int threshold = 1) {
+inline bool check_threshold_int(int new_val, int &last_val, uint32_t &last_publish, int threshold = 1, int min_val = INT_MIN, int max_val = INT_MAX) {
     uint32_t now = millis();
     bool publish = false;
 
-    if (last_publish == 0 || last_val == -1) {
+    if (new_val < min_val || new_val > max_val) return false;
+
+    if (last_publish == 0 || last_val < min_val || last_val > max_val) {
         publish = true;
     } else if (std::abs(new_val - last_val) >= threshold) {
         publish = true;

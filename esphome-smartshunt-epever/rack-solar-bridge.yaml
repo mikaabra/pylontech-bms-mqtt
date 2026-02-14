@@ -105,10 +105,17 @@ mqtt:
           ESP_LOGI("mqtt", "Discovery already sent this boot, skipping");
         }
     - lambda: |-
-        // Force re-publish all sensor values on reconnect by resetting publish timestamps.
+        // Reset publish timestamps on MQTT reconnect to trigger re-publish of all values.
         // This prevents "Unknown" states in Home Assistant after MQTT broker restart.
-        // The threshold helper functions will see (millis() - 0) >= heartbeat and publish immediately.
+        // The on_value handlers will publish immediately when they receive new data.
+        //
+        // IMPORTANT: We reset timestamps to 0, NOT to millis(). This ensures:
+        // 1. check_threshold_* functions see (millis() - 0) >= heartbeat and publish
+        // 2. The on_value validation (NaN checks, range checks) still runs
+        // 3. No garbage values are published on first boot (before sensors initialize)
+        
         ESP_LOGI("mqtt", "Resetting publish timestamps for re-publish on reconnect...");
+        
         // SmartShunt sensors (19)
         id(last_ss_battery_voltage_publish) = 0;
         id(last_ss_battery_current_publish) = 0;
@@ -137,7 +144,8 @@ mqtt:
         id(last_epever_battery_voltage_publish) = 0;
         id(last_epever_battery_current_publish) = 0;
         id(last_epever_total_energy_publish) = 0;
-        ESP_LOGI("mqtt", "Reset publish timestamps for re-publish on reconnect");
+        
+        ESP_LOGI("mqtt", "Publish timestamps reset - values will republish on next sensor update");
     - mqtt.publish:
         topic: ${mqtt_prefix}/info
         payload: "Rack Solar Bridge - Refactored version"
