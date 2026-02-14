@@ -664,7 +664,7 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/uptime", to_string(x));
+            id(mqtt_client).publish("${mqtt_prefix}/uptime", to_string((int)x));
 
   # WiFi signal strength
   - platform: wifi_signal
