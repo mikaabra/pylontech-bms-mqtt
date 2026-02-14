@@ -520,6 +520,7 @@ text_sensor:
     state_topic: null
     icon: "mdi:console"
     update_interval: never
+    entity_category: diagnostic
     lambda: return id(logger_level);
 
   # Stale detection status
@@ -528,6 +529,8 @@ text_sensor:
     id: smartshunt_stale_sensor
     state_topic: null
     update_interval: 5s
+    icon: "mdi:connection"
+    entity_category: diagnostic
     lambda: |-
       return id(smartshunt_stale) ? std::string("STALE") : std::string("OK");
 
@@ -536,6 +539,8 @@ text_sensor:
     id: epever_stale_sensor
     state_topic: null
     update_interval: 5s
+    icon: "mdi:connection"
+    entity_category: diagnostic
     lambda: |-
       return id(epever_stale) ? std::string("STALE") : std::string("OK");
 
@@ -590,6 +595,9 @@ sensor:
     id: uptime_sensor
     state_topic: null
     update_interval: 60s
+    device_class: duration
+    state_class: total_increasing
+    entity_category: diagnostic
 
   # WiFi signal strength
   - platform: wifi_signal
@@ -660,20 +668,23 @@ sensor:
       uint32_t failed = id(text_validation_failed);
       uint32_t total = passed + failed;
       if (total == 0) {
-        return 100.0f;  // No data yet, assume perfect
+        return 100.0f;
       }
       float score = (float)passed / (float)total * 100.0f;
       return score;
     update_interval: 10s
+    state_class: measurement
     entity_category: diagnostic
 
   - platform: template
     name: "Bitflip Window Total"
     id: bitflip_window_total_sensor
     state_topic: null
+    unit_of_measurement: "events"
     lambda: |-
       return (float)id(bitflip_count);
     update_interval: 10s
+    state_class: measurement
     entity_category: diagnostic
 
   # ============================================================
