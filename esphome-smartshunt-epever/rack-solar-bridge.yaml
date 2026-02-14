@@ -476,6 +476,7 @@ sensor:
     battery_voltage:
       name: "SmartShunt Battery Voltage"
       id: ss_battery_voltage
+      internal: true
       unit_of_measurement: "V"
       device_class: voltage
       state_class: measurement
@@ -492,6 +493,7 @@ sensor:
     battery_current:
       name: "SmartShunt Battery Current"
       id: ss_battery_current
+      internal: true
       unit_of_measurement: "A"
       device_class: current
       state_class: measurement
@@ -508,6 +510,7 @@ sensor:
     state_of_charge:
       name: "SmartShunt State of Charge"
       id: ss_state_of_charge
+      internal: true
       unit_of_measurement: "%"
       device_class: battery
       state_class: measurement
@@ -523,6 +526,7 @@ sensor:
     instantaneous_power:
       name: "SmartShunt Power"
       id: ss_instantaneous_power
+      internal: true
       unit_of_measurement: "W"
       device_class: power
       state_class: measurement
@@ -539,6 +543,7 @@ sensor:
     battery_temperature:
       name: "SmartShunt Battery Temperature"
       id: ss_battery_temperature
+      internal: true
       unit_of_measurement: "°C"
       device_class: temperature
       state_class: measurement
@@ -555,6 +560,7 @@ sensor:
     consumed_amp_hours:
       name: "SmartShunt Consumed Ah"
       id: ss_consumed_amp_hours
+      internal: true
       unit_of_measurement: "Ah"
       state_class: measurement
       on_value:
@@ -571,6 +577,7 @@ sensor:
     time_to_go:
       name: "SmartShunt Time To Go"
       id: ss_time_to_go
+      internal: true
       unit_of_measurement: "min"
       state_class: measurement
       on_value:
@@ -584,6 +591,7 @@ sensor:
     depth_of_the_deepest_discharge:
       name: "SmartShunt Deepest Discharge"
       id: ss_depth_deepest_discharge
+      internal: true
       unit_of_measurement: "Ah"
       state_class: measurement
       on_value:
@@ -597,6 +605,7 @@ sensor:
     depth_of_the_last_discharge:
       name: "SmartShunt Last Discharge"
       id: ss_depth_last_discharge
+      internal: true
       unit_of_measurement: "Ah"
       state_class: measurement
       on_value:
@@ -610,6 +619,7 @@ sensor:
     depth_of_the_average_discharge:
       name: "SmartShunt Avg Discharge"
       id: ss_depth_average_discharge
+      internal: true
       unit_of_measurement: "Ah"
       state_class: measurement
       on_value:
@@ -626,6 +636,7 @@ sensor:
     number_of_charge_cycles:
       name: "SmartShunt Charge Cycles"
       id: ss_number_charge_cycles
+      internal: true
       state_class: measurement
       on_value:
         then:
@@ -639,6 +650,7 @@ sensor:
     number_of_full_discharges:
       name: "SmartShunt Full Discharges"
       id: ss_number_full_discharges
+      internal: true
       state_class: measurement
       on_value:
         then:
@@ -652,22 +664,33 @@ sensor:
     cumulative_amp_hours_drawn:
       name: "SmartShunt Cumulative Ah"
       id: ss_cumulative_amp_hours
+      internal: true  # Only publish via custom MQTT with hysteresis
       unit_of_measurement: "Ah"
       state_class: measurement
       on_value:
         then:
           - lambda: |-
               // Cumulative counter - use 1.0 Ah threshold to update on whole numbers only
-              if (check_threshold_float(x, id(last_ss_cumulative_amp_hours),
+              float last_val = id(last_ss_cumulative_amp_hours);
+              uint32_t last_pub = id(last_ss_cumulative_amp_hours_publish);
+              uint32_t now = millis();
+              bool should_pub = check_threshold_float(x, id(last_ss_cumulative_amp_hours),
                                          id(last_ss_cumulative_amp_hours_publish),
-                                         1.0f, 0.0f, 999999.0f)) {
+                                         1.0f, 0.0f, 999999.0f);
+              if (should_pub) {
                 static char val[16];
-                snprintf(val, sizeof(val), "%.0f", x);  // Whole Ah
+                snprintf(val, sizeof(val), "%.0f", x);
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/cumulative_amp_hours", val);
+                ESP_LOGI("hysteresis", "cumulative_ah PUBLISH: x=%.3f, last=%.3f, diff=%.3f, last_pub=%u, now=%u, elapsed=%u",
+                         x, last_val, fabs(x - last_val), last_pub, now, now - last_pub);
+              } else {
+                ESP_LOGD("hysteresis", "cumulative_ah SKIP: x=%.3f, last=%.3f, diff=%.3f",
+                         x, last_val, fabs(x - last_val));
               }
     min_battery_voltage:
       name: "SmartShunt Min Voltage"
       id: ss_min_battery_voltage
+      internal: true
       unit_of_measurement: "V"
       device_class: voltage
       state_class: measurement
@@ -685,6 +708,7 @@ sensor:
     max_battery_voltage:
       name: "SmartShunt Max Voltage"
       id: ss_max_battery_voltage
+      internal: true
       unit_of_measurement: "V"
       device_class: voltage
       state_class: measurement
@@ -704,6 +728,7 @@ sensor:
     last_full_charge:
       name: "SmartShunt Last Full Charge"
       id: ss_last_full_charge
+      internal: true
       unit_of_measurement: "min"
       state_class: measurement
       on_value:
@@ -717,6 +742,7 @@ sensor:
     amount_of_discharged_energy:
       name: "SmartShunt Discharged Energy"
       id: ss_amount_discharged_energy
+      internal: true
       unit_of_measurement: "Wh"
       device_class: energy
       state_class: measurement
@@ -734,6 +760,7 @@ sensor:
     amount_of_charged_energy:
       name: "SmartShunt Charged Energy"
       id: ss_amount_charged_energy
+      internal: true
       unit_of_measurement: "Wh"
       device_class: energy
       state_class: measurement
