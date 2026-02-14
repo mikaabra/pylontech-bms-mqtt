@@ -677,7 +677,7 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/wifi_signal", to_string(x));
+            id(mqtt_client).publish("${mqtt_prefix}/wifi_signal", to_string((int)x));
 
   # Free heap for diagnostics
   - platform: template
@@ -932,7 +932,9 @@ sensor:
               if (check_threshold_float(x, id(last_ss_depth_deepest_discharge),
                                          id(last_ss_depth_deepest_discharge_publish),
                                          0.1f, 0.0f, 999999.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_deepest_discharge", to_string(x));
+                static char val[16];
+                snprintf(val, sizeof(val), "%.1f", x);
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_deepest_discharge", val);
               }
     depth_of_the_last_discharge:
       name: "SmartShunt Last Discharge"
@@ -947,7 +949,9 @@ sensor:
               if (check_threshold_float(x, id(last_ss_depth_last_discharge),
                                          id(last_ss_depth_last_discharge_publish),
                                          0.1f, 0.0f, 999999.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_last_discharge", to_string(x));
+                static char val[16];
+                snprintf(val, sizeof(val), "%.1f", x);
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_last_discharge", val);
               }
     depth_of_the_average_discharge:
       name: "SmartShunt Avg Discharge"
@@ -1142,7 +1146,9 @@ sensor:
             if (check_threshold_float(x, id(last_epever_solar_voltage),
                                        id(last_epever_solar_voltage_publish),
                                        0.1f, 0.0f, 100.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/solar_voltage", to_string(x));
+              static char val[16];
+              snprintf(val, sizeof(val), "%.2f", x);
+              id(mqtt_client).publish("${mqtt_prefix}/epever/solar_voltage", val);
             }
 
   - platform: modbus_controller
@@ -1172,7 +1178,9 @@ sensor:
             if (check_threshold_float(x, id(last_epever_pv_current),
                                        id(last_epever_pv_current_publish),
                                        0.1f, 0.0f, 100.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/pv_current", to_string(x));
+              static char val[16];
+              snprintf(val, sizeof(val), "%.2f", x);
+              id(mqtt_client).publish("${mqtt_prefix}/epever/pv_current", val);
             }
 
   - platform: modbus_controller
@@ -1202,7 +1210,9 @@ sensor:
             if (check_threshold_float(x, id(last_epever_solar_power),
                                        id(last_epever_solar_power_publish),
                                        1.0f, 0.0f, 10000.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/solar_power", to_string(x));
+              static char val[16];
+              snprintf(val, sizeof(val), "%.1f", x);
+              id(mqtt_client).publish("${mqtt_prefix}/epever/solar_power", val);
             }
 
   - platform: modbus_controller
@@ -1261,7 +1271,9 @@ sensor:
             if (check_threshold_float(x, id(last_epever_device_temp),
                                        id(last_epever_device_temp_publish),
                                        0.5f, -40.0f, 100.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/device_temp", to_string(x));
+              static char val[16];
+              snprintf(val, sizeof(val), "%.1f", x);
+              id(mqtt_client).publish("${mqtt_prefix}/epever/device_temp", val);
             }
 
   - platform: modbus_controller
@@ -1291,7 +1303,9 @@ sensor:
             if (check_threshold_float(x, id(last_epever_battery_voltage),
                                        id(last_epever_battery_voltage_publish),
                                        0.1f, 15.0f, 30.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_voltage", to_string(x));
+              static char val[16];
+              snprintf(val, sizeof(val), "%.2f", x);
+              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_voltage", val);
             }
 
   - platform: modbus_controller
@@ -1321,7 +1335,9 @@ sensor:
             if (check_threshold_float(x, id(last_epever_battery_current),
                                        id(last_epever_battery_current_publish),
                                        0.1f, -100.0f, 100.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_current", to_string(x));
+              static char val[16];
+              snprintf(val, sizeof(val), "%.2f", x);
+              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_current", val);
             }
 
   - platform: modbus_controller
@@ -1351,7 +1367,9 @@ sensor:
             if (check_threshold_float(x, id(last_epever_total_energy),
                                        id(last_epever_total_energy_publish),
                                        0.1f, 0.0f, 999999.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/total_energy", to_string(x));
+              static char val[16];
+              snprintf(val, sizeof(val), "%.2f", x);
+              id(mqtt_client).publish("${mqtt_prefix}/epever/total_energy", val);
             }
 
 
