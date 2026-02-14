@@ -691,11 +691,13 @@ sensor:
         then:
           - lambda: |-
               id(last_smartshunt_data_rx) = millis();
-              if (check_threshold_float(x, id(last_ss_battery_voltage),
-                                         id(last_ss_battery_voltage_publish),
-                                         0.1f, 15.0f, 30.0f)) {
+              static StabilityWindow volt_window;
+              if (check_threshold_float_stable(x, id(last_ss_battery_voltage),
+                                               id(last_ss_battery_voltage_publish),
+                                               volt_window,
+                                               0.1f, 0.5f, 15.0f, 30.0f)) {
                 static char val[16];
-                snprintf(val, sizeof(val), "%.2f", x);
+                snprintf(val, sizeof(val), "%.2f", id(last_ss_battery_voltage));
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_voltage", val);
               }
     battery_current:
@@ -708,11 +710,13 @@ sensor:
         then:
           - lambda: |-
               id(last_smartshunt_data_rx) = millis();
-              if (check_threshold_float(x, id(last_ss_battery_current),
-                                         id(last_ss_battery_current_publish),
-                                         0.1f, -500.0f, 500.0f)) {
+              static StabilityWindow current_window;
+              if (check_threshold_float_stable(x, id(last_ss_battery_current),
+                                               id(last_ss_battery_current_publish),
+                                               current_window,
+                                               0.1f, 1.0f, -500.0f, 500.0f)) {
                 static char val[16];
-                snprintf(val, sizeof(val), "%.2f", x);
+                snprintf(val, sizeof(val), "%.2f", id(last_ss_battery_current));
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_current", val);
               }
     state_of_charge:
@@ -741,12 +745,13 @@ sensor:
         then:
           - lambda: |-
               id(last_smartshunt_data_rx) = millis();
-              // Use robust check with 500W/sec rate limit to reject corrupted spikes
-              if (check_threshold_float_robust(x, id(last_ss_instantaneous_power),
-                                         id(last_ss_instantaneous_power_publish),
-                                         5.0f, 500.0f, -10000.0f, 10000.0f)) {
+              static StabilityWindow power_window;
+              if (check_threshold_float_stable(x, id(last_ss_instantaneous_power),
+                                               id(last_ss_instantaneous_power_publish),
+                                               power_window,
+                                               5.0f, 50.0f, -10000.0f, 10000.0f)) {
                 static char val[16];
-                snprintf(val, sizeof(val), "%.0f", x);  // Whole watts
+                snprintf(val, sizeof(val), "%.0f", id(last_ss_instantaneous_power));
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/instantaneous_power", val);
               }
     battery_temperature:
@@ -759,11 +764,13 @@ sensor:
         then:
           - lambda: |-
               id(last_smartshunt_data_rx) = millis();
-              if (check_threshold_float(x, id(last_ss_battery_temperature),
-                                         id(last_ss_battery_temperature_publish),
-                                         0.5f, -40.0f, 100.0f)) {
+              static StabilityWindow temp_window;
+              if (check_threshold_float_stable(x, id(last_ss_battery_temperature),
+                                               id(last_ss_battery_temperature_publish),
+                                               temp_window,
+                                               0.5f, 2.0f, -40.0f, 100.0f)) {
                 static char val[16];
-                snprintf(val, sizeof(val), "%.1f", x);
+                snprintf(val, sizeof(val), "%.1f", id(last_ss_battery_temperature));
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_temperature", val);
               }
     consumed_amp_hours:
