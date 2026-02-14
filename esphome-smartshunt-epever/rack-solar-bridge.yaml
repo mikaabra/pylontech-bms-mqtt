@@ -19,11 +19,15 @@ esphome:
   on_boot:
     priority: -100
     then:
-      - logger.log: 
+      - logger.log:
           format: "Rack Solar Bridge booting - Refactored version"
           level: INFO
       - lambda: |-
           id(discovery_sent) = false;
+      - lambda: |-
+          // Start with WARN level to reduce noise, can be toggled at runtime
+          id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_WARN);
+          id(logger_level) = "WARN";
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -382,6 +386,14 @@ text_sensor:
     icon: "mdi:alert-circle"
     update_interval: never
     lambda: return id(ss_alarm_reason_val);
+
+  # Debug level indicator for runtime log toggle
+  - platform: template
+    name: "Debug Level"
+    id: debug_level_sensor
+    icon: "mdi:console"
+    update_interval: never
+    lambda: return id(logger_level);
 
 # Internal binary sensor (receive from SmartShunt) + Template for MQTT/HA
 binary_sensor:
@@ -903,6 +915,12 @@ globals:
     initial_value: 'false'
     restore_value: false
 
+  # Logger level tracking for runtime toggle
+  - id: logger_level
+    type: std::string
+    initial_value: '"WARN"'
+    restore_value: false
+
   # ============================================================
   # SMARTSHUNT SENSOR VALUES (19 sensors * 2 each = 38: value + timestamp)
   # ============================================================
@@ -1195,3 +1213,25 @@ interval:
             id(ss_relay_state).publish_state(id(ss_relay_state_val));
             id(last_ss_relay_state) = current_relay;
           }
+
+# =============================================================================
+# BUTTONS
+# =============================================================================
+
+button:
+  - platform: template
+    name: "Toggle Debug Level"
+    id: toggle_debug_button
+    icon: "mdi:toggle-switch"
+    on_press:
+      - lambda: |-
+          if (id(logger_level) == "WARN") {
+            id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_DEBUG);
+            id(logger_level) = "DEBUG";
+            ESP_LOGI("main", "Debug level changed to DEBUG");
+          } else {
+            id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_WARN);
+            id(logger_level) = "WARN";
+            ESP_LOGI("main", "Debug level changed to WARN");
+          }
+          id(debug_level_sensor).publish_state(id(logger_level));
