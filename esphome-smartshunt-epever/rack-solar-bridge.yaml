@@ -874,6 +874,14 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            id(last_epever_data_rx) = millis();
+            id(epever_consecutive_failures) = 0;
+            if (id(epever_stale)) {
+              id(epever_stale) = false;
+              id(last_epever_online) = true;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              ESP_LOGI("epever", "Data received after stale period, marking online");
+            }
             if (check_threshold_float(x, id(last_epever_pv_current),
                                        id(last_epever_pv_current_publish),
                                        0.1f, 0.0f, 100.0f)) {
@@ -896,6 +904,14 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            id(last_epever_data_rx) = millis();
+            id(epever_consecutive_failures) = 0;
+            if (id(epever_stale)) {
+              id(epever_stale) = false;
+              id(last_epever_online) = true;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              ESP_LOGI("epever", "Data received after stale period, marking online");
+            }
             if (check_threshold_float(x, id(last_epever_solar_power),
                                        id(last_epever_solar_power_publish),
                                        1.0f, 0.0f, 10000.0f)) {
@@ -916,10 +932,18 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            id(last_epever_data_rx) = millis();
+            id(epever_consecutive_failures) = 0;
+            if (id(epever_stale)) {
+              id(epever_stale) = false;
+              id(last_epever_online) = true;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              ESP_LOGI("epever", "Data received after stale period, marking online");
+            }
             int val = (int) roundf(x);
             if (val < 0 || val > 100) return;
             if (check_threshold_int(val, id(last_epever_battery_capacity),
-                                    id(last_epever_battery_capacity_publish), 1)) {
+                                     id(last_epever_battery_capacity_publish), 1, 0, 100)) {
               id(mqtt_client).publish("${mqtt_prefix}/epever/battery_capacity", to_string(val));
             }
 
@@ -939,6 +963,14 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            id(last_epever_data_rx) = millis();
+            id(epever_consecutive_failures) = 0;
+            if (id(epever_stale)) {
+              id(epever_stale) = false;
+              id(last_epever_online) = true;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              ESP_LOGI("epever", "Data received after stale period, marking online");
+            }
             if (check_threshold_float(x, id(last_epever_device_temp),
                                        id(last_epever_device_temp_publish),
                                        0.5f, -40.0f, 100.0f)) {
@@ -961,6 +993,14 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            id(last_epever_data_rx) = millis();
+            id(epever_consecutive_failures) = 0;
+            if (id(epever_stale)) {
+              id(epever_stale) = false;
+              id(last_epever_online) = true;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              ESP_LOGI("epever", "Data received after stale period, marking online");
+            }
             if (check_threshold_float(x, id(last_epever_battery_voltage),
                                        id(last_epever_battery_voltage_publish),
                                        0.1f, 15.0f, 30.0f)) {
@@ -983,6 +1023,14 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            id(last_epever_data_rx) = millis();
+            id(epever_consecutive_failures) = 0;
+            if (id(epever_stale)) {
+              id(epever_stale) = false;
+              id(last_epever_online) = true;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              ESP_LOGI("epever", "Data received after stale period, marking online");
+            }
             if (check_threshold_float(x, id(last_epever_battery_current),
                                        id(last_epever_battery_current_publish),
                                        0.1f, -100.0f, 100.0f)) {
@@ -1005,6 +1053,14 @@ sensor:
     on_value:
       then:
         - lambda: |-
+            id(last_epever_data_rx) = millis();
+            id(epever_consecutive_failures) = 0;
+            if (id(epever_stale)) {
+              id(epever_stale) = false;
+              id(last_epever_online) = true;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              ESP_LOGI("epever", "Data received after stale period, marking online");
+            }
             if (check_threshold_float(x, id(last_epever_total_energy),
                                        id(last_epever_total_energy_publish),
                                        0.1f, 0.0f, 999999.0f)) {
@@ -1402,9 +1458,15 @@ interval:
               ESP_LOGD("epever", "Data received, reset failure count");
             }
           } else {
-            // No data received, increment failure count
-            id(epever_consecutive_failures)++;
-            ESP_LOGW("epever", "No data for %d seconds (failure %d/3)", elapsed / 1000, id(epever_consecutive_failures));
+            // No data received, increment failure count (cap at 3)
+            if (id(epever_consecutive_failures) < 3) {
+              id(epever_consecutive_failures)++;
+            }
+            
+            // Only log if not already stale to avoid spam
+            if (!id(epever_stale)) {
+              ESP_LOGW("epever", "No data for %d seconds (failure %d/3)", elapsed / 1000, id(epever_consecutive_failures));
+            }
             
             // After 3 consecutive failures (90s total), mark stale
             if (id(epever_consecutive_failures) >= 3 && !id(epever_stale)) {
