@@ -70,12 +70,12 @@ inline bool validate_serial_number(const std::string& s) {
     return true;
 }
 
-// Validate monitor mode (known values: -1, 0, 1, 2 typically)
+// Validate monitor mode (known values: -1, 0, 1, 2 typically, or descriptive text)
 inline bool validate_dc_monitor_mode(const std::string& s) {
-    if (s.empty() || s.length() > 32) return false;
+    if (s.empty() || s.length() > 64) return false;
     if (!is_valid_printable(s)) return false;
     // Should contain known mode descriptions or numeric values
-    static const char* valid_modes[] = {"charger", "load", "dual", "-1", "0", "1", "2"};
+    static const char* valid_modes[] = {"charger", "load", "dual", "bmv", "smartshunt", "battery", "monitor", "-1", "0", "1", "2"};
     std::string lower;
     for (char c : s) lower += std::tolower(c);
     for (const char* mode : valid_modes) {
@@ -93,7 +93,11 @@ inline bool validate_alarm_condition(const std::string& s) {
     if (!is_valid_printable(s)) return false;
     std::string lower;
     for (char c : s) lower += std::tolower(c);
-    // Known good alarm states
+    // Known good alarm states - be lenient with short strings to avoid bitflip false positives
+    if (lower.length() <= 3) {
+        // Short strings: check if they start with 'o' (on/off variations)
+        return (lower[0] == 'o' || lower.find("alarm") != std::string::npos);
+    }
     return (lower == "on" || lower == "off" || 
             lower.find("alarm") != std::string::npos ||
             lower.find("ok") != std::string::npos);
