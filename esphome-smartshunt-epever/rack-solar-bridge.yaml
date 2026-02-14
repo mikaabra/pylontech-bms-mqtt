@@ -1762,12 +1762,12 @@ interval:
             ESP_LOGD("mqtt", "Availability heartbeat published");
           }
 
-  # One-time initialization 3s after boot
+  # One-time initialization - runs until MQTT publishes successfully
   - interval: 3s
     then:
       - lambda: |-
           static bool initialized = false;
-          if (!initialized) {
+          if (!initialized && id(mqtt_client).is_connected()) {
             initialized = true;
             // Publish initial availability states
             if (id(smartshunt_stale)) {
