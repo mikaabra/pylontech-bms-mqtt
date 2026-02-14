@@ -685,13 +685,13 @@ sensor:
     id: free_heap_sensor
     state_topic: null
     unit_of_measurement: "bytes"
-    lambda: return heap_caps_get_free_size(MALLOC_CAP_8BIT);
+    lambda: return (float)heap_caps_get_free_size(MALLOC_CAP_8BIT);
     update_interval: 30s
     entity_category: diagnostic
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/free_heap", to_string(x));
+            id(mqtt_client).publish("${mqtt_prefix}/free_heap", to_string((int)x));
 
   - platform: template
     name: "RS485 CRC Errors"
