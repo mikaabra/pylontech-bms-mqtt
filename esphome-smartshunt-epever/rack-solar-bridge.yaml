@@ -83,6 +83,40 @@ mqtt:
         } else {
           ESP_LOGI("mqtt", "Discovery already sent this boot, skipping");
         }
+    - lambda: |-
+        // Force re-publish all sensor values on reconnect by resetting publish timestamps.
+        // This prevents "Unknown" states in Home Assistant after MQTT broker restart.
+        // The threshold helper functions will see (millis() - 0) >= heartbeat and publish immediately.
+        ESP_LOGI("mqtt", "Resetting publish timestamps for re-publish on reconnect...");
+        // SmartShunt sensors (19)
+        id(last_ss_battery_voltage_publish) = 0;
+        id(last_ss_battery_current_publish) = 0;
+        id(last_ss_state_of_charge_publish) = 0;
+        id(last_ss_instantaneous_power_publish) = 0;
+        id(last_ss_battery_temperature_publish) = 0;
+        id(last_ss_consumed_amp_hours_publish) = 0;
+        id(last_ss_time_to_go_publish) = 0;
+        id(last_ss_depth_deepest_discharge_publish) = 0;
+        id(last_ss_depth_last_discharge_publish) = 0;
+        id(last_ss_depth_average_discharge_publish) = 0;
+        id(last_ss_number_charge_cycles_publish) = 0;
+        id(last_ss_number_full_discharges_publish) = 0;
+        id(last_ss_cumulative_amp_hours_publish) = 0;
+        id(last_ss_min_battery_voltage_publish) = 0;
+        id(last_ss_max_battery_voltage_publish) = 0;
+        id(last_ss_last_full_charge_publish) = 0;
+        id(last_ss_amount_discharged_energy_publish) = 0;
+        id(last_ss_amount_charged_energy_publish) = 0;
+        // EPEVER sensors (8)
+        id(last_epever_solar_voltage_publish) = 0;
+        id(last_epever_pv_current_publish) = 0;
+        id(last_epever_solar_power_publish) = 0;
+        id(last_epever_battery_capacity_publish) = 0;
+        id(last_epever_device_temp_publish) = 0;
+        id(last_epever_battery_voltage_publish) = 0;
+        id(last_epever_battery_current_publish) = 0;
+        id(last_epever_total_energy_publish) = 0;
+        ESP_LOGI("mqtt", "Reset publish timestamps for re-publish on reconnect");
     - mqtt.publish:
         topic: ${mqtt_prefix}/info
         payload: "Rack Solar Bridge - Refactored version"
