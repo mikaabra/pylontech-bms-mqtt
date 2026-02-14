@@ -3,7 +3,7 @@
 # Uses helper functions from solar_helpers.h for threshold checking and pacing
 
 substitutions:
-  device_name: esphome-unused-dev
+  device_name: rack-solar-bridge
   friendly_name: "Rack Solar Bridge"
   mqtt_prefix: rack-solar
   version: "2026.2.0-refactored"
@@ -358,12 +358,16 @@ text_sensor:
         then:
           - lambda: "if (!x.empty()) id(ss_alarm_reason_val) = x;"
 
+  - platform: version
+    name: "ESPHome Version"
+    id: esphome_version
+
   - platform: template
-    name: "Build Info"
-    id: build_info
-    icon: "mdi:information"
-    update_interval: never
-    lambda: return std::string("${version} - ") + ESPHOME_VERSION + " - " + __DATE__ + " " + __TIME__;
+    name: "Build Date"
+    id: build_date
+    icon: "mdi:calendar-clock"
+    update_interval: 1s
+    lambda: return std::string(__DATE__ " " __TIME__);
 
   # Template text sensors for MQTT/HA (update_interval: never - manual updates only)
   - platform: template
