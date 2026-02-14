@@ -3,7 +3,7 @@
 # Uses helper functions from solar_helpers.h for threshold checking and pacing
 
 substitutions:
-  device_name: rack-solar-bridge
+  device_name: esphome-unused-dev
   friendly_name: "Rack Solar Bridge"
   mqtt_prefix: rack-solar
   version: "2026.2.0-refactored"
@@ -63,6 +63,10 @@ mqtt:
   port: 1883
   username: !secret mqtt_user
   password: !secret mqtt_password
+  
+  # Redirect native ESPHome publishing to unused topic
+  # Our custom lambdas will publish to the real ${mqtt_prefix} topics
+  topic_prefix: "esphome_unused"
   
   # Device availability
   birth_message:
@@ -354,6 +358,13 @@ text_sensor:
         then:
           - lambda: "if (!x.empty()) id(ss_alarm_reason_val) = x;"
 
+  - platform: template
+    name: "Build Info"
+    id: build_info
+    icon: "mdi:information"
+    update_interval: never
+    lambda: return std::string("${version} - ") + ESPHOME_VERSION + " - " + __DATE__ + " " + __TIME__;
+
   # Template text sensors for MQTT/HA (update_interval: never - manual updates only)
   - platform: template
     name: "SmartShunt Model"
@@ -474,7 +485,6 @@ sensor:
   - platform: victron
     victron_id: smartshunt
     battery_voltage:
-      name: "SmartShunt Battery Voltage"
       id: ss_battery_voltage
       internal: true
       unit_of_measurement: "V"
@@ -491,7 +501,6 @@ sensor:
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_voltage", val);
               }
     battery_current:
-      name: "SmartShunt Battery Current"
       id: ss_battery_current
       internal: true
       unit_of_measurement: "A"
@@ -508,7 +517,6 @@ sensor:
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_current", val);
               }
     state_of_charge:
-      name: "SmartShunt State of Charge"
       id: ss_state_of_charge
       internal: true
       unit_of_measurement: "%"
@@ -524,7 +532,6 @@ sensor:
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/state_of_charge", to_string(val));
               }
     instantaneous_power:
-      name: "SmartShunt Power"
       id: ss_instantaneous_power
       internal: true
       unit_of_measurement: "W"
@@ -541,7 +548,6 @@ sensor:
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/instantaneous_power", val);
               }
     battery_temperature:
-      name: "SmartShunt Battery Temperature"
       id: ss_battery_temperature
       internal: true
       unit_of_measurement: "°C"
@@ -558,7 +564,6 @@ sensor:
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_temperature", val);
               }
     consumed_amp_hours:
-      name: "SmartShunt Consumed Ah"
       id: ss_consumed_amp_hours
       internal: true
       unit_of_measurement: "Ah"
@@ -575,7 +580,6 @@ sensor:
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/consumed_amp_hours", val);
               }
     time_to_go:
-      name: "SmartShunt Time To Go"
       id: ss_time_to_go
       internal: true
       unit_of_measurement: "min"
@@ -688,7 +692,6 @@ sensor:
                          x, last_val, fabs(x - last_val));
               }
     min_battery_voltage:
-      name: "SmartShunt Min Voltage"
       id: ss_min_battery_voltage
       internal: true
       unit_of_measurement: "V"
@@ -706,7 +709,6 @@ sensor:
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/min_battery_voltage", val);
               }
     max_battery_voltage:
-      name: "SmartShunt Max Voltage"
       id: ss_max_battery_voltage
       internal: true
       unit_of_measurement: "V"
@@ -726,7 +728,6 @@ sensor:
                 ESP_LOGD("mqtt", "Published max_voltage: %.2f (last: %.2f)", x, id(last_ss_max_battery_voltage));
               }
     last_full_charge:
-      name: "SmartShunt Last Full Charge"
       id: ss_last_full_charge
       internal: true
       unit_of_measurement: "min"
@@ -740,7 +741,6 @@ sensor:
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/last_full_charge", to_string(val));
               }
     amount_of_discharged_energy:
-      name: "SmartShunt Discharged Energy"
       id: ss_amount_discharged_energy
       internal: true
       unit_of_measurement: "Wh"
@@ -758,7 +758,6 @@ sensor:
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_discharged_energy", val);
               }
     amount_of_charged_energy:
-      name: "SmartShunt Charged Energy"
       id: ss_amount_charged_energy
       internal: true
       unit_of_measurement: "Wh"
