@@ -65,16 +65,16 @@ mqtt:
   password: !secret mqtt_password
   
   # Redirect native ESPHome publishing to unused topic
-  # Our custom lambdas will publish to the real ${mqtt_prefix} topics
+  # Our custom lambdas will publish to the real rack-solar topics
   topic_prefix: "esphome_unused"
   
   # Device availability
   birth_message:
-    topic: ${mqtt_prefix}/status
+    topic: rack-solar/status
     payload: "online"
     retain: true
   will_message:
-    topic: ${mqtt_prefix}/status
+    topic: rack-solar/status
     payload: "offline"
     retain: true
   
@@ -88,38 +88,39 @@ mqtt:
     - lambda: |-
         // On MQTT connect, handle SmartShunt availability based on current state
         // State machine: stale (bool) x was_online (bool) = 4 possible states
+        // NOTE: Must hardcode topic - ESPHome substitutions don't work in lambdas
         if (id(smartshunt_stale) && id(last_smartshunt_online)) {
           // CASE 1: Stale now, was online before → Transition to offline
-          id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
+          id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
           id(last_smartshunt_online) = false;
           ESP_LOGI("mqtt", "SmartShunt: was online, now stale → publishing offline");
         } else if (!id(smartshunt_stale) && !id(last_smartshunt_online)) {
           // CASE 2: Not stale, wasn't online before → Transition to online
-          id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("online"), (uint8_t)0, true);
+          id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("online"), (uint8_t)0, true);
           id(last_smartshunt_online) = true;
           ESP_LOGI("mqtt", "SmartShunt: has data → publishing online");
         } else if (id(smartshunt_stale) && !id(last_smartshunt_online)) {
           // CASE 3: Stale, never been online (fresh boot) → Publish offline so HA shows unavailable
-          id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
+          id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
           ESP_LOGI("mqtt", "SmartShunt: fresh boot, stale → publishing offline");
         } else {
           // CASE 4: Not stale, was online → No change needed
           ESP_LOGI("mqtt", "SmartShunt: online and has data → no change");
         }
-        // EPEVER state machine on connect
+        // EPEVER state machine on connect (hardcoded topic - substitutions don't work in lambdas)
         if (id(epever_stale) && id(last_epever_online)) {
           // CASE 1: Stale now, was online before → Transition to offline
-          id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("offline"), (uint8_t)0, true);
+          id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("offline"), (uint8_t)0, true);
           id(last_epever_online) = false;
           ESP_LOGI("mqtt", "EPEVER: was online, now stale → publishing offline");
         } else if (!id(epever_stale) && !id(last_epever_online)) {
           // CASE 2: Not stale, wasn't online before → Transition to online
-          id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+          id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
           id(last_epever_online) = true;
           ESP_LOGI("mqtt", "EPEVER: has data → publishing online");
         } else if (id(epever_stale) && !id(last_epever_online)) {
           // CASE 3: Stale, never been online (fresh boot) → Publish offline so HA shows unavailable
-          id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("offline"), (uint8_t)0, true);
+          id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("offline"), (uint8_t)0, true);
           ESP_LOGI("mqtt", "EPEVER: fresh boot, stale → publishing offline");
         } else {
           // CASE 4: Not stale, was online → No change needed
@@ -176,7 +177,7 @@ mqtt:
         
         ESP_LOGI("mqtt", "Publish timestamps reset - values will republish on next sensor update");
     - mqtt.publish:
-        topic: ${mqtt_prefix}/info
+        topic: rack-solar/info
         payload: "Rack Solar Bridge - Refactored version"
         retain: false
 
@@ -599,7 +600,7 @@ text_sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/smartshunt_stale", x.c_str());
+            id(mqtt_client).publish("rack-solar/smartshunt_stale", x.c_str());
 
   - platform: template
     name: "EPEVER Stale"
@@ -613,7 +614,7 @@ text_sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/epever_stale", x.c_str());
+            id(mqtt_client).publish("rack-solar/epever_stale", x.c_str());
 
 # Internal binary sensor (receive from SmartShunt) + Template for MQTT/HA
 binary_sensor:
@@ -647,7 +648,7 @@ binary_sensor:
       then:
         - lambda: |-
             const char* payload = x ? "ON" : "OFF";
-            id(mqtt_client).publish("${mqtt_prefix}/bitflip_rate_alert", payload);
+            id(mqtt_client).publish("rack-solar/bitflip_rate_alert", payload);
 
 # Modbus controller for EPEVER - 30s update_interval (kept as-is)
 modbus:
@@ -678,7 +679,7 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/uptime", to_string((int)x));
+            id(mqtt_client).publish("rack-solar/uptime", to_string((int)x));
 
   # WiFi signal strength
   - platform: wifi_signal
@@ -691,7 +692,7 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/wifi_signal", to_string((int)x));
+            id(mqtt_client).publish("rack-solar/wifi_signal", to_string((int)x));
 
   # Free heap for diagnostics
   - platform: template
@@ -705,7 +706,7 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/free_heap", to_string((int)x));
+            id(mqtt_client).publish("rack-solar/free_heap", to_string((int)x));
 
   - platform: template
     name: "RS485 CRC Errors"
@@ -718,7 +719,7 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/rs485_crc_errors", to_string((int)x));
+            id(mqtt_client).publish("rack-solar/rs485_crc_errors", to_string((int)x));
 
   - platform: template
     name: "RS485 Timeout Errors"
@@ -731,7 +732,7 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/rs485_timeout_errors", to_string((int)x));
+            id(mqtt_client).publish("rack-solar/rs485_timeout_errors", to_string((int)x));
 
   - platform: template
     name: "RS485 Frame Errors"
@@ -744,7 +745,7 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/rs485_frame_errors", to_string((int)x));
+            id(mqtt_client).publish("rack-solar/rs485_frame_errors", to_string((int)x));
 
   # ============================================================
   # DATA QUALITY SENSORS (Phase 2 hardening)
@@ -764,7 +765,7 @@ sensor:
         - lambda: |-
             static char val[16];
             snprintf(val, sizeof(val), "%.2f", x);
-            id(mqtt_client).publish("${mqtt_prefix}/bitflip_rate", val);
+            id(mqtt_client).publish("rack-solar/bitflip_rate", val);
 
   - platform: template
     name: "Data Quality Score"
@@ -788,7 +789,7 @@ sensor:
         - lambda: |-
             static char val[16];
             snprintf(val, sizeof(val), "%.1f", x);
-            id(mqtt_client).publish("${mqtt_prefix}/data_quality_score", val);
+            id(mqtt_client).publish("rack-solar/data_quality_score", val);
 
   - platform: template
     name: "Bitflip Window Total"
@@ -803,7 +804,7 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("${mqtt_prefix}/bitflip_window_total", to_string((int)x));
+            id(mqtt_client).publish("rack-solar/bitflip_window_total", to_string((int)x));
 
   # ============================================================
   # SMARTSHUNT SENSORS (victron platform with direct MQTT publishing)
@@ -827,7 +828,7 @@ sensor:
                                                0.1f, 0.5f, 15.0f, 30.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.2f", id(last_ss_battery_voltage));
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_voltage", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/battery_voltage", val);
               }
     battery_current:
       id: ss_battery_current
@@ -846,7 +847,7 @@ sensor:
                                                0.1f, 1.0f, -500.0f, 500.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.2f", id(last_ss_battery_current));
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_current", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/battery_current", val);
               }
     state_of_charge:
       id: ss_state_of_charge
@@ -862,7 +863,7 @@ sensor:
               if (val < 0 || val > 100) return;
               if (check_threshold_int(val, id(last_ss_state_of_charge),
                                       id(last_ss_state_of_charge_publish), 1)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/state_of_charge", to_string(val));
+                id(mqtt_client).publish("rack-solar/smartshunt/state_of_charge", to_string(val));
               }
     instantaneous_power:
       id: ss_instantaneous_power
@@ -881,7 +882,7 @@ sensor:
                                                5.0f, 50.0f, -10000.0f, 10000.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.0f", id(last_ss_instantaneous_power));
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/instantaneous_power", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/instantaneous_power", val);
               }
     battery_temperature:
       id: ss_battery_temperature
@@ -900,7 +901,7 @@ sensor:
                                                0.5f, 2.0f, -40.0f, 100.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.1f", id(last_ss_battery_temperature));
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_temperature", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/battery_temperature", val);
               }
     consumed_amp_hours:
       id: ss_consumed_amp_hours
@@ -917,7 +918,7 @@ sensor:
                                          1.0f, -999999.0f, 999999.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.0f", x);  // Whole Ah
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/consumed_amp_hours", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/consumed_amp_hours", val);
               }
     time_to_go:
       id: ss_time_to_go
@@ -931,7 +932,7 @@ sensor:
               int val = (int) roundf(x);
               if (check_threshold_int(val, id(last_ss_time_to_go),
                                        id(last_ss_time_to_go_publish), 1)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/time_to_go", to_string(val));
+                id(mqtt_client).publish("rack-solar/smartshunt/time_to_go", to_string(val));
               }
     depth_of_the_deepest_discharge:
       name: "SmartShunt Deepest Discharge"
@@ -948,7 +949,7 @@ sensor:
                                          0.1f, 0.0f, 999999.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.1f", x);
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_deepest_discharge", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/depth_deepest_discharge", val);
               }
     depth_of_the_last_discharge:
       name: "SmartShunt Last Discharge"
@@ -965,7 +966,7 @@ sensor:
                                          0.1f, 0.0f, 999999.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.1f", x);
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_last_discharge", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/depth_last_discharge", val);
               }
     depth_of_the_average_discharge:
       name: "SmartShunt Avg Discharge"
@@ -983,7 +984,7 @@ sensor:
                                          1.0f, 0.0f, 999999.0f, 300000)) {  // 1.0Ah threshold, 5min heartbeat
                 static char val[16];
                 snprintf(val, sizeof(val), "%.1f", x);
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_average_discharge", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/depth_average_discharge", val);
               }
     number_of_charge_cycles:
       name: "SmartShunt Charge Cycles"
@@ -998,7 +999,7 @@ sensor:
               if (val < 0 || val > 999999) return;
               if (check_threshold_int(val, id(last_ss_number_charge_cycles),
                                        id(last_ss_number_charge_cycles_publish), 1)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/number_charge_cycles", to_string(val));
+                id(mqtt_client).publish("rack-solar/smartshunt/number_charge_cycles", to_string(val));
               }
     number_of_full_discharges:
       name: "SmartShunt Full Discharges"
@@ -1013,7 +1014,7 @@ sensor:
               if (val < 0 || val > 999999) return;
               if (check_threshold_int(val, id(last_ss_number_full_discharges),
                                        id(last_ss_number_full_discharges_publish), 1)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/number_full_discharges", to_string(val));
+                id(mqtt_client).publish("rack-solar/smartshunt/number_full_discharges", to_string(val));
               }
     cumulative_amp_hours_drawn:
       id: ss_cumulative_amp_hours
@@ -1033,7 +1034,7 @@ sensor:
               if (should_pub) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.0f", x);
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/cumulative_amp_hours", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/cumulative_amp_hours", val);
                 ESP_LOGI("hysteresis", "cumulative_ah PUBLISH: x=%.3f, last=%.3f, diff=%.3f, last_pub=%u, now=%u, elapsed=%u",
                          x, last_val, fabs(x - last_val), last_pub, now, now - last_pub);
               } else {
@@ -1056,7 +1057,7 @@ sensor:
                                          0.5f, 15.0f, 30.0f, 300000)) {  // 0.5V threshold, 5min heartbeat
                 static char val[16];
                 snprintf(val, sizeof(val), "%.2f", x);
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/min_battery_voltage", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/min_battery_voltage", val);
               }
     max_battery_voltage:
       id: ss_max_battery_voltage
@@ -1075,7 +1076,7 @@ sensor:
                                          0.5f, 15.0f, 30.0f, 300000)) {  // 0.5V threshold, 5min heartbeat
                 static char val[16];
                 snprintf(val, sizeof(val), "%.2f", x);
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/max_battery_voltage", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/max_battery_voltage", val);
                 ESP_LOGD("mqtt", "Published max_voltage: %.2f (last: %.2f)", x, id(last_ss_max_battery_voltage));
               }
     last_full_charge:
@@ -1090,7 +1091,7 @@ sensor:
               int val = (int) roundf(x);
               if (check_threshold_int(val, id(last_ss_last_full_charge),
                                        id(last_ss_last_full_charge_publish), 1)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/last_full_charge", to_string(val));
+                id(mqtt_client).publish("rack-solar/smartshunt/last_full_charge", to_string(val));
               }
     amount_of_discharged_energy:
       id: ss_amount_discharged_energy
@@ -1109,7 +1110,7 @@ sensor:
                                          10.0f, 1000.0f, 0.0f, 999999.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.0f", x);  // Whole Wh
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_discharged_energy", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/amount_discharged_energy", val);
               }
     amount_of_charged_energy:
       id: ss_amount_charged_energy
@@ -1127,7 +1128,7 @@ sensor:
                                          10.0f, 1000.0f, 0.0f, 999999.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.0f", x);  // Whole Wh
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_charged_energy", val);
+                id(mqtt_client).publish("rack-solar/smartshunt/amount_charged_energy", val);
               }
 
   # ============================================================
@@ -1154,7 +1155,7 @@ sensor:
             if (id(epever_stale)) {
               id(epever_stale) = false;
               id(last_epever_online) = true;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
               ESP_LOGI("epever", "Data received after stale period, marking online");
             }
             if (check_threshold_float(x, id(last_epever_solar_voltage),
@@ -1162,7 +1163,7 @@ sensor:
                                        0.1f, 0.0f, 100.0f)) {
               static char val[16];
               snprintf(val, sizeof(val), "%.2f", x);
-              id(mqtt_client).publish("${mqtt_prefix}/epever/solar_voltage", val);
+              id(mqtt_client).publish("rack-solar/epever/solar_voltage", val);
             }
 
   - platform: modbus_controller
@@ -1186,7 +1187,7 @@ sensor:
             if (id(epever_stale)) {
               id(epever_stale) = false;
               id(last_epever_online) = true;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
               ESP_LOGI("epever", "Data received after stale period, marking online");
             }
             if (check_threshold_float(x, id(last_epever_pv_current),
@@ -1194,7 +1195,7 @@ sensor:
                                        0.1f, 0.0f, 100.0f)) {
               static char val[16];
               snprintf(val, sizeof(val), "%.2f", x);
-              id(mqtt_client).publish("${mqtt_prefix}/epever/pv_current", val);
+              id(mqtt_client).publish("rack-solar/epever/pv_current", val);
             }
 
   - platform: modbus_controller
@@ -1218,7 +1219,7 @@ sensor:
             if (id(epever_stale)) {
               id(epever_stale) = false;
               id(last_epever_online) = true;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
               ESP_LOGI("epever", "Data received after stale period, marking online");
             }
             if (check_threshold_float(x, id(last_epever_solar_power),
@@ -1226,7 +1227,7 @@ sensor:
                                        1.0f, 0.0f, 10000.0f)) {
               static char val[16];
               snprintf(val, sizeof(val), "%.1f", x);
-              id(mqtt_client).publish("${mqtt_prefix}/epever/solar_power", val);
+              id(mqtt_client).publish("rack-solar/epever/solar_power", val);
             }
 
   - platform: modbus_controller
@@ -1248,14 +1249,14 @@ sensor:
             if (id(epever_stale)) {
               id(epever_stale) = false;
               id(last_epever_online) = true;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
               ESP_LOGI("epever", "Data received after stale period, marking online");
             }
             int val = (int) roundf(x);
             if (val < 0 || val > 100) return;
             if (check_threshold_int(val, id(last_epever_battery_capacity),
                                      id(last_epever_battery_capacity_publish), 1, 0, 100)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_capacity", to_string(val));
+              id(mqtt_client).publish("rack-solar/epever/battery_capacity", to_string(val));
             }
 
   - platform: modbus_controller
@@ -1279,7 +1280,7 @@ sensor:
             if (id(epever_stale)) {
               id(epever_stale) = false;
               id(last_epever_online) = true;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
               ESP_LOGI("epever", "Data received after stale period, marking online");
             }
             if (check_threshold_float(x, id(last_epever_device_temp),
@@ -1287,7 +1288,7 @@ sensor:
                                        0.5f, -40.0f, 100.0f)) {
               static char val[16];
               snprintf(val, sizeof(val), "%.1f", x);
-              id(mqtt_client).publish("${mqtt_prefix}/epever/device_temp", val);
+              id(mqtt_client).publish("rack-solar/epever/device_temp", val);
             }
 
   - platform: modbus_controller
@@ -1311,7 +1312,7 @@ sensor:
             if (id(epever_stale)) {
               id(epever_stale) = false;
               id(last_epever_online) = true;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
               ESP_LOGI("epever", "Data received after stale period, marking online");
             }
             if (check_threshold_float(x, id(last_epever_battery_voltage),
@@ -1319,7 +1320,7 @@ sensor:
                                        0.1f, 15.0f, 30.0f)) {
               static char val[16];
               snprintf(val, sizeof(val), "%.2f", x);
-              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_voltage", val);
+              id(mqtt_client).publish("rack-solar/epever/battery_voltage", val);
             }
 
   - platform: modbus_controller
@@ -1343,7 +1344,7 @@ sensor:
             if (id(epever_stale)) {
               id(epever_stale) = false;
               id(last_epever_online) = true;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
               ESP_LOGI("epever", "Data received after stale period, marking online");
             }
             if (check_threshold_float(x, id(last_epever_battery_current),
@@ -1351,7 +1352,7 @@ sensor:
                                        0.1f, -100.0f, 100.0f)) {
               static char val[16];
               snprintf(val, sizeof(val), "%.2f", x);
-              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_current", val);
+              id(mqtt_client).publish("rack-solar/epever/battery_current", val);
             }
 
   - platform: modbus_controller
@@ -1375,7 +1376,7 @@ sensor:
             if (id(epever_stale)) {
               id(epever_stale) = false;
               id(last_epever_online) = true;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
               ESP_LOGI("epever", "Data received after stale period, marking online");
             }
             if (check_threshold_float(x, id(last_epever_total_energy),
@@ -1383,7 +1384,7 @@ sensor:
                                        0.1f, 0.0f, 999999.0f)) {
               static char val[16];
               snprintf(val, sizeof(val), "%.2f", x);
-              id(mqtt_client).publish("${mqtt_prefix}/epever/total_energy", val);
+              id(mqtt_client).publish("rack-solar/epever/total_energy", val);
             }
 
 
@@ -1716,37 +1717,37 @@ interval:
           };
           
           // Publish all 7 text sensors
-          publish_text("${mqtt_prefix}/smartshunt/model_description",
+          publish_text("rack-solar/smartshunt/model_description",
                        id(ss_model_description_val),
                        id(last_ss_model_description),
                        id(ss_model_description));
           
-          publish_text("${mqtt_prefix}/smartshunt/firmware_version",
+          publish_text("rack-solar/smartshunt/firmware_version",
                        id(ss_firmware_version_val),
                        id(last_ss_firmware_version),
                        id(ss_firmware_version));
           
-          publish_text("${mqtt_prefix}/smartshunt/device_type",
+          publish_text("rack-solar/smartshunt/device_type",
                        id(ss_device_type_val),
                        id(last_ss_device_type),
                        id(ss_device_type));
           
-          publish_text("${mqtt_prefix}/smartshunt/serial_number",
+          publish_text("rack-solar/smartshunt/serial_number",
                        id(ss_serial_number_val),
                        id(last_ss_serial_number),
                        id(ss_serial_number));
           
-          publish_text("${mqtt_prefix}/smartshunt/dc_monitor_mode",
+          publish_text("rack-solar/smartshunt/dc_monitor_mode",
                        id(ss_dc_monitor_mode_val),
                        id(last_ss_dc_monitor_mode),
                        id(ss_dc_monitor_mode));
           
-          publish_text("${mqtt_prefix}/smartshunt/alarm_condition",
+          publish_text("rack-solar/smartshunt/alarm_condition",
                        id(ss_alarm_condition_val),
                        id(last_ss_alarm_condition),
                        id(ss_alarm_condition));
           
-          publish_text("${mqtt_prefix}/smartshunt/alarm_reason",
+          publish_text("rack-solar/smartshunt/alarm_reason",
                        id(ss_alarm_reason_val),
                        id(last_ss_alarm_reason),
                        id(ss_alarm_reason));
@@ -1755,7 +1756,7 @@ interval:
           int current_relay = id(ss_relay_state_val) ? 1 : 0;
           if (current_relay != id(last_ss_relay_state)) {
             const char* payload = id(ss_relay_state_val) ? "ON" : "OFF";
-            id(mqtt_client).publish("${mqtt_prefix}/smartshunt/relay_state", payload);
+            id(mqtt_client).publish("rack-solar/smartshunt/relay_state", payload);
             id(ss_relay_state).publish_state(id(ss_relay_state_val));
             id(last_ss_relay_state) = current_relay;
           }
@@ -1767,10 +1768,10 @@ interval:
           uint32_t now = millis();
           if (now - id(last_availability_heartbeat) >= 600000) {
             if (id(last_smartshunt_online)) {
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("online"), (uint8_t)0, true);
             }
             if (id(last_epever_online)) {
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
             }
             id(last_availability_heartbeat) = now;
             ESP_LOGD("mqtt", "Availability heartbeat published");
@@ -1788,7 +1789,7 @@ interval:
             if (!is_stale) {
               ESP_LOGW("smartshunt", "No data ever received, marking stale");
               id(smartshunt_stale) = true;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
               id(last_smartshunt_online) = false;
             }
           } else {
@@ -1799,13 +1800,13 @@ interval:
               // Transition to stale
               ESP_LOGW("smartshunt", "No data for %ds, marking stale", elapsed / 1000);
               id(smartshunt_stale) = true;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
               id(last_smartshunt_online) = false;
             } else if (elapsed <= 30000 && is_stale) {
               // Transition back from stale to online
               ESP_LOGI("smartshunt", "Data flowing again after %dms, marking online", elapsed);
               id(smartshunt_stale) = false;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("online"), (uint8_t)0, true);
               id(last_smartshunt_online) = true;
             }
           }
@@ -1828,7 +1829,7 @@ interval:
             if (id(epever_stale)) {
               id(epever_stale) = false;
               id(last_epever_online) = true;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
               ESP_LOGI("epever", "Data flowing again, marking online");
             }
           } else {
@@ -1846,7 +1847,7 @@ interval:
             if (id(epever_consecutive_failures) >= 3 && !id(epever_stale)) {
               id(epever_stale) = true;
               id(last_epever_online) = false;
-              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("offline"), (uint8_t)0, true);
+              id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("offline"), (uint8_t)0, true);
               ESP_LOGW("epever", "3 consecutive poll failures, marking stale");
             }
           }
