@@ -455,6 +455,7 @@ text_sensor:
   - platform: template
     name: "SmartShunt Stale"
     id: smartshunt_stale_sensor
+    state_topic: null
     update_interval: 5s
     lambda: |-
       return id(smartshunt_stale) ? std::string("STALE") : std::string("OK");
@@ -462,6 +463,7 @@ text_sensor:
   - platform: template
     name: "EPEVER Stale"
     id: epever_stale_sensor
+    state_topic: null
     update_interval: 5s
     lambda: |-
       return id(epever_stale) ? std::string("STALE") : std::string("OK");
