@@ -310,6 +310,55 @@ script:
             pace_publish();
           }
           
+          // Data Quality sensors (diagnostic)
+          const char* diagnostic_sensors[][5] = {
+            {"bitflip_rate", "Bitflip Rate", "rack-solar/bitflip_rate", "events/min", ""},
+            {"data_quality_score", "Data Quality Score", "rack-solar/data_quality_score", "%", ""},
+            {"bitflip_window_total", "Bitflip Window Total", "rack-solar/bitflip_window_total", "events", ""},
+            {"rs485_crc_errors", "RS485 CRC Errors", "rack-solar/rs485_crc_errors", "", ""},
+            {"rs485_timeout_errors", "RS485 Timeout Errors", "rack-solar/rs485_timeout_errors", "", ""},
+            {"rs485_frame_errors", "RS485 Frame Errors", "rack-solar/rs485_frame_errors", "", ""},
+            {"smartshunt_stale", "SmartShunt Stale", "rack-solar/smartshunt_stale", "", ""},
+            {"epever_stale", "EPEVER Stale", "rack-solar/epever_stale", "", ""},
+            {"free_heap", "Free Heap", "rack-solar/free_heap", "bytes", ""},
+            {"wifi_signal", "WiFi Signal", "rack-solar/wifi_signal", "dBm", "signal_strength"},
+            {"uptime", "Uptime", "rack-solar/uptime", "s", "duration"},
+          };
+
+          for (int i = 0; i < 11; i++) {
+            snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", diagnostic_sensors[i][0]);
+            bool ok = false;
+            if (strlen(diagnostic_sensors[i][4]) > 0) {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","entity_category":"diagnostic",%s})",
+                diagnostic_sensors[i][1], diagnostic_sensors[i][2], diagnostic_sensors[i][0],
+                diagnostic_sensors[i][3], diagnostic_sensors[i][4], device_payload) > 0;
+            } else if (strlen(diagnostic_sensors[i][3]) > 0) {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","entity_category":"diagnostic",%s})",
+                diagnostic_sensors[i][1], diagnostic_sensors[i][2], diagnostic_sensors[i][0],
+                diagnostic_sensors[i][3], device_payload) > 0;
+            } else {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","entity_category":"diagnostic",%s})",
+                diagnostic_sensors[i][1], diagnostic_sensors[i][2], diagnostic_sensors[i][0],
+                device_payload) > 0;
+            }
+            if (ok) {
+              id(mqtt_client).publish(std::string(topic), std::string(payload), 0, true);
+              pace_publish();
+            }
+          }
+
+          // Bitflip Rate Alert (binary sensor)
+          snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/rack_solar/bitflip_rate_alert/config");
+          if (snprintf(payload, sizeof(payload),
+            R"({"name":"Bitflip Rate Alert","state_topic":"rack-solar/bitflip_rate_alert","unique_id":"rack_solar_bitflip_rate_alert","device_class":"problem","entity_category":"diagnostic",%s})",
+            device_payload) > 0) {
+            id(mqtt_client).publish(std::string(topic), std::string(payload), 0, true);
+            pace_publish();
+          }
+
           ESP_LOGI("mqtt", "Published %d discovery configs", publish_count);
 
 # =============================================================================
@@ -533,6 +582,10 @@ text_sensor:
     entity_category: diagnostic
     lambda: |-
       return id(smartshunt_stale) ? std::string("STALE") : std::string("OK");
+    on_value:
+      then:
+        - lambda: |-
+            id(mqtt_client).publish("${mqtt_prefix}/smartshunt_stale", x.c_str());
 
   - platform: template
     name: "EPEVER Stale"
@@ -543,6 +596,10 @@ text_sensor:
     entity_category: diagnostic
     lambda: |-
       return id(epever_stale) ? std::string("STALE") : std::string("OK");
+    on_value:
+      then:
+        - lambda: |-
+            id(mqtt_client).publish("${mqtt_prefix}/epever_stale", x.c_str());
 
 # Internal binary sensor (receive from SmartShunt) + Template for MQTT/HA
 binary_sensor:
@@ -568,9 +625,15 @@ binary_sensor:
     id: bitflip_rate_alert
     state_topic: null
     device_class: problem
+    entity_category: diagnostic
     lambda: |-
       float rate = get_bitflip_rate_per_minute(id(bitflip_count), id(bitflip_window_start), millis());
       return rate > 5.0f;  // Alert if >5 bitflips/minute
+    on_state:
+      then:
+        - lambda: |-
+            const char* payload = x ? "ON" : "OFF";
+            id(mqtt_client).publish("${mqtt_prefix}/bitflip_rate_alert", payload);
 
 # Modbus controller for EPEVER - 30s update_interval (kept as-is)
 modbus:
@@ -598,6 +661,10 @@ sensor:
     device_class: duration
     state_class: total_increasing
     entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            id(mqtt_client).publish("${mqtt_prefix}/uptime", to_string(x));
 
   # WiFi signal strength
   - platform: wifi_signal
@@ -607,6 +674,10 @@ sensor:
     update_interval: 60s
     unit_of_measurement: "dBm"
     device_class: signal_strength
+    on_value:
+      then:
+        - lambda: |-
+            id(mqtt_client).publish("${mqtt_prefix}/wifi_signal", to_string(x));
 
   # Free heap for diagnostics
   - platform: template
@@ -617,6 +688,10 @@ sensor:
     lambda: return heap_caps_get_free_size(MALLOC_CAP_8BIT);
     update_interval: 30s
     entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            id(mqtt_client).publish("${mqtt_prefix}/free_heap", to_string(x));
 
   - platform: template
     name: "RS485 CRC Errors"
@@ -626,6 +701,10 @@ sensor:
       return id(rs485_crc_errors);
     update_interval: 5s
     entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            id(mqtt_client).publish("${mqtt_prefix}/rs485_crc_errors", to_string(x));
 
   - platform: template
     name: "RS485 Timeout Errors"
@@ -635,6 +714,10 @@ sensor:
       return id(rs485_timeout_errors);
     update_interval: 5s
     entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            id(mqtt_client).publish("${mqtt_prefix}/rs485_timeout_errors", to_string(x));
 
   - platform: template
     name: "RS485 Frame Errors"
@@ -644,6 +727,10 @@ sensor:
       return id(rs485_frame_errors);
     update_interval: 5s
     entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            id(mqtt_client).publish("${mqtt_prefix}/rs485_frame_errors", to_string(x));
 
   # ============================================================
   # DATA QUALITY SENSORS (Phase 2 hardening)
@@ -656,7 +743,14 @@ sensor:
     lambda: |-
       return get_bitflip_rate_per_minute(id(bitflip_count), id(bitflip_window_start), millis());
     update_interval: 10s
+    state_class: measurement
     entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            static char val[16];
+            snprintf(val, sizeof(val), "%.2f", x);
+            id(mqtt_client).publish("${mqtt_prefix}/bitflip_rate", val);
 
   - platform: template
     name: "Data Quality Score"
@@ -675,6 +769,12 @@ sensor:
     update_interval: 10s
     state_class: measurement
     entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            static char val[16];
+            snprintf(val, sizeof(val), "%.1f", x);
+            id(mqtt_client).publish("${mqtt_prefix}/data_quality_score", val);
 
   - platform: template
     name: "Bitflip Window Total"
@@ -686,6 +786,10 @@ sensor:
     update_interval: 10s
     state_class: measurement
     entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            id(mqtt_client).publish("${mqtt_prefix}/bitflip_window_total", to_string((int)x));
 
   # ============================================================
   # SMARTSHUNT SENSORS (victron platform with direct MQTT publishing)
