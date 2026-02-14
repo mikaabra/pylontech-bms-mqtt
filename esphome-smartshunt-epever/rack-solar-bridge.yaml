@@ -405,572 +405,331 @@ sensor:
     entity_category: diagnostic
 
   # ============================================================
-  # SMARTSHUNT RAW SENSORS (victron platform, no names, raw IDs)
+  # SMARTSHUNT SENSORS (victron platform with direct MQTT publishing)
   # ============================================================
   - platform: victron
     victron_id: smartshunt
     battery_voltage:
-      id: ss_battery_voltage_raw
+      name: "SmartShunt Battery Voltage"
+      id: ss_battery_voltage
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_battery_voltage),
+                                         id(last_ss_battery_voltage_publish),
+                                         0.1f, 15.0f, 30.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_voltage", to_string(x));
+              }
     battery_current:
-      id: ss_battery_current_raw
+      name: "SmartShunt Battery Current"
+      id: ss_battery_current
+      unit_of_measurement: "A"
+      device_class: current
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_battery_current),
+                                         id(last_ss_battery_current_publish),
+                                         0.1f, -500.0f, 500.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_current", to_string(x));
+              }
     state_of_charge:
-      id: ss_state_of_charge_raw
+      name: "SmartShunt State of Charge"
+      id: ss_state_of_charge
+      unit_of_measurement: "%"
+      device_class: battery
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              int val = (int) roundf(x);
+              if (val < 0 || val > 100) return;
+              if (check_threshold_int(val, id(last_ss_state_of_charge),
+                                      id(last_ss_state_of_charge_publish), 1)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/state_of_charge", to_string(val));
+              }
     instantaneous_power:
-      id: ss_instantaneous_power_raw
+      name: "SmartShunt Power"
+      id: ss_instantaneous_power
+      unit_of_measurement: "W"
+      device_class: power
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_instantaneous_power),
+                                         id(last_ss_instantaneous_power_publish),
+                                         1.0f, -10000.0f, 10000.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/instantaneous_power", to_string(x));
+              }
     battery_temperature:
-      id: ss_battery_temperature_raw
+      name: "SmartShunt Battery Temperature"
+      id: ss_battery_temperature
+      unit_of_measurement: "°C"
+      device_class: temperature
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_battery_temperature),
+                                         id(last_ss_battery_temperature_publish),
+                                         0.5f, -40.0f, 100.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_temperature", to_string(x));
+              }
     consumed_amp_hours:
-      id: ss_consumed_amp_hours_raw
+      name: "SmartShunt Consumed Ah"
+      id: ss_consumed_amp_hours
+      unit_of_measurement: "Ah"
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_consumed_amp_hours),
+                                         id(last_ss_consumed_amp_hours_publish),
+                                         0.1f, -999999.0f, 999999.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/consumed_amp_hours", to_string(x));
+              }
     time_to_go:
-      id: ss_time_to_go_raw
+      name: "SmartShunt Time To Go"
+      id: ss_time_to_go
+      unit_of_measurement: "min"
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              int val = (int) roundf(x);
+              if (check_threshold_int(val, id(last_ss_time_to_go),
+                                      id(last_ss_time_to_go_publish), 1)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/time_to_go", to_string(val));
+              }
     depth_of_the_deepest_discharge:
-      id: ss_depth_deepest_discharge_raw
+      name: "SmartShunt Deepest Discharge"
+      id: ss_depth_deepest_discharge
+      unit_of_measurement: "Ah"
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_depth_deepest_discharge),
+                                         id(last_ss_depth_deepest_discharge_publish),
+                                         0.1f, 0.0f, 999999.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_deepest_discharge", to_string(x));
+              }
     depth_of_the_last_discharge:
-      id: ss_depth_last_discharge_raw
+      name: "SmartShunt Last Discharge"
+      id: ss_depth_last_discharge
+      unit_of_measurement: "Ah"
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_depth_last_discharge),
+                                         id(last_ss_depth_last_discharge_publish),
+                                         0.1f, 0.0f, 999999.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_last_discharge", to_string(x));
+              }
     depth_of_the_average_discharge:
-      id: ss_depth_average_discharge_raw
+      name: "SmartShunt Avg Discharge"
+      id: ss_depth_average_discharge
+      unit_of_measurement: "Ah"
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_depth_average_discharge),
+                                         id(last_ss_depth_average_discharge_publish),
+                                         0.1f, 0.0f, 999999.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_average_discharge", to_string(x));
+              }
     number_of_charge_cycles:
-      id: ss_number_charge_cycles_raw
+      name: "SmartShunt Charge Cycles"
+      id: ss_number_charge_cycles
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              int val = (int) roundf(x);
+              if (val < 0 || val > 999999) return;
+              if (check_threshold_int(val, id(last_ss_number_charge_cycles),
+                                      id(last_ss_number_charge_cycles_publish), 1)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/number_charge_cycles", to_string(val));
+              }
     number_of_full_discharges:
-      id: ss_number_full_discharges_raw
+      name: "SmartShunt Full Discharges"
+      id: ss_number_full_discharges
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              int val = (int) roundf(x);
+              if (val < 0 || val > 999999) return;
+              if (check_threshold_int(val, id(last_ss_number_full_discharges),
+                                      id(last_ss_number_full_discharges_publish), 1)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/number_full_discharges", to_string(val));
+              }
     cumulative_amp_hours_drawn:
-      id: ss_cumulative_amp_hours_raw
+      name: "SmartShunt Cumulative Ah"
+      id: ss_cumulative_amp_hours
+      unit_of_measurement: "Ah"
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_cumulative_amp_hours),
+                                         id(last_ss_cumulative_amp_hours_publish),
+                                         0.1f, 0.0f, 999999.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/cumulative_amp_hours", to_string(x));
+              }
     min_battery_voltage:
-      id: ss_min_battery_voltage_raw
+      name: "SmartShunt Min Voltage"
+      id: ss_min_battery_voltage
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_min_battery_voltage),
+                                         id(last_ss_min_battery_voltage_publish),
+                                         0.1f, 15.0f, 30.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/min_battery_voltage", to_string(x));
+              }
     max_battery_voltage:
-      id: ss_max_battery_voltage_raw
+      name: "SmartShunt Max Voltage"
+      id: ss_max_battery_voltage
+      unit_of_measurement: "V"
+      device_class: voltage
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_max_battery_voltage),
+                                         id(last_ss_max_battery_voltage_publish),
+                                         0.1f, 15.0f, 30.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/max_battery_voltage", to_string(x));
+              }
     last_full_charge:
-      id: ss_last_full_charge_raw
+      name: "SmartShunt Last Full Charge"
+      id: ss_last_full_charge
+      unit_of_measurement: "min"
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              int val = (int) roundf(x);
+              if (check_threshold_int(val, id(last_ss_last_full_charge),
+                                      id(last_ss_last_full_charge_publish), 1)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/last_full_charge", to_string(val));
+              }
     amount_of_discharged_energy:
-      id: ss_amount_discharged_energy_raw
+      name: "SmartShunt Discharged Energy"
+      id: ss_amount_discharged_energy
+      unit_of_measurement: "Wh"
+      device_class: energy
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_amount_discharged_energy),
+                                         id(last_ss_amount_discharged_energy_publish),
+                                         0.1f, 0.0f, 999999.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_discharged_energy", to_string(x));
+              }
     amount_of_charged_energy:
-      id: ss_amount_charged_energy_raw
+      name: "SmartShunt Charged Energy"
+      id: ss_amount_charged_energy
+      unit_of_measurement: "Wh"
+      device_class: energy
+      state_class: measurement
+      on_value:
+        then:
+          - lambda: |-
+              if (check_threshold_float(x, id(last_ss_amount_charged_energy),
+                                         id(last_ss_amount_charged_energy_publish),
+                                         0.1f, 0.0f, 999999.0f)) {
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_charged_energy", to_string(x));
+              }
 
   # ============================================================
-  # EPEVER RAW SENSORS (modbus_controller platform, no names, raw IDs)
+  # EPEVER SENSORS (modbus_controller with direct MQTT publishing)
   # ============================================================
   - platform: modbus_controller
     modbus_controller_id: epever
-    id: epever_solar_voltage_raw
+    name: "EPEVER Solar Voltage"
+    id: epever_solar_voltage
     register_type: read
     address: 12544
     value_type: U_WORD
-    filters:
-      - multiply: 0.01
-
-  - platform: modbus_controller
-    modbus_controller_id: epever
-    id: epever_pv_current_raw
-    register_type: read
-    address: 12545
-    value_type: U_WORD
-    filters:
-      - multiply: 0.01
-
-  - platform: modbus_controller
-    modbus_controller_id: epever
-    id: epever_solar_power_raw
-    register_type: read
-    address: 12546
-    value_type: U_DWORD_R
-    filters:
-      - multiply: 0.01
-
-  - platform: modbus_controller
-    modbus_controller_id: epever
-    id: epever_battery_capacity_raw
-    register_type: read
-    address: 12570
-    value_type: U_WORD
-
-  - platform: modbus_controller
-    modbus_controller_id: epever
-    id: epever_device_temp_raw
-    register_type: read
-    address: 12561
-    value_type: S_WORD
-    filters:
-      - multiply: 0.01
-
-  - platform: modbus_controller
-    modbus_controller_id: epever
-    id: epever_battery_voltage_raw
-    register_type: read
-    address: 13082
-    value_type: U_WORD
-    filters:
-      - multiply: 0.01
-
-  - platform: modbus_controller
-    modbus_controller_id: epever
-    id: epever_battery_current_raw
-    register_type: read
-    address: 13083
-    value_type: U_WORD
-    filters:
-      - multiply: 0.01
-
-  - platform: modbus_controller
-    modbus_controller_id: epever
-    id: epever_total_energy_raw
-    register_type: read
-    address: 13074
-    value_type: U_DWORD_R
-    filters:
-      - multiply: 0.01
-
-  # ============================================================
-  # SMARTSHUNT TEMPLATE SENSORS (with delta filters + helper functions)
-  # ============================================================
-  
-  # Battery Voltage - threshold 0.1V, range 15-30V
-  - platform: template
-    name: "SmartShunt Battery Voltage"
-    id: ss_battery_voltage
     unit_of_measurement: "V"
     device_class: voltage
     state_class: measurement
-    lambda: return id(ss_battery_voltage_raw).state;
     filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_battery_voltage),
-                                       id(last_ss_battery_voltage_publish),
-                                       0.1f, 15.0f, 30.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_voltage",
-                                       to_string(x));
-            }
-
-  # Battery Current - threshold 0.1A, range -500 to +500A
-  - platform: template
-    name: "SmartShunt Battery Current"
-    id: ss_battery_current
-    unit_of_measurement: "A"
-    device_class: current
-    state_class: measurement
-    lambda: return id(ss_battery_current_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_battery_current),
-                                       id(last_ss_battery_current_publish),
-                                       0.1f, -500.0f, 500.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_current",
-                                       to_string(x));
-            }
-
-  # State of Charge - threshold 1%, range 0-100
-  - platform: template
-    name: "SmartShunt State of Charge"
-    id: ss_state_of_charge
-    unit_of_measurement: "%"
-    device_class: battery
-    state_class: measurement
-    lambda: return id(ss_state_of_charge_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            int val = (int) roundf(x);
-            if (val < 0 || val > 100) return;
-            if (check_threshold_int(val, id(last_ss_state_of_charge),
-                                    id(last_ss_state_of_charge_publish), 1)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/state_of_charge",
-                                       to_string(val));
-            }
-
-  # Instantaneous Power - threshold 1W, range 0-10000W
-  - platform: template
-    name: "SmartShunt Power"
-    id: ss_instantaneous_power
-    unit_of_measurement: "W"
-    device_class: power
-    state_class: measurement
-    lambda: return id(ss_instantaneous_power_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_instantaneous_power),
-                                       id(last_ss_instantaneous_power_publish),
-                                       1.0f, -10000.0f, 10000.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/instantaneous_power",
-                                       to_string(x));
-            }
-
-  # Battery Temperature - threshold 0.5C, range -40 to +100C
-  - platform: template
-    name: "SmartShunt Battery Temperature"
-    id: ss_battery_temperature
-    unit_of_measurement: "°C"
-    device_class: temperature
-    state_class: measurement
-    lambda: return id(ss_battery_temperature_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_battery_temperature),
-                                       id(last_ss_battery_temperature_publish),
-                                       0.5f, -40.0f, 100.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/battery_temperature",
-                                       to_string(x));
-            }
-
-  # Consumed Amp Hours - threshold 0.1Ah, range -999999 to +999999
-  - platform: template
-    name: "SmartShunt Consumed Amp Hours"
-    id: ss_consumed_amp_hours
-    unit_of_measurement: "Ah"
-    state_class: measurement
-    lambda: return id(ss_consumed_amp_hours_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_consumed_amp_hours),
-                                       id(last_ss_consumed_amp_hours_publish),
-                                       0.1f, -999999.0f, 999999.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/consumed_amp_hours",
-                                       to_string(x));
-            }
-
-  # Time To Go - threshold 1 minute
-  - platform: template
-    name: "SmartShunt Time To Go"
-    id: ss_time_to_go
-    unit_of_measurement: "min"
-    state_class: measurement
-    lambda: return id(ss_time_to_go_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            int val = (int) roundf(x);
-            if (check_threshold_int(val, id(last_ss_time_to_go),
-                                    id(last_ss_time_to_go_publish), 1)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/time_to_go",
-                                       to_string(val));
-            }
-
-  # Depth Deepest Discharge - threshold 0.1Ah, range 0-999999
-  - platform: template
-    name: "SmartShunt Deepest Discharge"
-    id: ss_depth_deepest_discharge
-    unit_of_measurement: "Ah"
-    state_class: measurement
-    lambda: return id(ss_depth_deepest_discharge_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_depth_deepest_discharge),
-                                       id(last_ss_depth_deepest_discharge_publish),
-                                       0.1f, 0.0f, 999999.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_deepest_discharge",
-                                       to_string(x));
-            }
-
-  # Depth Last Discharge - threshold 0.1Ah, range 0-999999
-  - platform: template
-    name: "SmartShunt Last Discharge"
-    id: ss_depth_last_discharge
-    unit_of_measurement: "Ah"
-    state_class: measurement
-    lambda: return id(ss_depth_last_discharge_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_depth_last_discharge),
-                                       id(last_ss_depth_last_discharge_publish),
-                                       0.1f, 0.0f, 999999.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_last_discharge",
-                                       to_string(x));
-            }
-
-  # Depth Average Discharge - threshold 0.1Ah, range 0-999999
-  - platform: template
-    name: "SmartShunt Avg Discharge"
-    id: ss_depth_average_discharge
-    unit_of_measurement: "Ah"
-    state_class: measurement
-    lambda: return id(ss_depth_average_discharge_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_depth_average_discharge),
-                                       id(last_ss_depth_average_discharge_publish),
-                                       0.1f, 0.0f, 999999.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_average_discharge",
-                                       to_string(x));
-            }
-
-  # Number Charge Cycles - threshold 1, range 0-999999
-  - platform: template
-    name: "SmartShunt Charge Cycles"
-    id: ss_number_charge_cycles
-    state_class: measurement
-    lambda: return id(ss_number_charge_cycles_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            int val = (int) roundf(x);
-            if (val < 0 || val > 999999) return;
-            if (check_threshold_int(val, id(last_ss_number_charge_cycles),
-                                    id(last_ss_number_charge_cycles_publish), 1)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/number_charge_cycles",
-                                       to_string(val));
-            }
-
-  # Number Full Discharges - threshold 1, range 0-999999
-  - platform: template
-    name: "SmartShunt Full Discharges"
-    id: ss_number_full_discharges
-    state_class: measurement
-    lambda: return id(ss_number_full_discharges_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            int val = (int) roundf(x);
-            if (val < 0 || val > 999999) return;
-            if (check_threshold_int(val, id(last_ss_number_full_discharges),
-                                    id(last_ss_number_full_discharges_publish), 1)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/number_full_discharges",
-                                       to_string(val));
-            }
-
-  # Cumulative Amp Hours - threshold 0.1Ah, range 0-999999
-  - platform: template
-    name: "SmartShunt Cumulative Ah"
-    id: ss_cumulative_amp_hours
-    unit_of_measurement: "Ah"
-    state_class: measurement
-    lambda: return id(ss_cumulative_amp_hours_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_cumulative_amp_hours),
-                                       id(last_ss_cumulative_amp_hours_publish),
-                                       0.1f, 0.0f, 999999.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/cumulative_amp_hours",
-                                       to_string(x));
-            }
-
-  # Min Battery Voltage - threshold 0.1V, range 15-30V
-  - platform: template
-    name: "SmartShunt Min Voltage"
-    id: ss_min_battery_voltage
-    unit_of_measurement: "V"
-    device_class: voltage
-    state_class: measurement
-    lambda: return id(ss_min_battery_voltage_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_min_battery_voltage),
-                                       id(last_ss_min_battery_voltage_publish),
-                                       0.1f, 15.0f, 30.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/min_battery_voltage",
-                                       to_string(x));
-            }
-
-  # Max Battery Voltage - threshold 0.1V, range 15-30V
-  - platform: template
-    name: "SmartShunt Max Voltage"
-    id: ss_max_battery_voltage
-    unit_of_measurement: "V"
-    device_class: voltage
-    state_class: measurement
-    lambda: return id(ss_max_battery_voltage_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_max_battery_voltage),
-                                       id(last_ss_max_battery_voltage_publish),
-                                       0.1f, 15.0f, 30.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/max_battery_voltage",
-                                       to_string(x));
-            }
-
-  # Last Full Charge - threshold 1 minute
-  - platform: template
-    name: "SmartShunt Last Full Charge"
-    id: ss_last_full_charge
-    unit_of_measurement: "min"
-    state_class: measurement
-    lambda: return id(ss_last_full_charge_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            int val = (int) roundf(x);
-            if (check_threshold_int(val, id(last_ss_last_full_charge),
-                                    id(last_ss_last_full_charge_publish), 1)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/last_full_charge",
-                                       to_string(val));
-            }
-
-  # Amount Discharged Energy - threshold 0.1Wh, range 0-999999
-  - platform: template
-    name: "SmartShunt Discharged Energy"
-    id: ss_amount_discharged_energy
-    unit_of_measurement: "Wh"
-    device_class: energy
-    state_class: measurement
-    lambda: return id(ss_amount_discharged_energy_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_amount_discharged_energy),
-                                       id(last_ss_amount_discharged_energy_publish),
-                                       0.1f, 0.0f, 999999.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_discharged_energy",
-                                       to_string(x));
-            }
-
-  # Amount Charged Energy - threshold 0.1Wh, range 0-999999
-  - platform: template
-    name: "SmartShunt Charged Energy"
-    id: ss_amount_charged_energy
-    unit_of_measurement: "Wh"
-    device_class: energy
-    state_class: measurement
-    lambda: return id(ss_amount_charged_energy_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
-    on_value:
-      then:
-        - lambda: |-
-            if (check_threshold_float(x, id(last_ss_amount_charged_energy),
-                                       id(last_ss_amount_charged_energy_publish),
-                                       0.1f, 0.0f, 999999.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/smartshunt/amount_charged_energy",
-                                       to_string(x));
-            }
-
-  # ============================================================
-  # EPEVER TEMPLATE SENSORS (with delta filters + helper functions)
-  # ============================================================
-  
-  # Solar Voltage - threshold 0.1V, range 0-100V
-  - platform: template
-    name: "EPEVER Solar Voltage"
-    id: epever_solar_voltage
-    unit_of_measurement: "V"
-    device_class: voltage
-    state_class: measurement
-    lambda: return id(epever_solar_voltage_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
+      - multiply: 0.01
     on_value:
       then:
         - lambda: |-
             if (check_threshold_float(x, id(last_epever_solar_voltage),
                                        id(last_epever_solar_voltage_publish),
                                        0.1f, 0.0f, 100.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/solar_voltage",
-                                       to_string(x));
+              id(mqtt_client).publish("${mqtt_prefix}/epever/solar_voltage", to_string(x));
             }
 
-  # PV Current - threshold 0.1A, range 0-100A
-  - platform: template
+  - platform: modbus_controller
+    modbus_controller_id: epever
     name: "EPEVER PV Current"
     id: epever_pv_current
+    register_type: read
+    address: 12545
+    value_type: U_WORD
     unit_of_measurement: "A"
     device_class: current
     state_class: measurement
-    lambda: return id(epever_pv_current_raw).state;
     filters:
-      - heartbeat: 60s
-      - delta: 0.01
+      - multiply: 0.01
     on_value:
       then:
         - lambda: |-
             if (check_threshold_float(x, id(last_epever_pv_current),
                                        id(last_epever_pv_current_publish),
                                        0.1f, 0.0f, 100.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/pv_current",
-                                       to_string(x));
+              id(mqtt_client).publish("${mqtt_prefix}/epever/pv_current", to_string(x));
             }
 
-  # Solar Power - threshold 1W, range 0-10000W
-  - platform: template
+  - platform: modbus_controller
+    modbus_controller_id: epever
     name: "EPEVER Solar Power"
     id: epever_solar_power
+    register_type: read
+    address: 12546
+    value_type: U_DWORD_R
     unit_of_measurement: "W"
     device_class: power
     state_class: measurement
-    lambda: return id(epever_solar_power_raw).state;
     filters:
-      - heartbeat: 60s
-      - delta: 0.01
+      - multiply: 0.01
     on_value:
       then:
         - lambda: |-
             if (check_threshold_float(x, id(last_epever_solar_power),
                                        id(last_epever_solar_power_publish),
                                        1.0f, 0.0f, 10000.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/solar_power",
-                                       to_string(x));
+              id(mqtt_client).publish("${mqtt_prefix}/epever/solar_power", to_string(x));
             }
 
-  # Battery Capacity - threshold 1%, range 0-100
-  - platform: template
+  - platform: modbus_controller
+    modbus_controller_id: epever
     name: "EPEVER Battery Capacity"
     id: epever_battery_capacity
+    register_type: read
+    address: 12570
+    value_type: U_WORD
     unit_of_measurement: "%"
     device_class: battery
     state_class: measurement
-    lambda: return id(epever_battery_capacity_raw).state;
-    filters:
-      - heartbeat: 60s
-      - delta: 0.01
     on_value:
       then:
         - lambda: |-
@@ -978,93 +737,93 @@ sensor:
             if (val < 0 || val > 100) return;
             if (check_threshold_int(val, id(last_epever_battery_capacity),
                                     id(last_epever_battery_capacity_publish), 1)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_capacity",
-                                       to_string(val));
+              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_capacity", to_string(val));
             }
 
-  # Device Temperature - threshold 0.5C, range -40 to +100C
-  - platform: template
+  - platform: modbus_controller
+    modbus_controller_id: epever
     name: "EPEVER Device Temperature"
     id: epever_device_temp
+    register_type: read
+    address: 12561
+    value_type: S_WORD
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
-    lambda: return id(epever_device_temp_raw).state;
     filters:
-      - heartbeat: 60s
-      - delta: 0.01
+      - multiply: 0.01
     on_value:
       then:
         - lambda: |-
             if (check_threshold_float(x, id(last_epever_device_temp),
                                        id(last_epever_device_temp_publish),
                                        0.5f, -40.0f, 100.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/device_temp",
-                                       to_string(x));
+              id(mqtt_client).publish("${mqtt_prefix}/epever/device_temp", to_string(x));
             }
 
-  # Battery Voltage - threshold 0.1V, range 15-30V
-  - platform: template
+  - platform: modbus_controller
+    modbus_controller_id: epever
     name: "EPEVER Battery Voltage"
     id: epever_battery_voltage
+    register_type: read
+    address: 13082
+    value_type: U_WORD
     unit_of_measurement: "V"
     device_class: voltage
     state_class: measurement
-    lambda: return id(epever_battery_voltage_raw).state;
     filters:
-      - heartbeat: 60s
-      - delta: 0.01
+      - multiply: 0.01
     on_value:
       then:
         - lambda: |-
             if (check_threshold_float(x, id(last_epever_battery_voltage),
                                        id(last_epever_battery_voltage_publish),
                                        0.1f, 15.0f, 30.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_voltage",
-                                       to_string(x));
+              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_voltage", to_string(x));
             }
 
-  # Battery Current - threshold 0.1A, range -100 to +100A
-  - platform: template
+  - platform: modbus_controller
+    modbus_controller_id: epever
     name: "EPEVER Battery Current"
     id: epever_battery_current
+    register_type: read
+    address: 13083
+    value_type: U_WORD
     unit_of_measurement: "A"
     device_class: current
     state_class: measurement
-    lambda: return id(epever_battery_current_raw).state;
     filters:
-      - heartbeat: 60s
-      - delta: 0.01
+      - multiply: 0.01
     on_value:
       then:
         - lambda: |-
             if (check_threshold_float(x, id(last_epever_battery_current),
                                        id(last_epever_battery_current_publish),
                                        0.1f, -100.0f, 100.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_current",
-                                       to_string(x));
+              id(mqtt_client).publish("${mqtt_prefix}/epever/battery_current", to_string(x));
             }
 
-  # Total Energy - threshold 0.1kWh, range 0-999999
-  - platform: template
+  - platform: modbus_controller
+    modbus_controller_id: epever
     name: "EPEVER Total Energy"
     id: epever_total_energy
+    register_type: read
+    address: 13074
+    value_type: U_DWORD_R
     unit_of_measurement: "kWh"
     device_class: energy
     state_class: total_increasing
-    lambda: return id(epever_total_energy_raw).state;
     filters:
-      - heartbeat: 60s
-      - delta: 0.01
+      - multiply: 0.01
     on_value:
       then:
         - lambda: |-
             if (check_threshold_float(x, id(last_epever_total_energy),
                                        id(last_epever_total_energy_publish),
                                        0.1f, 0.0f, 999999.0f)) {
-              id(mqtt_client).publish("${mqtt_prefix}/epever/total_energy",
-                                       to_string(x));
+              id(mqtt_client).publish("${mqtt_prefix}/epever/total_energy", to_string(x));
             }
+
 
 
 # =============================================================================
