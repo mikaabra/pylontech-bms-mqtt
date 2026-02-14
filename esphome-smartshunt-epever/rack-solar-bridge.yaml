@@ -603,7 +603,7 @@ sensor:
         - lambda: |-
             if (check_threshold_float(x, id(last_ss_instantaneous_power),
                                        id(last_ss_instantaneous_power_publish),
-                                       1.0f, 0.0f, 10000.0f)) {
+                                       1.0f, -10000.0f, 10000.0f)) {
               id(mqtt_client).publish("${mqtt_prefix}/smartshunt/instantaneous_power",
                                        to_string(x));
             }
