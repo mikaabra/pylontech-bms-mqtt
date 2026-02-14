@@ -361,6 +361,7 @@ text_sensor:
                 id(text_validation_passed)++;
               } else if (!x.empty()) {
                 id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
                 ESP_LOGW("validation", "Rejected corrupted model: %s", x.c_str());
               }
     firmware_version:
@@ -373,6 +374,7 @@ text_sensor:
                 id(text_validation_passed)++;
               } else if (!x.empty()) {
                 id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
                 ESP_LOGW("validation", "Rejected corrupted firmware: %s", x.c_str());
               }
     device_type:
@@ -385,6 +387,7 @@ text_sensor:
                 id(text_validation_passed)++;
               } else if (!x.empty()) {
                 id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
                 ESP_LOGW("validation", "Rejected corrupted device_type: %s", x.c_str());
               }
     serial_number:
@@ -397,6 +400,7 @@ text_sensor:
                 id(text_validation_passed)++;
               } else if (!x.empty()) {
                 id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
                 ESP_LOGW("validation", "Rejected corrupted serial: %s", x.c_str());
               }
     dc_monitor_mode:
@@ -409,6 +413,7 @@ text_sensor:
                 id(text_validation_passed)++;
               } else if (!x.empty()) {
                 id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
                 ESP_LOGW("validation", "Rejected corrupted monitor_mode: %s", x.c_str());
               }
     alarm_condition_active:
@@ -421,6 +426,7 @@ text_sensor:
                 id(text_validation_passed)++;
               } else if (!x.empty()) {
                 id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
                 ESP_LOGW("validation", "Rejected corrupted alarm_condition: %s", x.c_str());
               }
     alarm_reason:
@@ -433,6 +439,7 @@ text_sensor:
                 id(text_validation_passed)++;
               } else if (!x.empty()) {
                 id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
                 ESP_LOGW("validation", "Rejected corrupted alarm_reason: %s", x.c_str());
               }
 
@@ -551,6 +558,15 @@ binary_sensor:
     device_class: power
     lambda: return id(ss_relay_state_val);
 
+  - platform: template
+    name: "Bitflip Rate Alert"
+    id: bitflip_rate_alert
+    state_topic: null
+    device_class: problem
+    lambda: |-
+      float rate = get_bitflip_rate_per_minute(id(bitflip_count), id(bitflip_window_start), millis());
+      return rate > 5.0f;  // Alert if >5 bitflips/minute
+
 # Modbus controller for EPEVER - 30s update_interval (kept as-is)
 modbus:
   id: modbus1
@@ -619,6 +635,45 @@ sensor:
     lambda: |-
       return id(rs485_frame_errors);
     update_interval: 5s
+    entity_category: diagnostic
+
+  # ============================================================
+  # DATA QUALITY SENSORS (Phase 2 hardening)
+  # ============================================================
+  - platform: template
+    name: "Bitflip Rate"
+    id: bitflip_rate_sensor
+    state_topic: null
+    unit_of_measurement: "events/min"
+    lambda: |-
+      return get_bitflip_rate_per_minute(id(bitflip_count), id(bitflip_window_start), millis());
+    update_interval: 10s
+    entity_category: diagnostic
+
+  - platform: template
+    name: "Data Quality Score"
+    id: data_quality_sensor
+    state_topic: null
+    unit_of_measurement: "%"
+    lambda: |-
+      uint32_t passed = id(text_validation_passed);
+      uint32_t failed = id(text_validation_failed);
+      uint32_t total = passed + failed;
+      if (total == 0) {
+        return 100.0f;  // No data yet, assume perfect
+      }
+      float score = (float)passed / (float)total * 100.0f;
+      return score;
+    update_interval: 10s
+    entity_category: diagnostic
+
+  - platform: template
+    name: "Bitflip Window Total"
+    id: bitflip_window_total_sensor
+    state_topic: null
+    lambda: |-
+      return (float)id(bitflip_count);
+    update_interval: 10s
     entity_category: diagnostic
 
   # ============================================================
@@ -1226,30 +1281,37 @@ globals:
     type: int
     initial_value: '0'
 
-  # RS485 error counters
+  # RS485 error counters (persisted for long-term diagnostics)
   - id: rs485_crc_errors
     type: uint32_t
     initial_value: '0'
+    restore_value: true
   - id: rs485_timeout_errors
     type: uint32_t
     initial_value: '0'
+    restore_value: true
   - id: rs485_frame_errors
     type: uint32_t
     initial_value: '0'
+    restore_value: true
 
   # Bitflip detection counters (sliding window: 10 minutes)
+  # PERSISTED: These survive reboots to track long-term data quality
   - id: bitflip_count
     type: uint32_t
     initial_value: '0'
+    restore_value: true
   - id: bitflip_window_start
     type: uint32_t
     initial_value: '0'
   - id: text_validation_passed
     type: uint32_t
     initial_value: '0'
+    restore_value: true
   - id: text_validation_failed
     type: uint32_t
     initial_value: '0'
+    restore_value: true
 
   # Sensor value and timestamp globals below
   # SMARTSHUNT SENSOR VALUES (19 sensors * 2 each = 38: value + timestamp)

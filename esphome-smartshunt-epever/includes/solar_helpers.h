@@ -1,6 +1,3 @@
-// solar_helpers.h - Helper functions for rack-solar-bridge
-// Provides threshold-based publishing with heartbeat for SmartShunt and EPEVER sensors
-
 #pragma once
 
 #include <cmath>
@@ -8,23 +5,52 @@
 #include <cstdarg>
 #include <algorithm>
 
-// ============================================================================
-// MILLIS() ROLLOVER-SAFE ELAPSED TIME CALCULATION
-// millis() rolls over every ~49.7 days (2^32 ms at 1ms resolution)
-// This function correctly calculates elapsed time across rollover boundaries
-// ============================================================================
 inline uint32_t safe_elapsed(uint32_t now, uint32_t last) {
-    // Standard subtraction works correctly even across rollover due to unsigned arithmetic
-    // Example: now=0x00000010, last=0xFFFFFFF0 -> result=0x00000020 (32 ticks, correct!)
     return now - last;
 }
 
-// ============================================================================
-// TEXT SENSOR VALIDATION HELPERS
-// Detect and reject corrupted/bitflipped text values
-// ============================================================================
+// Simple bitflip rate tracking using a fixed 10-minute window
+// When window expires, counter resets
+inline void record_bitflip_event(uint32_t& count, uint32_t& window_start, uint32_t now) {
+    const uint32_t WINDOW_MS = 600000; // 10 minutes
+    
+    if (window_start == 0) {
+        window_start = now;
+        count = 1;
+        return;
+    }
+    
+    uint32_t elapsed = safe_elapsed(now, window_start);
+    if (elapsed >= WINDOW_MS) {
+        // Window expired, start new window
+        count = 1;
+        window_start = now;
+    } else {
+        count++;
+    }
+}
 
-// Check if string contains only printable ASCII characters (32-126)
+inline float get_bitflip_rate_per_minute(uint32_t count, uint32_t window_start, uint32_t now) {
+    if (count == 0 || window_start == 0) {
+        return 0.0f;
+    }
+    
+    const uint32_t WINDOW_MS = 600000; // 10 minutes
+    uint32_t elapsed = safe_elapsed(now, window_start);
+    
+    if (elapsed >= WINDOW_MS) {
+        // Window expired, rate is 0
+        return 0.0f;
+    }
+    
+    // Rate = events / elapsed_minutes
+    float elapsed_minutes = elapsed / 60000.0f;
+    if (elapsed_minutes < 0.1f) {
+        elapsed_minutes = 0.1f; // Minimum 6 seconds to avoid division by near-zero
+    }
+    return count / elapsed_minutes;
+}
+
 inline bool is_valid_printable(const std::string& s) {
     for (char c : s) {
         if (c < 32 || c > 126) {
@@ -34,32 +60,25 @@ inline bool is_valid_printable(const std::string& s) {
     return true;
 }
 
-// Validate SmartShunt model description (should contain "SmartShunt" or "BMV")
 inline bool validate_model_description(const std::string& s) {
     if (s.empty() || s.length() > 64) return false;
     if (!is_valid_printable(s)) return false;
-    // Should contain known device identifiers
-    return (s.find("SmartShunt") != std::string::npos || 
+    return (s.find("SmartShunt") != std::string::npos ||
             s.find("BMV") != std::string::npos);
 }
 
-// Validate device type (should be alphanumeric, reasonable length)
 inline bool validate_device_type(const std::string& s) {
     if (s.empty() || s.length() > 32) return false;
     if (!is_valid_printable(s)) return false;
-    // Device type typically starts with letters/numbers
     return std::isalnum(s[0]);
 }
 
-// Validate firmware version (typical format: "v1.23" or "1.23")
 inline bool validate_firmware_version(const std::string& s) {
     if (s.empty() || s.length() > 16) return false;
     if (!is_valid_printable(s)) return false;
-    // Should contain at least one digit
     return std::any_of(s.begin(), s.end(), ::isdigit);
 }
 
-// Validate serial number (alphanumeric, no spaces, reasonable length)
 inline bool validate_serial_number(const std::string& s) {
     if (s.empty() || s.length() < 4 || s.length() > 32) return false;
     for (char c : s) {
@@ -70,44 +89,37 @@ inline bool validate_serial_number(const std::string& s) {
     return true;
 }
 
-// Validate monitor mode (known values: -1, 0, 1, 2 typically, or descriptive text)
 inline bool validate_dc_monitor_mode(const std::string& s) {
     if (s.empty() || s.length() > 64) return false;
     if (!is_valid_printable(s)) return false;
-    // Should contain known mode descriptions or numeric values
     static const char* valid_modes[] = {"charger", "load", "dual", "bmv", "smartshunt", "battery", "monitor", "-1", "0", "1", "2"};
     std::string lower;
     for (char c : s) lower += std::tolower(c);
     for (const char* mode : valid_modes) {
         if (lower.find(mode) != std::string::npos) return true;
     }
-    // If it looks like a number, accept it
     return std::all_of(s.begin(), s.end(), [](char c) {
         return std::isdigit(c) || c == '-';
     });
 }
 
-// Validate alarm condition (ON/OFF or similar binary states)
 inline bool validate_alarm_condition(const std::string& s) {
     if (s.empty() || s.length() > 16) return false;
     if (!is_valid_printable(s)) return false;
     std::string lower;
     for (char c : s) lower += std::tolower(c);
-    // Known good alarm states - be lenient with short strings to avoid bitflip false positives
     if (lower.length() <= 3) {
-        // Short strings: check if they start with 'o' (on/off variations)
         return (lower[0] == 'o' || lower.find("alarm") != std::string::npos);
     }
-    return (lower == "on" || lower == "off" || 
+    return (lower == "on" || lower == "off" ||
             lower.find("alarm") != std::string::npos ||
             lower.find("ok") != std::string::npos);
 }
 
-// Validate alarm reason (should be descriptive text)
 inline bool validate_alarm_reason(const std::string& s) {
     if (s.empty() || s.length() > 64) return false;
     if (!is_valid_printable(s)) return false;
-    return true;  // Alarm reasons can vary, just check printable
+    return true;
 }
 
 inline bool safe_snprintf(char* buf, size_t size, const char* fmt, ...) {
@@ -152,7 +164,6 @@ inline bool check_threshold_float(float new_val, float& last_val,
         return true;
     }
 
-    // Use rollover-safe elapsed time calculation
     if (safe_elapsed(now, last_publish) >= heartbeat_ms) {
         last_val = new_val;
         last_publish = now;
