@@ -361,18 +361,21 @@ text_sensor:
   - platform: version
     name: "ESPHome Version"
     id: esphome_version
+    state_topic: null
 
   - platform: template
     name: "Build Date"
     id: build_date
     icon: "mdi:calendar-clock"
-    update_interval: 1s
+    update_interval: never
+    state_topic: null
     lambda: return std::string(__DATE__ " " __TIME__);
 
   # Template text sensors for MQTT/HA (update_interval: never - manual updates only)
   - platform: template
     name: "SmartShunt Model"
     id: ss_model_description
+    state_topic: null
     icon: "mdi:information"
     update_interval: never
     lambda: return id(ss_model_description_val);
@@ -380,6 +383,7 @@ text_sensor:
   - platform: template
     name: "SmartShunt Firmware"
     id: ss_firmware_version
+    state_topic: null
     icon: "mdi:information"
     update_interval: never
     lambda: return id(ss_firmware_version_val);
@@ -387,6 +391,7 @@ text_sensor:
   - platform: template
     name: "SmartShunt Device Type"
     id: ss_device_type
+    state_topic: null
     icon: "mdi:information"
     update_interval: never
     lambda: return id(ss_device_type_val);
@@ -394,6 +399,7 @@ text_sensor:
   - platform: template
     name: "SmartShunt Serial"
     id: ss_serial_number
+    state_topic: null
     icon: "mdi:numeric"
     update_interval: never
     lambda: return id(ss_serial_number_val);
@@ -401,6 +407,7 @@ text_sensor:
   - platform: template
     name: "SmartShunt Monitor Mode"
     id: ss_dc_monitor_mode
+    state_topic: null
     icon: "mdi:cog"
     update_interval: never
     lambda: return id(ss_dc_monitor_mode_val);
@@ -408,6 +415,7 @@ text_sensor:
   - platform: template
     name: "SmartShunt Alarm Condition"
     id: ss_alarm_condition
+    state_topic: null
     icon: "mdi:alert"
     update_interval: never
     lambda: return id(ss_alarm_condition_val);
@@ -415,6 +423,7 @@ text_sensor:
   - platform: template
     name: "SmartShunt Alarm Reason"
     id: ss_alarm_reason
+    state_topic: null
     icon: "mdi:alert-circle"
     update_interval: never
     lambda: return id(ss_alarm_reason_val);
@@ -423,6 +432,7 @@ text_sensor:
   - platform: template
     name: "Debug Level"
     id: debug_level_sensor
+    state_topic: null
     icon: "mdi:console"
     update_interval: never
     lambda: return id(logger_level);
@@ -440,6 +450,7 @@ binary_sensor:
   - platform: template
     name: "SmartShunt Relay State"
     id: ss_relay_state
+    state_topic: null
     device_class: power
     lambda: return id(ss_relay_state_val);
 
@@ -464,12 +475,14 @@ sensor:
   - platform: uptime
     name: "Uptime"
     id: uptime_sensor
+    state_topic: null
     update_interval: 60s
 
   # WiFi signal strength
   - platform: wifi_signal
     name: "WiFi Signal"
     id: wifi_signal_db
+    state_topic: null
     update_interval: 60s
     unit_of_measurement: "dBm"
     device_class: signal_strength
@@ -478,6 +491,7 @@ sensor:
   - platform: template
     name: "Free Heap"
     id: free_heap_sensor
+    state_topic: null
     unit_of_measurement: "bytes"
     lambda: return heap_caps_get_free_size(MALLOC_CAP_8BIT);
     update_interval: 30s
@@ -490,7 +504,7 @@ sensor:
     victron_id: smartshunt
     battery_voltage:
       id: ss_battery_voltage
-      internal: true
+      state_topic: null
       unit_of_measurement: "V"
       device_class: voltage
       state_class: measurement
@@ -506,7 +520,7 @@ sensor:
               }
     battery_current:
       id: ss_battery_current
-      internal: true
+      state_topic: null
       unit_of_measurement: "A"
       device_class: current
       state_class: measurement
@@ -522,7 +536,7 @@ sensor:
               }
     state_of_charge:
       id: ss_state_of_charge
-      internal: true
+      state_topic: null
       unit_of_measurement: "%"
       device_class: battery
       state_class: measurement
@@ -537,7 +551,7 @@ sensor:
               }
     instantaneous_power:
       id: ss_instantaneous_power
-      internal: true
+      state_topic: null
       unit_of_measurement: "W"
       device_class: power
       state_class: measurement
@@ -553,7 +567,7 @@ sensor:
               }
     battery_temperature:
       id: ss_battery_temperature
-      internal: true
+      state_topic: null
       unit_of_measurement: "°C"
       device_class: temperature
       state_class: measurement
@@ -569,7 +583,7 @@ sensor:
               }
     consumed_amp_hours:
       id: ss_consumed_amp_hours
-      internal: true
+      state_topic: null
       unit_of_measurement: "Ah"
       state_class: measurement
       on_value:
@@ -585,7 +599,7 @@ sensor:
               }
     time_to_go:
       id: ss_time_to_go
-      internal: true
+      state_topic: null
       unit_of_measurement: "min"
       state_class: measurement
       on_value:
@@ -670,11 +684,9 @@ sensor:
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/number_full_discharges", to_string(val));
               }
     cumulative_amp_hours_drawn:
-      name: "SmartShunt Cumulative Ah"
       id: ss_cumulative_amp_hours
-      internal: true  # Only publish via custom MQTT with hysteresis
+      state_topic: null
       unit_of_measurement: "Ah"
-      state_class: measurement
       on_value:
         then:
           - lambda: |-
@@ -697,7 +709,7 @@ sensor:
               }
     min_battery_voltage:
       id: ss_min_battery_voltage
-      internal: true
+      state_topic: null
       unit_of_measurement: "V"
       device_class: voltage
       state_class: measurement
@@ -714,7 +726,7 @@ sensor:
               }
     max_battery_voltage:
       id: ss_max_battery_voltage
-      internal: true
+      state_topic: null
       unit_of_measurement: "V"
       device_class: voltage
       state_class: measurement
@@ -733,7 +745,7 @@ sensor:
               }
     last_full_charge:
       id: ss_last_full_charge
-      internal: true
+      state_topic: null
       unit_of_measurement: "min"
       state_class: measurement
       on_value:
@@ -746,7 +758,7 @@ sensor:
               }
     amount_of_discharged_energy:
       id: ss_amount_discharged_energy
-      internal: true
+      state_topic: null
       unit_of_measurement: "Wh"
       device_class: energy
       state_class: measurement
@@ -763,7 +775,7 @@ sensor:
               }
     amount_of_charged_energy:
       id: ss_amount_charged_energy
-      internal: true
+      state_topic: null
       unit_of_measurement: "Wh"
       device_class: energy
       state_class: measurement
@@ -786,6 +798,7 @@ sensor:
     modbus_controller_id: epever
     name: "EPEVER Solar Voltage"
     id: epever_solar_voltage
+    state_topic: null
     register_type: read
     address: 12544
     value_type: U_WORD
@@ -807,6 +820,7 @@ sensor:
     modbus_controller_id: epever
     name: "EPEVER PV Current"
     id: epever_pv_current
+    state_topic: null
     register_type: read
     address: 12545
     value_type: U_WORD
@@ -828,6 +842,7 @@ sensor:
     modbus_controller_id: epever
     name: "EPEVER Solar Power"
     id: epever_solar_power
+    state_topic: null
     register_type: read
     address: 12546
     value_type: U_DWORD_R
@@ -849,6 +864,7 @@ sensor:
     modbus_controller_id: epever
     name: "EPEVER Battery Capacity"
     id: epever_battery_capacity
+    state_topic: null
     register_type: read
     address: 12570
     value_type: U_WORD
@@ -869,6 +885,7 @@ sensor:
     modbus_controller_id: epever
     name: "EPEVER Device Temperature"
     id: epever_device_temp
+    state_topic: null
     register_type: read
     address: 12561
     value_type: S_WORD
@@ -890,6 +907,7 @@ sensor:
     modbus_controller_id: epever
     name: "EPEVER Battery Voltage"
     id: epever_battery_voltage
+    state_topic: null
     register_type: read
     address: 13082
     value_type: U_WORD
@@ -911,6 +929,7 @@ sensor:
     modbus_controller_id: epever
     name: "EPEVER Battery Current"
     id: epever_battery_current
+    state_topic: null
     register_type: read
     address: 13083
     value_type: U_WORD
@@ -932,6 +951,7 @@ sensor:
     modbus_controller_id: epever
     name: "EPEVER Total Energy"
     id: epever_total_energy
+    state_topic: null
     register_type: read
     address: 13074
     value_type: U_DWORD_R

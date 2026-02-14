@@ -28,39 +28,29 @@ inline void publish_solar(int &publish_count) {
     }
 }
 
-// Check threshold for float sensors (voltage, current, power, temp, energy)
-// Returns true if value changed beyond threshold or heartbeat expired
-// Thresholds: 0.1V, 0.1A, 1W, 0.5C, 0.1kWh (pass as parameter)
-// Heartbeat: 60 seconds
 inline bool check_threshold_float(float new_val, float& last_val,
                                    uint32_t& last_publish,
                                    float threshold,
                                    float min_val = -INFINITY,
                                    float max_val = INFINITY,
                                    uint32_t heartbeat_ms = 60000) {
-    // Reject NaN and non-finite
     if (std::isnan(new_val) || !std::isfinite(new_val)) return false;
-
-    // Reject out-of-range values
     if (new_val < min_val || new_val > max_val) return false;
 
     uint32_t now = millis();
 
-    // First valid value (last_val is sentinel - outside valid range)
-    if (last_val < min_val || last_val > max_val) {
+    if (last_publish == 0 || last_val < min_val || last_val > max_val) {
         last_val = new_val;
         last_publish = now;
         return true;
     }
 
-    // Threshold exceeded
     if (fabs(new_val - last_val) >= threshold) {
         last_val = new_val;
         last_publish = now;
         return true;
     }
 
-    // Heartbeat
     if ((now - last_publish) >= heartbeat_ms) {
         last_val = new_val;
         last_publish = now;
@@ -70,23 +60,15 @@ inline bool check_threshold_float(float new_val, float& last_val,
     return false;
 }
 
-// Check threshold for integer sensors (SOC, cycles, time values)
-// Threshold: 1 unit
-// Heartbeat: 60 seconds
 inline bool check_threshold_int(int new_val, int &last_val, uint32_t &last_publish, int threshold = 1) {
     uint32_t now = millis();
     bool publish = false;
 
-    // First value always publishes
-    if (last_val == -1) {
+    if (last_publish == 0 || last_val == -1) {
         publish = true;
-    }
-    // Check threshold
-    else if (std::abs(new_val - last_val) >= threshold) {
+    } else if (std::abs(new_val - last_val) >= threshold) {
         publish = true;
-    }
-    // Check heartbeat (60s)
-    else if ((now - last_publish) >= 60000) {
+    } else if ((now - last_publish) >= 60000) {
         publish = true;
     }
 
