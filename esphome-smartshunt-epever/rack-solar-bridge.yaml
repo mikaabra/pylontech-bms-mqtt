@@ -178,11 +178,11 @@ script:
           // Availability topics for subsystems
           char smartshunt_avail[128];
           snprintf(smartshunt_avail, sizeof(smartshunt_avail),
-            R"("availability_topic":"${mqtt_prefix}/smartshunt/status","payload_available":"online","payload_not_available":"offline")");
+            "\"availability_topic\":\"rack-solar/smartshunt/status\",\"payload_available\":\"online\",\"payload_not_available\":\"offline\"");
           
           char epever_avail[128];
           snprintf(epever_avail, sizeof(epever_avail),
-            R"("availability_topic":"${mqtt_prefix}/epever/status","payload_available":"online","payload_not_available":"offline")");
+            "\"availability_topic\":\"rack-solar/epever/status\",\"payload_available\":\"online\",\"payload_not_available\":\"offline\"");
           
           char topic[160];
           char payload[768];
@@ -195,24 +195,24 @@ script:
           
           // SmartShunt sensors (19 sensors)
           const char* smartshunt_sensors[][5] = {
-            {"ss_battery_voltage", "SmartShunt Battery Voltage", "${mqtt_prefix}/smartshunt/battery_voltage", "V", "voltage"},
-            {"ss_battery_current", "SmartShunt Battery Current", "${mqtt_prefix}/smartshunt/battery_current", "A", "current"},
-            {"ss_state_of_charge", "SmartShunt State of Charge", "${mqtt_prefix}/smartshunt/state_of_charge", "%", "battery"},
-            {"ss_instantaneous_power", "SmartShunt Power", "${mqtt_prefix}/smartshunt/instantaneous_power", "W", "power"},
-            {"ss_battery_temperature", "SmartShunt Battery Temperature", "${mqtt_prefix}/smartshunt/battery_temperature", "°C", "temperature"},
-            {"ss_consumed_amp_hours", "SmartShunt Consumed Ah", "${mqtt_prefix}/smartshunt/consumed_amp_hours", "Ah", ""},
-            {"ss_time_to_go", "SmartShunt Time To Go", "${mqtt_prefix}/smartshunt/time_to_go", "min", ""},
-            {"ss_depth_deepest_discharge", "SmartShunt Deepest Discharge", "${mqtt_prefix}/smartshunt/depth_deepest_discharge", "Ah", ""},
-            {"ss_depth_last_discharge", "SmartShunt Last Discharge", "${mqtt_prefix}/smartshunt/depth_last_discharge", "Ah", ""},
-            {"ss_depth_average_discharge", "SmartShunt Avg Discharge", "${mqtt_prefix}/smartshunt/depth_average_discharge", "Ah", ""},
-            {"ss_number_charge_cycles", "SmartShunt Charge Cycles", "${mqtt_prefix}/smartshunt/number_charge_cycles", "", ""},
-            {"ss_number_full_discharges", "SmartShunt Full Discharges", "${mqtt_prefix}/smartshunt/number_full_discharges", "", ""},
-            {"ss_cumulative_amp_hours", "SmartShunt Cumulative Ah", "${mqtt_prefix}/smartshunt/cumulative_amp_hours", "Ah", ""},
-            {"ss_min_battery_voltage", "SmartShunt Min Voltage", "${mqtt_prefix}/smartshunt/min_battery_voltage", "V", "voltage"},
-            {"ss_max_battery_voltage", "SmartShunt Max Voltage", "${mqtt_prefix}/smartshunt/max_battery_voltage", "V", "voltage"},
-            {"ss_last_full_charge", "SmartShunt Last Full Charge", "${mqtt_prefix}/smartshunt/last_full_charge", "min", ""},
-            {"ss_amount_discharged_energy", "SmartShunt Discharged Energy", "${mqtt_prefix}/smartshunt/amount_discharged_energy", "Wh", "energy"},
-            {"ss_amount_charged_energy", "SmartShunt Charged Energy", "${mqtt_prefix}/smartshunt/amount_charged_energy", "Wh", "energy"},
+            {"ss_battery_voltage", "SmartShunt Battery Voltage", "rack-solar/smartshunt/battery_voltage", "V", "voltage"},
+            {"ss_battery_current", "SmartShunt Battery Current", "rack-solar/smartshunt/battery_current", "A", "current"},
+            {"ss_state_of_charge", "SmartShunt State of Charge", "rack-solar/smartshunt/state_of_charge", "%", "battery"},
+            {"ss_instantaneous_power", "SmartShunt Power", "rack-solar/smartshunt/instantaneous_power", "W", "power"},
+            {"ss_battery_temperature", "SmartShunt Battery Temperature", "rack-solar/smartshunt/battery_temperature", "°C", "temperature"},
+            {"ss_consumed_amp_hours", "SmartShunt Consumed Ah", "rack-solar/smartshunt/consumed_amp_hours", "Ah", ""},
+            {"ss_time_to_go", "SmartShunt Time To Go", "rack-solar/smartshunt/time_to_go", "min", ""},
+            {"ss_depth_deepest_discharge", "SmartShunt Deepest Discharge", "rack-solar/smartshunt/depth_deepest_discharge", "Ah", ""},
+            {"ss_depth_last_discharge", "SmartShunt Last Discharge", "rack-solar/smartshunt/depth_last_discharge", "Ah", ""},
+            {"ss_depth_average_discharge", "SmartShunt Avg Discharge", "rack-solar/smartshunt/depth_average_discharge", "Ah", ""},
+            {"ss_number_charge_cycles", "SmartShunt Charge Cycles", "rack-solar/smartshunt/number_charge_cycles", "", ""},
+            {"ss_number_full_discharges", "SmartShunt Full Discharges", "rack-solar/smartshunt/number_full_discharges", "", ""},
+            {"ss_cumulative_amp_hours", "SmartShunt Cumulative Ah", "rack-solar/smartshunt/cumulative_amp_hours", "Ah", ""},
+            {"ss_min_battery_voltage", "SmartShunt Min Voltage", "rack-solar/smartshunt/min_battery_voltage", "V", "voltage"},
+            {"ss_max_battery_voltage", "SmartShunt Max Voltage", "rack-solar/smartshunt/max_battery_voltage", "V", "voltage"},
+            {"ss_last_full_charge", "SmartShunt Last Full Charge", "rack-solar/smartshunt/last_full_charge", "min", ""},
+            {"ss_amount_discharged_energy", "SmartShunt Discharged Energy", "rack-solar/smartshunt/amount_discharged_energy", "Wh", "energy"},
+            {"ss_amount_charged_energy", "SmartShunt Charged Energy", "rack-solar/smartshunt/amount_charged_energy", "Wh", "energy"},
           };
           
           for (int i = 0; i < 19; i++) {
@@ -242,14 +242,14 @@ script:
           
           // EPEVER sensors (8 sensors)
           const char* epever_sensors[][5] = {
-            {"epever_solar_voltage", "EPEVER Solar Voltage", "${mqtt_prefix}/epever/solar_voltage", "V", "voltage"},
-            {"epever_pv_current", "EPEVER PV Current", "${mqtt_prefix}/epever/pv_current", "A", "current"},
-            {"epever_solar_power", "EPEVER Solar Power", "${mqtt_prefix}/epever/solar_power", "W", "power"},
-            {"epever_battery_capacity", "EPEVER Battery Capacity", "${mqtt_prefix}/epever/battery_capacity", "%", "battery"},
-            {"epever_device_temp", "EPEVER Device Temperature", "${mqtt_prefix}/epever/device_temp", "°C", "temperature"},
-            {"epever_battery_voltage", "EPEVER Battery Voltage", "${mqtt_prefix}/epever/battery_voltage", "V", "voltage"},
-            {"epever_battery_current", "EPEVER Battery Current", "${mqtt_prefix}/epever/battery_current", "A", "current"},
-            {"epever_total_energy", "EPEVER Total Energy", "${mqtt_prefix}/epever/total_energy", "kWh", "energy"},
+            {"epever_solar_voltage", "EPEVER Solar Voltage", "rack-solar/epever/solar_voltage", "V", "voltage"},
+            {"epever_pv_current", "EPEVER PV Current", "rack-solar/epever/pv_current", "A", "current"},
+            {"epever_solar_power", "EPEVER Solar Power", "rack-solar/epever/solar_power", "W", "power"},
+            {"epever_battery_capacity", "EPEVER Battery Capacity", "rack-solar/epever/battery_capacity", "%", "battery"},
+            {"epever_device_temp", "EPEVER Device Temperature", "rack-solar/epever/device_temp", "°C", "temperature"},
+            {"epever_battery_voltage", "EPEVER Battery Voltage", "rack-solar/epever/battery_voltage", "V", "voltage"},
+            {"epever_battery_current", "EPEVER Battery Current", "rack-solar/epever/battery_current", "A", "current"},
+            {"epever_total_energy", "EPEVER Total Energy", "rack-solar/epever/total_energy", "kWh", "energy"},
           };
           
           for (int i = 0; i < 8; i++) {
@@ -266,13 +266,13 @@ script:
           
           // SmartShunt text sensors (7 sensors)
           const char* smartshunt_text_sensors[][3] = {
-            {"ss_model_description", "SmartShunt Model", "${mqtt_prefix}/smartshunt/model_description"},
-            {"ss_firmware_version", "SmartShunt Firmware", "${mqtt_prefix}/smartshunt/firmware_version"},
-            {"ss_device_type", "SmartShunt Device Type", "${mqtt_prefix}/smartshunt/device_type"},
-            {"ss_serial_number", "SmartShunt Serial", "${mqtt_prefix}/smartshunt/serial_number"},
-            {"ss_dc_monitor_mode", "SmartShunt Monitor Mode", "${mqtt_prefix}/smartshunt/dc_monitor_mode"},
-            {"ss_alarm_condition", "SmartShunt Alarm Condition", "${mqtt_prefix}/smartshunt/alarm_condition"},
-            {"ss_alarm_reason", "SmartShunt Alarm Reason", "${mqtt_prefix}/smartshunt/alarm_reason"},
+            {"ss_model_description", "SmartShunt Model", "rack-solar/smartshunt/model_description"},
+            {"ss_firmware_version", "SmartShunt Firmware", "rack-solar/smartshunt/firmware_version"},
+            {"ss_device_type", "SmartShunt Device Type", "rack-solar/smartshunt/device_type"},
+            {"ss_serial_number", "SmartShunt Serial", "rack-solar/smartshunt/serial_number"},
+            {"ss_dc_monitor_mode", "SmartShunt Monitor Mode", "rack-solar/smartshunt/dc_monitor_mode"},
+            {"ss_alarm_condition", "SmartShunt Alarm Condition", "rack-solar/smartshunt/alarm_condition"},
+            {"ss_alarm_reason", "SmartShunt Alarm Reason", "rack-solar/smartshunt/alarm_reason"},
           };
           
           for (int i = 0; i < 7; i++) {
@@ -289,7 +289,7 @@ script:
           // SmartShunt binary sensor (relay_state)
           snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/rack_solar/ss_relay_state/config");
           if (snprintf(payload, sizeof(payload),
-            R"({"name":"SmartShunt Relay State","state_topic":"${mqtt_prefix}/smartshunt/relay_state","unique_id":"rack_solar_ss_relay_state","payload_on":"ON","payload_off":"OFF",%s,%s})",
+            R"({"name":"SmartShunt Relay State","state_topic":"rack-solar/smartshunt/relay_state","unique_id":"rack_solar_ss_relay_state","payload_on":"ON","payload_off":"OFF",%s,%s})",
             smartshunt_avail, device_payload) > 0) {
             id(mqtt_client).publish(std::string(topic), std::string(payload), 0, true);
             pace_publish();
