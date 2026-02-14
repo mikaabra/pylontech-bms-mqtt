@@ -87,8 +87,10 @@ mqtt:
     - logger.log:
         format: "MQTT connected to broker"
         level: INFO
+    - logger.log:
+        format: "on_connect executing"
+        level: INFO
     - lambda: |-
-        ESP_LOGI("state", "on_connect lambda START");
         // SmartShunt: Check state on connect
         bool ss_stale = id(smartshunt_stale);
         bool ss_was_online = id(last_smartshunt_online);
