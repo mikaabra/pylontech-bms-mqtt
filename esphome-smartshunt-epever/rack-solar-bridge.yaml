@@ -24,6 +24,8 @@ esphome:
           level: INFO
       - lambda: |-
           id(discovery_sent) = false;
+          ESP_LOGI("boot", "Globals: smartshunt_stale=%d, last_smartshunt_online=%d, epever_stale=%d, last_epever_online=%d",
+                   id(smartshunt_stale), id(last_smartshunt_online), id(epever_stale), id(last_epever_online));
       - lambda: |-
           // Start with INFO level to see discovery logs, can be toggled to WARN at runtime
           id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_INFO);
@@ -86,6 +88,8 @@ mqtt:
         format: "MQTT connected to broker"
         level: INFO
     - lambda: |-
+        ESP_LOGI("mqtt", "on_connect executing: smartshunt_stale=%d last_smartshunt_online=%d",
+                 id(smartshunt_stale), id(last_smartshunt_online));
         // On MQTT connect, handle SmartShunt availability based on current state
         // State machine: stale (bool) x was_online (bool) = 4 possible states
         // NOTE: Must hardcode topic - ESPHome substitutions don't work in lambdas
