@@ -355,37 +355,86 @@ text_sensor:
       id: ss_model_description_internal
       on_value:
         then:
-          - lambda: "if (!x.empty()) id(ss_model_description_val) = x;"
+          - lambda: |-
+              if (!x.empty() && validate_model_description(x)) {
+                id(ss_model_description_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                ESP_LOGW("validation", "Rejected corrupted model: %s", x.c_str());
+              }
     firmware_version:
       id: ss_firmware_version_internal
       on_value:
         then:
-          - lambda: "if (!x.empty()) id(ss_firmware_version_val) = x;"
+          - lambda: |-
+              if (!x.empty() && validate_firmware_version(x)) {
+                id(ss_firmware_version_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                ESP_LOGW("validation", "Rejected corrupted firmware: %s", x.c_str());
+              }
     device_type:
       id: ss_device_type_internal
       on_value:
         then:
-          - lambda: "if (!x.empty()) id(ss_device_type_val) = x;"
+          - lambda: |-
+              if (!x.empty() && validate_device_type(x)) {
+                id(ss_device_type_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                ESP_LOGW("validation", "Rejected corrupted device_type: %s", x.c_str());
+              }
     serial_number:
       id: ss_serial_number_internal
       on_value:
         then:
-          - lambda: "if (!x.empty()) id(ss_serial_number_val) = x;"
+          - lambda: |-
+              if (!x.empty() && validate_serial_number(x)) {
+                id(ss_serial_number_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                ESP_LOGW("validation", "Rejected corrupted serial: %s", x.c_str());
+              }
     dc_monitor_mode:
       id: ss_dc_monitor_mode_internal
       on_value:
         then:
-          - lambda: "if (!x.empty()) id(ss_dc_monitor_mode_val) = x;"
+          - lambda: |-
+              if (!x.empty() && validate_dc_monitor_mode(x)) {
+                id(ss_dc_monitor_mode_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                ESP_LOGW("validation", "Rejected corrupted monitor_mode: %s", x.c_str());
+              }
     alarm_condition_active:
       id: ss_alarm_condition_internal
       on_value:
         then:
-          - lambda: "if (!x.empty()) id(ss_alarm_condition_val) = x;"
+          - lambda: |-
+              if (!x.empty() && validate_alarm_condition(x)) {
+                id(ss_alarm_condition_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                ESP_LOGW("validation", "Rejected corrupted alarm_condition: %s", x.c_str());
+              }
     alarm_reason:
       id: ss_alarm_reason_internal
       on_value:
         then:
-          - lambda: "if (!x.empty()) id(ss_alarm_reason_val) = x;"
+          - lambda: |-
+              if (!x.empty() && validate_alarm_reason(x)) {
+                id(ss_alarm_reason_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                ESP_LOGW("validation", "Rejected corrupted alarm_reason: %s", x.c_str());
+              }
 
   - platform: version
     name: "ESPHome Version"
@@ -1186,6 +1235,20 @@ globals:
     type: uint32_t
     initial_value: '0'
 
+  # Bitflip detection counters (sliding window: 10 minutes)
+  - id: bitflip_count
+    type: uint32_t
+    initial_value: '0'
+  - id: bitflip_window_start
+    type: uint32_t
+    initial_value: '0'
+  - id: text_validation_passed
+    type: uint32_t
+    initial_value: '0'
+  - id: text_validation_failed
+    type: uint32_t
+    initial_value: '0'
+
   # Sensor value and timestamp globals below
   # SMARTSHUNT SENSOR VALUES (19 sensors * 2 each = 38: value + timestamp)
   # ============================================================
@@ -1511,8 +1574,8 @@ interval:
               id(last_smartshunt_online) = false;
             }
           } else {
-            // Have received data - check elapsed time
-            uint32_t elapsed = now - id(last_smartshunt_data_rx);
+            // Have received data - check elapsed time (rollover-safe)
+            uint32_t elapsed = safe_elapsed(now, id(last_smartshunt_data_rx));
             
             if (elapsed > 30000 && !is_stale) {
               // Transition to stale
@@ -1534,14 +1597,21 @@ interval:
     then:
       - lambda: |-
           uint32_t now = millis();
-          uint32_t elapsed = now - id(last_epever_data_rx);
+          // Use rollover-safe elapsed time calculation
+          uint32_t elapsed = safe_elapsed(now, id(last_epever_data_rx));
           
           // Check if we've received data since last interval
           if (elapsed < 30000) {
-            // Data received within last 30s, reset failures
+            // Data received within last 30s, reset failures and mark online if stale
             if (id(epever_consecutive_failures) > 0) {
               id(epever_consecutive_failures) = 0;
               ESP_LOGD("epever", "Data received, reset failure count");
+            }
+            if (id(epever_stale)) {
+              id(epever_stale) = false;
+              id(last_epever_online) = true;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+              ESP_LOGI("epever", "Data flowing again, marking online");
             }
           } else {
             // No data received, increment failure count (cap at 3)

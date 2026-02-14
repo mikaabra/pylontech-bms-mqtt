@@ -6,6 +6,105 @@
 #include <cmath>
 #include <string>
 #include <cstdarg>
+#include <algorithm>
+
+// ============================================================================
+// MILLIS() ROLLOVER-SAFE ELAPSED TIME CALCULATION
+// millis() rolls over every ~49.7 days (2^32 ms at 1ms resolution)
+// This function correctly calculates elapsed time across rollover boundaries
+// ============================================================================
+inline uint32_t safe_elapsed(uint32_t now, uint32_t last) {
+    // Standard subtraction works correctly even across rollover due to unsigned arithmetic
+    // Example: now=0x00000010, last=0xFFFFFFF0 -> result=0x00000020 (32 ticks, correct!)
+    return now - last;
+}
+
+// ============================================================================
+// TEXT SENSOR VALIDATION HELPERS
+// Detect and reject corrupted/bitflipped text values
+// ============================================================================
+
+// Check if string contains only printable ASCII characters (32-126)
+inline bool is_valid_printable(const std::string& s) {
+    for (char c : s) {
+        if (c < 32 || c > 126) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Validate SmartShunt model description (should contain "SmartShunt" or "BMV")
+inline bool validate_model_description(const std::string& s) {
+    if (s.empty() || s.length() > 64) return false;
+    if (!is_valid_printable(s)) return false;
+    // Should contain known device identifiers
+    return (s.find("SmartShunt") != std::string::npos || 
+            s.find("BMV") != std::string::npos);
+}
+
+// Validate device type (should be alphanumeric, reasonable length)
+inline bool validate_device_type(const std::string& s) {
+    if (s.empty() || s.length() > 32) return false;
+    if (!is_valid_printable(s)) return false;
+    // Device type typically starts with letters/numbers
+    return std::isalnum(s[0]);
+}
+
+// Validate firmware version (typical format: "v1.23" or "1.23")
+inline bool validate_firmware_version(const std::string& s) {
+    if (s.empty() || s.length() > 16) return false;
+    if (!is_valid_printable(s)) return false;
+    // Should contain at least one digit
+    return std::any_of(s.begin(), s.end(), ::isdigit);
+}
+
+// Validate serial number (alphanumeric, no spaces, reasonable length)
+inline bool validate_serial_number(const std::string& s) {
+    if (s.empty() || s.length() < 4 || s.length() > 32) return false;
+    for (char c : s) {
+        if (!std::isalnum(c) && c != '-') {
+            return false;
+        }
+    }
+    return true;
+}
+
+// Validate monitor mode (known values: -1, 0, 1, 2 typically)
+inline bool validate_dc_monitor_mode(const std::string& s) {
+    if (s.empty() || s.length() > 32) return false;
+    if (!is_valid_printable(s)) return false;
+    // Should contain known mode descriptions or numeric values
+    static const char* valid_modes[] = {"charger", "load", "dual", "-1", "0", "1", "2"};
+    std::string lower;
+    for (char c : s) lower += std::tolower(c);
+    for (const char* mode : valid_modes) {
+        if (lower.find(mode) != std::string::npos) return true;
+    }
+    // If it looks like a number, accept it
+    return std::all_of(s.begin(), s.end(), [](char c) {
+        return std::isdigit(c) || c == '-';
+    });
+}
+
+// Validate alarm condition (ON/OFF or similar binary states)
+inline bool validate_alarm_condition(const std::string& s) {
+    if (s.empty() || s.length() > 16) return false;
+    if (!is_valid_printable(s)) return false;
+    std::string lower;
+    for (char c : s) lower += std::tolower(c);
+    // Known good alarm states
+    return (lower == "on" || lower == "off" || 
+            lower.find("alarm") != std::string::npos ||
+            lower.find("ok") != std::string::npos);
+}
+
+// Validate alarm reason (should be descriptive text)
+inline bool validate_alarm_reason(const std::string& s) {
+    if (s.empty() || s.length() > 64) return false;
+    if (!is_valid_printable(s)) return false;
+    return true;  // Alarm reasons can vary, just check printable
+}
 
 inline bool safe_snprintf(char* buf, size_t size, const char* fmt, ...) {
   va_list args;
@@ -49,7 +148,8 @@ inline bool check_threshold_float(float new_val, float& last_val,
         return true;
     }
 
-    if ((now - last_publish) >= heartbeat_ms) {
+    // Use rollover-safe elapsed time calculation
+    if (safe_elapsed(now, last_publish) >= heartbeat_ms) {
         last_val = new_val;
         last_publish = now;
         return true;
@@ -76,7 +176,7 @@ inline bool check_threshold_float_robust(float new_val, float& last_val,
         return true;
     }
 
-    uint32_t time_delta_ms = now - last_publish;
+    uint32_t time_delta_ms = safe_elapsed(now, last_publish);
     if (time_delta_ms > 0) {
         float change = fabs(new_val - last_val);
         float rate = change / (time_delta_ms / 1000.0f);
@@ -111,7 +211,7 @@ inline bool check_threshold_int(int new_val, int &last_val, uint32_t &last_publi
         publish = true;
     } else if (std::abs(new_val - last_val) >= threshold) {
         publish = true;
-    } else if ((now - last_publish) >= 60000) {
+    } else if (safe_elapsed(now, last_publish) >= 60000) {
         publish = true;
     }
 
