@@ -449,13 +449,8 @@ binary_sensor:
       on_state:
         then:
           - lambda: |-
-              // Validate relay state - reject corrupted values like "NFF"
-              if (x == "ON" || x == "OFF") {
-                id(ss_relay_state_val) = x;
-                id(last_smartshunt_data_rx) = millis();
-              } else {
-                ESP_LOGW("smartshunt", "Invalid relay state received: '%s' (possible bit flip)", x.c_str());
-              }
+              id(ss_relay_state_val) = x;
+              id(last_smartshunt_data_rx) = millis();
 
   - platform: template
     name: "SmartShunt Relay State"
@@ -571,6 +566,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               if (check_threshold_float(x, id(last_ss_instantaneous_power),
                                          id(last_ss_instantaneous_power_publish),
                                          1.0f, -10000.0f, 10000.0f)) {
@@ -587,6 +583,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               if (check_threshold_float(x, id(last_ss_battery_temperature),
                                          id(last_ss_battery_temperature_publish),
                                          0.5f, -40.0f, 100.0f)) {
@@ -602,6 +599,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               // Cumulative counter - use 1.0 Ah threshold to update on whole numbers only
               if (check_threshold_float(x, id(last_ss_consumed_amp_hours),
                                          id(last_ss_consumed_amp_hours_publish),
@@ -618,9 +616,10 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               int val = (int) roundf(x);
               if (check_threshold_int(val, id(last_ss_time_to_go),
-                                      id(last_ss_time_to_go_publish), 1)) {
+                                       id(last_ss_time_to_go_publish), 1)) {
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/time_to_go", to_string(val));
               }
     depth_of_the_deepest_discharge:
@@ -632,6 +631,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               if (check_threshold_float(x, id(last_ss_depth_deepest_discharge),
                                          id(last_ss_depth_deepest_discharge_publish),
                                          0.1f, 0.0f, 999999.0f)) {
@@ -646,6 +646,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               if (check_threshold_float(x, id(last_ss_depth_last_discharge),
                                          id(last_ss_depth_last_discharge_publish),
                                          0.1f, 0.0f, 999999.0f)) {
@@ -660,6 +661,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               // Historical average - rarely changes
               if (check_threshold_float(x, id(last_ss_depth_average_discharge),
                                          id(last_ss_depth_average_discharge_publish),
@@ -676,10 +678,11 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               int val = (int) roundf(x);
               if (val < 0 || val > 999999) return;
               if (check_threshold_int(val, id(last_ss_number_charge_cycles),
-                                      id(last_ss_number_charge_cycles_publish), 1)) {
+                                       id(last_ss_number_charge_cycles_publish), 1)) {
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/number_charge_cycles", to_string(val));
               }
     number_of_full_discharges:
@@ -690,10 +693,11 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               int val = (int) roundf(x);
               if (val < 0 || val > 999999) return;
               if (check_threshold_int(val, id(last_ss_number_full_discharges),
-                                      id(last_ss_number_full_discharges_publish), 1)) {
+                                       id(last_ss_number_full_discharges_publish), 1)) {
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/number_full_discharges", to_string(val));
               }
     cumulative_amp_hours_drawn:
@@ -703,6 +707,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               // Cumulative counter - use 1.0 Ah threshold to update on whole numbers only
               float last_val = id(last_ss_cumulative_amp_hours);
               uint32_t last_pub = id(last_ss_cumulative_amp_hours_publish);
@@ -729,6 +734,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               // Historical min - only changes when new min recorded
               if (check_threshold_float(x, id(last_ss_min_battery_voltage),
                                          id(last_ss_min_battery_voltage_publish),
@@ -746,6 +752,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               // Historical max - only changes when new max recorded
               // Use larger threshold since it should only change occasionally
               if (check_threshold_float(x, id(last_ss_max_battery_voltage),
@@ -764,9 +771,10 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               int val = (int) roundf(x);
               if (check_threshold_int(val, id(last_ss_last_full_charge),
-                                      id(last_ss_last_full_charge_publish), 1)) {
+                                       id(last_ss_last_full_charge_publish), 1)) {
                 id(mqtt_client).publish("${mqtt_prefix}/smartshunt/last_full_charge", to_string(val));
               }
     amount_of_discharged_energy:
@@ -778,6 +786,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               // Cumulative energy counter - use 10 Wh threshold for whole tens
               if (check_threshold_float(x, id(last_ss_amount_discharged_energy),
                                          id(last_ss_amount_discharged_energy_publish),
@@ -795,6 +804,7 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              id(last_smartshunt_data_rx) = millis();
               // Cumulative energy counter - use 10 Wh threshold for whole tens
               if (check_threshold_float(x, id(last_ss_amount_charged_energy),
                                          id(last_ss_amount_charged_energy_publish),

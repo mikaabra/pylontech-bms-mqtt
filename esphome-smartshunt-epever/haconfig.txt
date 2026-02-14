@@ -1,0 +1,199 @@
+modbus:  
+  - name: epever
+    port: /dev/serial/by-id/usb-1a86_USB_Serial-if00-port0
+    delay: 5
+#    close_comm_on_error: true
+#    retry_on_empty: true
+    type: serial
+    baudrate: 115200
+    bytesize: 8
+    method: rtu
+    parity: N
+    stopbits: 1
+    sensors:
+      - name: "Battery Array Capacity 1"
+        unit_of_measurement: "%"
+        slave: 1
+        device_class: battery
+        address: 12570
+        input_type: input
+        scan_interval: 30
+      - name: "Solar Power Watts 1" # 3102 and 3103 https://community.home-assistant.io/t/epever-modbus-rs-485-config/214397
+        unit_of_measurement: W
+        device_class: power
+        slave: 1
+        address: 12546
+        input_type: input
+        scan_interval: 30
+        data_type: int32
+        scale: 0.01
+#        count: 2
+        precision: 2
+        swap: word
+      - name: "Solar Voltage 1" #3100
+        unit_of_measurement: V
+        slave: 1
+        device_class: voltage
+        address: 12544
+        input_type: input
+        scan_interval: 30
+        scale: 0.01
+        precision: 2
+      - name: "Solar Battery Voltage 1" #331A
+        unit_of_measurement: V
+        slave: 1
+        device_class: voltage
+        address: 13082
+        input_type: input
+        scan_interval: 30
+        scale: 0.01
+        precision: 2
+      - name: "PV Array Input Current" # 0x003101
+        unit_of_measurement: A
+        device_class: current
+        slave: 1
+        address: 12545
+        input_type: input
+        scan_interval: 30    
+        scale: 0.01
+        precision: 2
+      - name: PV Total Energy Generated
+        unit_of_measurement: kWh
+        state_class: total_increasing
+        slave: 1
+        device_class: energy
+        address: 13074
+        input_type: input
+        data_type: int32
+        scan_interval: 30
+        scale: 0.01
+        precision: 2
+#        count: 2
+        swap: word
+      - name: "PV Device Temperature" #0x003111
+        unit_of_measurement: °C
+        slave: 1
+        address: 12561
+        input_type: input
+        scale: 0.01
+        precision: 2
+      - name: "PV Battery Current" # #0x00331B & 1C
+        unit_of_measurement: A
+        device_class: current
+        slave: 1
+        address: 13083
+        input_type: input
+        scan_interval: 30    
+        scale: 0.01
+        precision: 2
+        
+
+  - name: "deye-tcp"
+    type: tcp
+    host: 192.168.200.111
+    port: 502
+    sensors:
+    - name: "deye-tcp grid frequency"
+      unit_of_measurement: Hz
+      device_class: frequency
+      slave: 1
+      address: 638
+      input_type: holding
+      scan_interval: 10
+      data_type: int16
+      scale: 0.01
+      precision: 2
+      unique_id: deye-tcp-grid-frequency1
+    - name: "deye-tcp bms charge current"
+      unit_of_measurement: A
+      device_class: current
+      slave: 1
+      address: 212
+      input_type: holding
+      scan_interval: 60
+      data_type: int16
+      unique_id: deye-tcp-bms-charge-current
+    - name: "deye-tcp bms discharge current"
+      unit_of_measurement: A
+      device_class: current
+      slave: 1
+      address: 213
+      input_type: holding
+      scan_interval: 60
+      data_type: int16
+      unique_id: deye-tcp-bms-discharge-current
+    - name: "deye-tcp max sell power"
+      unit_of_measurement: W
+      device_class: power
+      slave: 1
+      address: 143
+      input_type: holding
+      scan_interval: 60
+      data_type: int16
+      unique_id: deye-tcp-max-sell-power
+    - name: "deye-tcp battery soc"
+      unit_of_measurement: "%"
+      device_class: battery
+      slave: 1
+      address: 588
+      input_type: holding
+      scan_interval: 60
+      data_type: int16
+      unique_id: deye-tcp-battery-soc      
+    - name: "deye-tcp battery power"
+      unit_of_measurement: W
+      device_class: power
+      state_class: measurement
+      slave: 1
+      address: 590
+      input_type: holding
+      scan_interval: 60
+      data_type: int16
+      unique_id: deye-tcp-battery-power
+      
+    - name: "deye-tcp total grid power"
+      unit_of_measurement: W
+      device_class: power
+      state_class: measurement
+      slave: 1
+      address: 625          # 0x0271
+      input_type: holding
+      scan_interval: 10
+      data_type: int16
+      unique_id: deye-tcp-total-grid-power
+
+    - name: "deye-tcp total load power"
+      unit_of_measurement: W
+      device_class: power
+      state_class: measurement
+      slave: 1
+      address: 653          # 0x028D
+      input_type: holding
+      scan_interval: 10
+      data_type: int16
+      unique_id: deye-tcp-total-load-power
+      
+    - name: "deye-tcp pv1 power"
+      unit_of_measurement: W
+      device_class: power
+      state_class: measurement
+      slave: 1
+      address: 672          # 0x02A0
+      input_type: holding
+      scan_interval: 10
+      data_type: int16
+      unique_id: deye-tcp-pv1-power
+
+    - name: "deye-tcp pv2 power"
+      unit_of_measurement: W
+      device_class: power
+      state_class: measurement
+      slave: 1
+      address: 673          # 0x02A1
+      input_type: holding
+      scan_interval: 10
+      data_type: int16
+      unique_id: deye-tcp-pv2-power
+            
+
+

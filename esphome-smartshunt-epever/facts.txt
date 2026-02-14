@@ -1,0 +1,10 @@
+using same model waveshare esp32-s3 as in ../esphome/ project
+use that yaml file for inspiration
+smartshunt ve-direct connected to IO4 via voltage divider
+replaces old esp8266 being ve-direct to mqtt bridge
+old esp8266 config yaml file in current directory 
+also should replace rs485 dongle connected to evever mppt (home assistant config in current dir).
+this new esp32 should replace both the rs485 polling that Home Assistant does now via dongle, plus the esp8266 (ve direct -> mqtt)
+no need for mqtt topic backwards compatibility. I would rather start fresh (greenfield) and do it right, with HA discovery topics etc.
+venv exists in ~/src/esphome-venv
+
