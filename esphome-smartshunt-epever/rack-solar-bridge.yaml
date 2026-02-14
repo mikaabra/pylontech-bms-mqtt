@@ -82,6 +82,18 @@ mqtt:
         format: "MQTT connected to broker"
         level: INFO
     - lambda: |-
+        // Track availability transitions - publish only on state change
+        if (!id(last_smartshunt_online)) {
+          id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("online"), (uint8_t)0, true);
+          id(last_smartshunt_online) = true;
+          ESP_LOGI("mqtt", "SmartShunt availability: online");
+        }
+        if (!id(last_epever_online)) {
+          id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+          id(last_epever_online) = true;
+          ESP_LOGI("mqtt", "EPEVER availability: online");
+        }
+    - lambda: |-
         if (!id(discovery_sent)) {
           id(publish_discovery).execute();
           id(discovery_sent) = true;
@@ -143,14 +155,19 @@ script:
       - lambda: |-
           ESP_LOGI("mqtt", "Publishing HA Discovery configs for Rack Solar Bridge...");
           
-          // Device info shared by all entities
+           // Device info shared by all entities
           char device_payload[256];
           snprintf(device_payload, sizeof(device_payload),
             R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})");
           
-          char avail_payload[128];
-          snprintf(avail_payload, sizeof(avail_payload),
-            R"("availability_topic":"${mqtt_prefix}/status","payload_available":"online","payload_not_available":"offline")");
+          // Availability topics for subsystems
+          char smartshunt_avail[128];
+          snprintf(smartshunt_avail, sizeof(smartshunt_avail),
+            R"("availability_topic":"${mqtt_prefix}/smartshunt/status","payload_available":"online","payload_not_available":"offline")");
+          
+          char epever_avail[128];
+          snprintf(epever_avail, sizeof(epever_avail),
+            R"("availability_topic":"${mqtt_prefix}/epever/status","payload_available":"online","payload_not_available":"offline")");
           
           char topic[160];
           char payload[768];
@@ -190,17 +207,17 @@ script:
               ok = snprintf(payload, sizeof(payload),
                 R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
                 smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0], 
-                smartshunt_sensors[i][3], smartshunt_sensors[i][4], avail_payload, device_payload) > 0;
+                smartshunt_sensors[i][3], smartshunt_sensors[i][4], smartshunt_avail, device_payload) > 0;
             } else if (strlen(smartshunt_sensors[i][3]) > 0) {
               ok = snprintf(payload, sizeof(payload),
                 R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
                 smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0], 
-                smartshunt_sensors[i][3], avail_payload, device_payload) > 0;
+                smartshunt_sensors[i][3], smartshunt_avail, device_payload) > 0;
             } else {
               ok = snprintf(payload, sizeof(payload),
                 R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s",%s,%s})",
                 smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0], 
-                avail_payload, device_payload) > 0;
+                smartshunt_avail, device_payload) > 0;
             }
             if (ok) {
               id(mqtt_client).publish(std::string(topic), std::string(payload), 0, true);
@@ -225,7 +242,7 @@ script:
             bool ok = snprintf(payload, sizeof(payload),
               R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
               epever_sensors[i][1], epever_sensors[i][2], epever_sensors[i][0], 
-              epever_sensors[i][3], epever_sensors[i][4], avail_payload, device_payload) > 0;
+              epever_sensors[i][3], epever_sensors[i][4], epever_avail, device_payload) > 0;
             if (ok) {
               id(mqtt_client).publish(std::string(topic), std::string(payload), 0, true);
               pace_publish();
@@ -248,7 +265,7 @@ script:
             if (snprintf(payload, sizeof(payload),
               R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s",%s,%s})",
               smartshunt_text_sensors[i][1], smartshunt_text_sensors[i][2], smartshunt_text_sensors[i][0], 
-              avail_payload, device_payload) > 0) {
+              smartshunt_avail, device_payload) > 0) {
               id(mqtt_client).publish(std::string(topic), std::string(payload), 0, true);
               pace_publish();
             }
@@ -258,7 +275,7 @@ script:
           snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/rack_solar/ss_relay_state/config");
           if (snprintf(payload, sizeof(payload),
             R"({"name":"SmartShunt Relay State","state_topic":"${mqtt_prefix}/smartshunt/relay_state","unique_id":"rack_solar_ss_relay_state","payload_on":"ON","payload_off":"OFF",%s,%s})",
-            avail_payload, device_payload) > 0) {
+            smartshunt_avail, device_payload) > 0) {
             id(mqtt_client).publish(std::string(topic), std::string(payload), 0, true);
             pace_publish();
           }
@@ -921,6 +938,17 @@ globals:
     initial_value: '"WARN"'
     restore_value: false
 
+  # Availability tracking - publish only on transitions
+  - id: last_smartshunt_online
+    type: bool
+    initial_value: 'false'
+  - id: last_epever_online
+    type: bool
+    initial_value: 'false'
+  - id: last_availability_heartbeat
+    type: uint32_t
+    initial_value: '0'
+
   # ============================================================
   # SMARTSHUNT SENSOR VALUES (19 sensors * 2 each = 38: value + timestamp)
   # ============================================================
@@ -1212,6 +1240,22 @@ interval:
             id(mqtt_client).publish("${mqtt_prefix}/smartshunt/relay_state", payload);
             id(ss_relay_state).publish_state(id(ss_relay_state_val));
             id(last_ss_relay_state) = current_relay;
+          }
+
+  # Availability heartbeat - republish online status every 10 minutes
+  - interval: 10min
+    then:
+      - lambda: |-
+          uint32_t now = millis();
+          if (now - id(last_availability_heartbeat) >= 600000) {
+            if (id(last_smartshunt_online)) {
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("online"), (uint8_t)0, true);
+            }
+            if (id(last_epever_online)) {
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/epever/status"), std::string("online"), (uint8_t)0, true);
+            }
+            id(last_availability_heartbeat) = now;
+            ESP_LOGD("mqtt", "Availability heartbeat published");
           }
 
 # =============================================================================
