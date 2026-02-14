@@ -25,9 +25,9 @@ esphome:
       - lambda: |-
           id(discovery_sent) = false;
       - lambda: |-
-          // Start with WARN level to reduce noise, can be toggled at runtime
-          id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_WARN);
-          id(logger_level) = "WARN";
+          // Start with INFO level to see discovery logs, can be toggled to WARN at runtime
+          id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_INFO);
+          id(logger_level) = "INFO";
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -86,11 +86,22 @@ mqtt:
         format: "MQTT connected to broker"
         level: INFO
     - lambda: |-
-        // Track availability transitions - publish only on state change
-        if (!id(last_smartshunt_online)) {
+        // On MQTT connect, DON'T auto-publish online for SmartShunt
+        // Let the interval handle it based on actual data availability
+        // Only publish offline if we know we're stale
+        if (id(smartshunt_stale) && id(last_smartshunt_online)) {
+          // We were previously online but now stale - publish offline
+          id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
+          id(last_smartshunt_online) = false;
+          ESP_LOGI("mqtt", "SmartShunt stale on connect, publishing offline");
+        } else if (!id(smartshunt_stale) && !id(last_smartshunt_online)) {
+          // We have data and weren't online - publish online
           id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("online"), (uint8_t)0, true);
           id(last_smartshunt_online) = true;
-          ESP_LOGI("mqtt", "SmartShunt availability: online");
+          ESP_LOGI("mqtt", "SmartShunt has data, publishing online");
+        } else {
+          ESP_LOGI("mqtt", "SmartShunt state: stale=%d, online=%d - no change", 
+                   id(smartshunt_stale), id(last_smartshunt_online));
         }
         // Only publish EPEVER online if not stale and we have recent data
         if (!id(last_epever_online) && !id(epever_stale)) {
@@ -100,6 +111,7 @@ mqtt:
         } else if (id(epever_stale)) {
           ESP_LOGI("mqtt", "EPEVER is stale, not publishing online on connect");
         }
+    - delay: 500ms
     - lambda: |-
         // Always republish discovery on MQTT reconnect
         // This ensures HA gets discovery config if HA restarts
@@ -170,7 +182,7 @@ script:
       - lambda: |-
           ESP_LOGI("mqtt", "Publishing HA Discovery configs for Rack Solar Bridge...");
           
-           // Device info shared by all entities
+          // Device info shared by all entities
           char device_payload[256];
           snprintf(device_payload, sizeof(device_payload),
             R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})");
@@ -188,9 +200,12 @@ script:
           char payload[768];
           int publish_count = 0;
           
-          // Helper lambda: pace publishes (20 messages / 10ms delay)
+          // Helper lambda: pace publishes (10 messages / 50ms delay to prevent blocking)
           auto pace_publish = [&publish_count]() {
-            publish_solar(publish_count);
+            publish_count++;
+            if (publish_count % 10 == 0) {
+              delay(50);  // Yield to prevent "took a long time" warnings
+            }
           };
           
           // SmartShunt sensors (19 sensors)
@@ -1484,18 +1499,34 @@ interval:
     then:
       - lambda: |-
           uint32_t now = millis();
-          uint32_t elapsed = now - id(last_smartshunt_data_rx);
+          bool has_received_data = (id(last_smartshunt_data_rx) > 0);
+          bool is_stale = id(smartshunt_stale);
           
-          if (elapsed > 30000 && !id(smartshunt_stale) && id(last_smartshunt_data_rx) > 0) {
-            id(smartshunt_stale) = true;
-            ESP_LOGW("smartshunt", "No valid data for %d seconds, marking stale", elapsed / 1000);
-            id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
-            id(last_smartshunt_online) = false;
-          } else if (elapsed <= 30000 && id(smartshunt_stale)) {
-            id(smartshunt_stale) = false;
-            ESP_LOGI("smartshunt", "Data received after stale period, marking online");
-            id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("online"), (uint8_t)0, true);
-            id(last_smartshunt_online) = true;
+          if (!has_received_data) {
+            // No data ever received
+            if (!is_stale) {
+              ESP_LOGW("smartshunt", "No data ever received, marking stale");
+              id(smartshunt_stale) = true;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
+              id(last_smartshunt_online) = false;
+            }
+          } else {
+            // Have received data - check elapsed time
+            uint32_t elapsed = now - id(last_smartshunt_data_rx);
+            
+            if (elapsed > 30000 && !is_stale) {
+              // Transition to stale
+              ESP_LOGW("smartshunt", "No data for %ds, marking stale", elapsed / 1000);
+              id(smartshunt_stale) = true;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
+              id(last_smartshunt_online) = false;
+            } else if (elapsed <= 30000 && is_stale) {
+              // Transition back from stale to online
+              ESP_LOGI("smartshunt", "Data flowing again after %dms, marking online", elapsed);
+              id(smartshunt_stale) = false;
+              id(mqtt_client).publish(std::string("${mqtt_prefix}/smartshunt/status"), std::string("online"), (uint8_t)0, true);
+              id(last_smartshunt_online) = true;
+            }
           }
 
   # EPEVER staleness check - 3-strike policy (30s * 3 = 90s timeout)
