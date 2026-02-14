@@ -30,9 +30,10 @@ esp32:
   framework:
     type: esp-idf
 
-# Enable logging
+# Enable logging - compile with DEBUG support, but start at WARN level
 logger:
   level: DEBUG
+  id: logger_level_global
   baud_rate: 115200
 
 # WiFi configuration
@@ -585,10 +586,13 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              // Historical average - rarely changes
               if (check_threshold_float(x, id(last_ss_depth_average_discharge),
                                          id(last_ss_depth_average_discharge_publish),
-                                         0.1f, 0.0f, 999999.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_average_discharge", to_string(x));
+                                         1.0f, 0.0f, 999999.0f, 300000)) {  // 1.0Ah threshold, 5min heartbeat
+                static char val[16];
+                snprintf(val, sizeof(val), "%.1f", x);
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/depth_average_discharge", val);
               }
     number_of_charge_cycles:
       name: "SmartShunt Charge Cycles"
@@ -641,10 +645,13 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              // Historical min - only changes when new min recorded
               if (check_threshold_float(x, id(last_ss_min_battery_voltage),
                                          id(last_ss_min_battery_voltage_publish),
-                                         0.1f, 15.0f, 30.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/min_battery_voltage", to_string(x));
+                                         0.5f, 15.0f, 30.0f, 300000)) {  // 0.5V threshold, 5min heartbeat
+                static char val[16];
+                snprintf(val, sizeof(val), "%.2f", x);
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/min_battery_voltage", val);
               }
     max_battery_voltage:
       name: "SmartShunt Max Voltage"
@@ -655,10 +662,15 @@ sensor:
       on_value:
         then:
           - lambda: |-
+              // Historical max - only changes when new max recorded
+              // Use larger threshold since it should only change occasionally
               if (check_threshold_float(x, id(last_ss_max_battery_voltage),
                                          id(last_ss_max_battery_voltage_publish),
-                                         0.1f, 15.0f, 30.0f)) {
-                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/max_battery_voltage", to_string(x));
+                                         0.5f, 15.0f, 30.0f, 300000)) {  // 0.5V threshold, 5min heartbeat
+                static char val[16];
+                snprintf(val, sizeof(val), "%.2f", x);
+                id(mqtt_client).publish("${mqtt_prefix}/smartshunt/max_battery_voltage", val);
+                ESP_LOGD("mqtt", "Published max_voltage: %.2f (last: %.2f)", x, id(last_ss_max_battery_voltage));
               }
     last_full_charge:
       name: "SmartShunt Last Full Charge"
