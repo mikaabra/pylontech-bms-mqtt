@@ -481,6 +481,26 @@ modbus_controller:
     modbus_id: modbus1
     command_throttle: 0ms
     update_interval: 30s
+    on_error:
+      then:
+        - lambda: |-
+            switch(x) {
+              case ModbusError::CRC_ERROR:
+                id(rs485_crc_errors)++;
+                ESP_LOGW("modbus", "CRC error detected (total: %u)", id(rs485_crc_errors));
+                break;
+              case ModbusError::TIMEOUT:
+                id(rs485_timeout_errors)++;
+                ESP_LOGW("modbus", "Timeout error detected (total: %u)", id(rs485_timeout_errors));
+                break;
+              case ModbusError::FRAME_ERROR:
+              case ModbusError::INVALID_RESPONSE:
+                id(rs485_frame_errors)++;
+                ESP_LOGW("modbus", "Frame/response error detected (total: %u)", id(rs485_frame_errors));
+                break;
+              default:
+                ESP_LOGW("modbus", "Unknown modbus error: %d", (int)x);
+            }
 
 # =============================================================================
 # SENSORS - Raw sensors from platforms + Template sensors for publishing
@@ -511,6 +531,51 @@ sensor:
     unit_of_measurement: "bytes"
     lambda: return heap_caps_get_free_size(MALLOC_CAP_8BIT);
     update_interval: 30s
+    entity_category: diagnostic
+
+  - platform: template
+    name: "RS485 CRC Errors"
+    id: rs485_crc_errors_sensor
+    state_topic: null
+    lambda: |-
+      return id(rs485_crc_errors);
+    update_interval: 5s
+    entity_category: diagnostic
+
+  - platform: template
+    name: "RS485 Timeout Errors"
+    id: rs485_timeout_errors_sensor
+    state_topic: null
+    lambda: |-
+      return id(rs485_timeout_errors);
+    update_interval: 5s
+    entity_category: diagnostic
+
+  - platform: template
+    name: "RS485 Frame Errors"
+    id: rs485_frame_errors_sensor
+    state_topic: null
+    lambda: |-
+      return id(rs485_frame_errors);
+    update_interval: 5s
+    entity_category: diagnostic
+
+  - platform: template
+    name: "SmartShunt Stale"
+    id: smartshunt_stale_sensor
+    state_topic: null
+    lambda: |-
+      return id(smartshunt_stale) ? std::string("STALE") : std::string("OK");
+    update_interval: 5s
+    entity_category: diagnostic
+
+  - platform: template
+    name: "EPEVER Stale"
+    id: epever_stale_sensor
+    state_topic: null
+    lambda: |-
+      return id(epever_stale) ? std::string("STALE") : std::string("OK");
+    update_interval: 5s
     entity_category: diagnostic
 
   # ============================================================
@@ -1116,7 +1181,18 @@ globals:
     type: int
     initial_value: '0'
 
-  # ============================================================
+  # RS485 error counters
+  - id: rs485_crc_errors
+    type: uint32_t
+    initial_value: '0'
+  - id: rs485_timeout_errors
+    type: uint32_t
+    initial_value: '0'
+  - id: rs485_frame_errors
+    type: uint32_t
+    initial_value: '0'
+
+  # Sensor value and timestamp globals below
   # SMARTSHUNT SENSOR VALUES (19 sensors * 2 each = 38: value + timestamp)
   # ============================================================
   - id: last_ss_battery_voltage
