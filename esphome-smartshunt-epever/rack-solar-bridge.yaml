@@ -387,15 +387,6 @@ uart:
     flow_control_pin: GPIO21
     rx_buffer_size: 1024
   
-  # DEBUG UART: Raw byte snooper on GPIO4 for signal debugging
-  - id: debug_uart_gpio4
-    rx_pin: GPIO4
-    baud_rate: 19200
-    data_bits: 8
-    parity: NONE
-    stop_bits: 1
-    rx_buffer_size: 256
-
 # External component for Victron (SmartShunt)
 external_components:
   - source: github://KinDR007/VictronMPPT-ESPHOME@main
@@ -672,6 +663,22 @@ modbus_controller:
 # =============================================================================
 
 sensor:
+  # DEBUG: GPIO4 Edge Detection (pulse counter) - diagnose signal presence
+  - platform: pulse_counter
+    pin: GPIO4
+    name: "GPIO4 Edge Count"
+    id: gpio4_edge_count
+    unit_of_measurement: "edges/min"
+    update_interval: 5s
+    filters:
+      - multiply: 12  # Convert per-5s to per-minute
+    on_value:
+      then:
+        - lambda: |-
+            if (x > 0) {
+              ESP_LOGI("gpio4_edges", "GPIO4 transitions: %.0f edges/min", x);
+            }
+
   # Uptime sensor for basic monitoring
   - platform: uptime
     name: "Uptime"
@@ -1895,38 +1902,6 @@ interval:
               id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("offline"), (uint8_t)0, true);
               ESP_LOGW("epever", "3 consecutive poll failures, marking stale");
             }
-          }
-
-  # DEBUG: Raw hex dump from GPIO4 to diagnose signal issues
-  # Comment this interval out when not debugging to reduce log noise
-  - interval: 2s
-    then:
-      - lambda: |-
-          static char buffer[256];
-          static int buf_pos = 0;
-          static uint32_t last_dump = 0;
-          static int total_bytes = 0;
-          
-          // Read all available bytes from debug UART
-          while (id(debug_uart_gpio4).available()) {
-            uint8_t byte;
-            if (id(debug_uart_gpio4).read_byte(&byte)) {
-              total_bytes++;
-              // Store as hex
-              if (buf_pos < sizeof(buffer) - 4) {
-                snprintf(&buffer[buf_pos], sizeof(buffer) - buf_pos, "%02X ", byte);
-                buf_pos += 3;
-              }
-            }
-          }
-          
-          // Dump buffer every 2 seconds if we have data
-          uint32_t now = millis();
-          if (buf_pos > 0 && (now - last_dump) > 2000) {
-            buffer[buf_pos] = '\0';
-            ESP_LOGI("gpio4_dump", "Bytes: %d | Hex: %s", total_bytes, buffer);
-            buf_pos = 0;
-            last_dump = now;
           }
 
 # =============================================================================
