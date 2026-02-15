@@ -366,11 +366,9 @@ script:
 # =============================================================================
 
 # UART interfaces (VE.Direct + RS485)
-# DEBUG MODE: Swap GPIO4/GPIO5 to debug signal on GPIO4
-# Normal: vedirect_uart on GPIO4, Debug: vedirect_uart on GPIO5 + debug_uart on GPIO4
 uart:
   - id: vedirect_uart
-    rx_pin: GPIO5  # DEBUG: Moved from GPIO4 to GPIO5 for signal analysis
+    rx_pin: GPIO4
     baud_rate: 19200
     data_bits: 8
     parity: NONE
@@ -663,22 +661,6 @@ modbus_controller:
 # =============================================================================
 
 sensor:
-  # DEBUG: GPIO4 Edge Detection (pulse counter) - diagnose signal presence
-  - platform: pulse_counter
-    pin: GPIO4
-    name: "GPIO4 Edge Count"
-    id: gpio4_edge_count
-    unit_of_measurement: "edges/min"
-    update_interval: 5s
-    filters:
-      - multiply: 12  # Convert per-5s to per-minute
-    on_value:
-      then:
-        - lambda: |-
-            if (x > 0) {
-              ESP_LOGI("gpio4_edges", "GPIO4 transitions: %.0f edges/min", x);
-            }
-
   # Uptime sensor for basic monitoring
   - platform: uptime
     name: "Uptime"
