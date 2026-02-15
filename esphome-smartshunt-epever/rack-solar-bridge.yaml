@@ -386,7 +386,7 @@ script:
 # UART interfaces (VE.Direct + RS485)
 uart:
   - id: vedirect_uart
-    rx_pin: GPIO4
+    rx_pin: GPIO5  # DEBUG: Temporarily moved to GPIO5 to test GPIO4 signal
     baud_rate: 19200
     data_bits: 8
     parity: NONE
@@ -671,6 +671,25 @@ modbus_controller:
 # =============================================================================
 
 sensor:
+  # DEBUG: GPIO4 Edge Detection - verify signal is reaching the pin electrically
+  # This runs while SmartShunt is on GPIO5 to diagnose if GPIO4 receives any signal
+  - platform: pulse_counter
+    pin: GPIO4
+    name: "GPIO4 Edge Count"
+    id: gpio4_edge_count
+    unit_of_measurement: "edges/min"
+    update_interval: 5s
+    filters:
+      - multiply: 12  # Convert edges/5s to edges/min
+    on_value:
+      then:
+        - lambda: |-
+            if (x > 0) {
+              ESP_LOGI("edge_detect", "GPIO4 signal detected: %.0f edges/min", x);
+            } else {
+              ESP_LOGW("edge_detect", "GPIO4 NO SIGNAL - check wiring/voltage divider");
+            }
+
   # Uptime sensor for basic monitoring
   - platform: uptime
     name: "Uptime"
