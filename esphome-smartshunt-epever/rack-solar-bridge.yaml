@@ -2023,3 +2023,47 @@ button:
             ESP_LOGI("main", "Debug level changed to WARN");
           }
           id(debug_level_sensor).publish_state(id(logger_level));
+
+  - platform: template
+    name: "Reset UART1"
+    id: reset_uart_button
+    icon: "mdi:serial-port"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          ESP_LOGI("uart_reset", "=== MANUAL UART1 RESET ===");
+          
+          // Delete existing driver
+          ESP_LOGI("uart_reset", "Deleting UART1 driver...");
+          esp_err_t err = uart_driver_delete(UART_NUM_1);
+          ESP_LOGI("uart_reset", "uart_driver_delete returned: %d", err);
+          
+          delay(100);  // 100ms delay
+          
+          // Configure fresh
+          uart_config_t uart_config = {
+            .baud_rate = 19200,
+            .data_bits = UART_DATA_8_BITS,
+            .parity = UART_PARITY_DISABLE,
+            .stop_bits = UART_STOP_BITS_1,
+            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+            .rx_flow_ctrl_thresh = 0,
+            .source_clk = UART_SCLK_DEFAULT,
+          };
+          
+          ESP_LOGI("uart_reset", "Installing UART1 driver...");
+          err = uart_driver_install(UART_NUM_1, 1024, 0, 0, NULL, 0);
+          ESP_LOGI("uart_reset", "uart_driver_install returned: %d", err);
+          
+          if (err == ESP_OK) {
+            ESP_LOGI("uart_reset", "Configuring UART1...");
+            err = uart_param_config(UART_NUM_1, &uart_config);
+            ESP_LOGI("uart_reset", "uart_param_config returned: %d", err);
+            
+            ESP_LOGI("uart_reset", "Setting RX pin to GPIO4...");
+            err = uart_set_pin(UART_NUM_1, UART_PIN_NO_CHANGE, GPIO_NUM_4, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
+            ESP_LOGI("uart_reset", "uart_set_pin returned: %d", err);
+          }
+          
+          ESP_LOGI("uart_reset", "=== UART RESET COMPLETE ===");
+          ESP_LOGI("uart_reset", "Check if SmartShunt data starts flowing...");
