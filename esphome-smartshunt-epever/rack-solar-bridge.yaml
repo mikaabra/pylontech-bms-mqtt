@@ -573,12 +573,12 @@ text_sensor:
     entity_category: diagnostic
     lambda: return id(logger_level);
 
-  # Stale detection status
+  # Stale detection status - 60s interval, only publish on change
   - platform: template
     name: "SmartShunt Stale"
     id: smartshunt_stale_sensor
     state_topic: null
-    update_interval: 5s
+    update_interval: 60s
     icon: "mdi:connection"
     entity_category: diagnostic
     lambda: |-
@@ -586,13 +586,17 @@ text_sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/smartshunt_stale", x.c_str());
+            static std::string last_state = "";
+            if (x != last_state) {
+              id(mqtt_client).publish("rack-solar/smartshunt_stale", x.c_str());
+              last_state = x;
+            }
 
   - platform: template
     name: "EPEVER Stale"
     id: epever_stale_sensor
     state_topic: null
-    update_interval: 5s
+    update_interval: 60s
     icon: "mdi:connection"
     entity_category: diagnostic
     lambda: |-
@@ -600,7 +604,11 @@ text_sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/epever_stale", x.c_str());
+            static std::string last_state = "";
+            if (x != last_state) {
+              id(mqtt_client).publish("rack-solar/epever_stale", x.c_str());
+              last_state = x;
+            }
 
 # Internal binary sensor (receive from SmartShunt) + Template for MQTT/HA
 binary_sensor:
@@ -700,12 +708,16 @@ sensor:
     state_topic: null
     lambda: |-
       return (float)id(rs485_crc_errors);
-    update_interval: 5s
+    update_interval: 60s
     entity_category: diagnostic
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/rs485_crc_errors", to_string((int)x));
+            static int last_val = -1;
+            if ((int)x != last_val) {
+              id(mqtt_client).publish("rack-solar/rs485_crc_errors", to_string((int)x));
+              last_val = (int)x;
+            }
 
   - platform: template
     name: "RS485 Timeout Errors"
@@ -713,12 +725,16 @@ sensor:
     state_topic: null
     lambda: |-
       return (float)id(rs485_timeout_errors);
-    update_interval: 5s
+    update_interval: 60s
     entity_category: diagnostic
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/rs485_timeout_errors", to_string((int)x));
+            static int last_val = -1;
+            if ((int)x != last_val) {
+              id(mqtt_client).publish("rack-solar/rs485_timeout_errors", to_string((int)x));
+              last_val = (int)x;
+            }
 
   - platform: template
     name: "RS485 Frame Errors"
@@ -726,15 +742,19 @@ sensor:
     state_topic: null
     lambda: |-
       return (float)id(rs485_frame_errors);
-    update_interval: 5s
+    update_interval: 60s
     entity_category: diagnostic
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/rs485_frame_errors", to_string((int)x));
+            static int last_val = -1;
+            if ((int)x != last_val) {
+              id(mqtt_client).publish("rack-solar/rs485_frame_errors", to_string((int)x));
+              last_val = (int)x;
+            }
 
   # ============================================================
-  # DATA QUALITY SENSORS (Phase 2 hardening)
+  # DATA QUALITY SENSORS (Phase 2 hardening) - 60s interval, only publish on change
   # ============================================================
   - platform: template
     name: "Bitflip Rate"
@@ -743,15 +763,19 @@ sensor:
     unit_of_measurement: "events/min"
     lambda: |-
       return get_bitflip_rate_per_minute(id(bitflip_count), id(bitflip_window_start), millis());
-    update_interval: 10s
+    update_interval: 60s
     state_class: measurement
     entity_category: diagnostic
     on_value:
       then:
         - lambda: |-
-            static char val[16];
-            snprintf(val, sizeof(val), "%.2f", x);
-            id(mqtt_client).publish("rack-solar/bitflip_rate", val);
+            static float last_val = -1.0f;
+            if (fabs(x - last_val) > 0.01f) {
+              static char val[16];
+              snprintf(val, sizeof(val), "%.2f", x);
+              id(mqtt_client).publish("rack-solar/bitflip_rate", val);
+              last_val = x;
+            }
 
   - platform: template
     name: "Data Quality Score"
