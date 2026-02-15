@@ -27,23 +27,38 @@ esphome:
           id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_INFO);
           id(logger_level) = "INFO";
           
-          // ESP32-S3 UART init fix: Clear GPIO4 stale state before UART takes over
-          // This prevents intermittent UART failures after power cycle (GitHub esphome/issues#9113)
-          ESP_LOGI("uart_init", "Pre-initializing GPIO4 for UART RX...");
+          // ESP32-S3 UART init fix: Aggressive GPIO4 reset sequence
+          // This prevents intermittent UART failures after power cycle
+          ESP_LOGI("uart_init", "=== AGGRESSIVE GPIO4 RESET ===");
           
-          // Force GPIO4 to a known state (input with pull-down) to clear any stuck configuration
-          // from previous boot that might prevent UART from receiving
+          // Step 1: Configure as output and drive low to discharge any parasitic capacitance
+          gpio_set_direction(GPIO_NUM_4, GPIO_MODE_OUTPUT);
+          gpio_set_level(GPIO_NUM_4, 0);
+          delayMicroseconds(1000);  // 1ms discharge time
+          
+          // Step 2: Drive high briefly
+          gpio_set_level(GPIO_NUM_4, 1);
+          delayMicroseconds(100);
+          
+          // Step 3: Drive low again
+          gpio_set_level(GPIO_NUM_4, 0);
+          delayMicroseconds(100);
+          
+          // Step 4: Configure as input with pull-down (UART idle state is high, so pull-down ensures clean transition)
           gpio_set_direction(GPIO_NUM_4, GPIO_MODE_INPUT);
           gpio_set_pull_mode(GPIO_NUM_4, GPIO_PULLDOWN_ONLY);
           
-          // Read to ensure any electrical charge is dissipated
-          (void)gpio_get_level(GPIO_NUM_4);
+          // Step 5: Multiple reads to ensure state is settled
+          for (int i = 0; i < 10; i++) {
+            (void)gpio_get_level(GPIO_NUM_4);
+            delayMicroseconds(50);
+          }
           
-          // Brief delay for state to settle before UART driver claims the pin
-          delayMicroseconds(500);
+          // Step 6: Final delay before UART driver takes over
+          delayMicroseconds(1000);
           
-          ESP_LOGI("uart_init", "GPIO4 pre-init complete - UART driver can now take over");
-      - delay: 50ms
+          ESP_LOGI("uart_init", "GPIO4 aggressive reset complete");
+      - delay: 100ms
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -386,7 +401,7 @@ script:
 # UART interfaces (VE.Direct + RS485)
 uart:
   - id: vedirect_uart
-    rx_pin: GPIO5  # DEBUG: Temporarily moved to GPIO5 to test GPIO4 signal
+    rx_pin: GPIO4
     baud_rate: 19200
     data_bits: 8
     parity: NONE
@@ -671,25 +686,6 @@ modbus_controller:
 # =============================================================================
 
 sensor:
-  # DEBUG: GPIO4 Edge Detection - verify signal is reaching the pin electrically
-  # This runs while SmartShunt is on GPIO5 to diagnose if GPIO4 receives any signal
-  - platform: pulse_counter
-    pin: GPIO4
-    name: "GPIO4 Edge Count"
-    id: gpio4_edge_count
-    unit_of_measurement: "edges/min"
-    update_interval: 5s
-    filters:
-      - multiply: 12  # Convert edges/5s to edges/min
-    on_value:
-      then:
-        - lambda: |-
-            if (x > 0) {
-              ESP_LOGI("edge_detect", "GPIO4 signal detected: %.0f edges/min", x);
-            } else {
-              ESP_LOGW("edge_detect", "GPIO4 NO SIGNAL - check wiring/voltage divider");
-            }
-
   # Uptime sensor for basic monitoring
   - platform: uptime
     name: "Uptime"
