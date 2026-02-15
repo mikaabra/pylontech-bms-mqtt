@@ -384,7 +384,7 @@ uart:
     parity: NONE
     flow_control_pin: GPIO21
     rx_buffer_size: 1024
-
+  
 # External component for Victron (SmartShunt)
 external_components:
   - source: github://KinDR007/VictronMPPT-ESPHOME@main
@@ -396,6 +396,7 @@ victron:
   id: smartshunt
   throttle: 1s
 
+# =============================================================================
 # Internal victron text sensors (receive data from SmartShunt)
 text_sensor:
   - platform: victron
