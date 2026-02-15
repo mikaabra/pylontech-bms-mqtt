@@ -17,7 +17,7 @@ esphome:
   includes:
     - includes/solar_helpers.h
   on_boot:
-    priority: 100
+    priority: 800
     then:
       - logger.log:
           format: "=== BOOT LOGGER ==="
@@ -26,6 +26,24 @@ esphome:
           // Start with INFO level to see discovery logs, can be toggled to WARN at runtime
           id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_INFO);
           id(logger_level) = "INFO";
+          
+          // ESP32-S3 UART init fix: Clear GPIO4 stale state before UART takes over
+          // This prevents intermittent UART failures after power cycle (GitHub esphome/issues#9113)
+          ESP_LOGI("uart_init", "Pre-initializing GPIO4 for UART RX...");
+          
+          // Force GPIO4 to a known state (input with pull-down) to clear any stuck configuration
+          // from previous boot that might prevent UART from receiving
+          gpio_set_direction(GPIO_NUM_4, GPIO_MODE_INPUT);
+          gpio_set_pull_mode(GPIO_NUM_4, GPIO_PULLDOWN_ONLY);
+          
+          // Read to ensure any electrical charge is dissipated
+          (void)gpio_get_level(GPIO_NUM_4);
+          
+          // Brief delay for state to settle before UART driver claims the pin
+          delayMicroseconds(500);
+          
+          ESP_LOGI("uart_init", "GPIO4 pre-init complete - UART driver can now take over");
+      - delay: 50ms
 
 esp32:
   board: esp32-s3-devkitc-1
