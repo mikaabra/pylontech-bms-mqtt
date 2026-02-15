@@ -384,7 +384,7 @@ uart:
     parity: NONE
     flow_control_pin: GPIO21
     rx_buffer_size: 1024
-  
+
 # External component for Victron (SmartShunt)
 external_components:
   - source: github://KinDR007/VictronMPPT-ESPHOME@main
@@ -1884,6 +1884,102 @@ interval:
               id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("offline"), (uint8_t)0, true);
               ESP_LOGW("epever", "3 consecutive poll failures, marking stale");
             }
+          }
+
+  # DIAGNOSTIC: SmartShunt raw data analyzer - logs every 10s when stale
+  # This helps distinguish between: no signal, HEX protocol, or garbled data
+  - interval: 10s
+    then:
+      - lambda: |-
+          static uint32_t last_data_count = 0;
+          static uint32_t sample_count = 0;
+          
+          // Only run diagnostics when SmartShunt is stale (no valid data being parsed)
+          if (!id(smartshunt_stale)) {
+            return;
+          }
+          
+          sample_count++;
+          
+          // Read any available bytes from UART to see what's actually coming in
+          static uint8_t byte_buffer[128];
+          int bytes_read = 0;
+          bool found_crlf = false;
+          bool found_hex_indicator = false;
+          bool found_text_indicator = false;
+          
+          while (id(vedirect_uart).available() && bytes_read < sizeof(byte_buffer)) {
+            uint8_t byte;
+            if (id(vedirect_uart).read_byte(&byte)) {
+              byte_buffer[bytes_read++] = byte;
+              
+              // Check for \r\n sequence
+              if (bytes_read >= 2 && 
+                  byte_buffer[bytes_read-2] == 0x0D && 
+                  byte_buffer[bytes_read-1] == 0x0A) {
+                found_crlf = true;
+                
+                // Check what follows the \r\n
+                if (bytes_read >= 5) {
+                  uint8_t next_byte = byte_buffer[bytes_read-1]; // Actually need to look ahead, but this is complex
+                  // Simplified: look for 'H' (0x48) followed by digit in the buffer
+                  for (int i = 0; i < bytes_read - 2; i++) {
+                    if (byte_buffer[i] == 0x0D && byte_buffer[i+1] == 0x0A && i+3 < bytes_read) {
+                      uint8_t field_start = byte_buffer[i+2];
+                      if (field_start == 'H') {
+                        found_hex_indicator = true;
+                      } else if (field_start == 'P' || field_start == 'V' || field_start == 'I') {
+                        found_text_indicator = true;
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+          
+          // Build hex string of what we received
+          static char hex_str[256];
+          int hex_pos = 0;
+          for (int i = 0; i < bytes_read && hex_pos < sizeof(hex_str) - 4; i++) {
+            snprintf(&hex_str[hex_pos], sizeof(hex_str) - hex_pos, "%02X ", byte_buffer[i]);
+            hex_pos += 3;
+          }
+          if (hex_pos > 0) {
+            hex_str[hex_pos] = '\0';
+          }
+          
+          // Log diagnostic summary
+          if (bytes_read == 0) {
+            if (sample_count % 6 == 0) { // Log every 60s to avoid spam
+              ESP_LOGW("uart_diag", "=== SMARTSHUNT DIAGNOSTIC ===");
+              ESP_LOGW("uart_diag", "Status: NO DATA RECEIVED");
+              ESP_LOGW("uart_diag", "Possible causes:");
+              ESP_LOGW("uart_diag", "  1. Cable disconnected or loose");
+              ESP_LOGW("uart_diag", "  2. SmartShunt powered off");
+              ESP_LOGW("uart_diag", "  3. Wrong pin (check GPIO4 wiring)");
+              ESP_LOGW("uart_diag", "  4. SmartShunt TX line damaged");
+              ESP_LOGW("uart_diag", "==============================");
+            }
+          } else {
+            ESP_LOGW("uart_diag", "=== SMARTSHUNT DIAGNOSTIC ===");
+            ESP_LOGW("uart_diag", "Status: DATA RECEIVED (%d bytes in last 10s)", bytes_read);
+            ESP_LOGW("uart_diag", "Hex dump: %s", hex_pos > 0 ? hex_str : "(empty)");
+            
+            if (found_hex_indicator) {
+              ESP_LOGW("uart_diag", "PROTOCOL: HEX MODE DETECTED (H1, H2, etc.)");
+              ESP_LOGW("uart_diag", "ACTION: Use VictronConnect app to switch to TEXT mode");
+            } else if (found_text_indicator) {
+              ESP_LOGI("uart_diag", "PROTOCOL: TEXT MODE (normal)");
+              ESP_LOGI("uart_diag", "Note: Data is valid but victron component not parsing - possible baud rate mismatch");
+            } else if (found_crlf) {
+              ESP_LOGW("uart_diag", "PROTOCOL: Unknown/garbled data");
+              ESP_LOGW("uart_diag", "Found line endings but unrecognized field format");
+            } else {
+              ESP_LOGW("uart_diag", "PROTOCOL: No valid framing found");
+              ESP_LOGW("uart_diag", "Data may be noise or wrong baud rate");
+            }
+            ESP_LOGW("uart_diag", "==============================");
           }
 
 # =============================================================================
