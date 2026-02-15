@@ -17,36 +17,26 @@ esphome:
   includes:
     - includes/solar_helpers.h
   on_boot:
-    priority: 200
+    priority: -100
     then:
       - logger.log:
-          format: "=== BOOT LOGGER - UART RESET ==="
+          format: "=== BOOT COMPLETE - Running delayed UART reset ==="
           level: INFO
       - lambda: |-
-          // Start with INFO level to see discovery logs, can be toggled to WARN at runtime
           id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_INFO);
           id(logger_level) = "INFO";
           
-          // ESP32-S3 UART init fix: Nuclear option - delete and reinstall UART driver
-          ESP_LOGI("uart_init", "=== NUCLEAR UART RESET ===");
+          // Delayed UART reset - run after everything is initialized
+          ESP_LOGI("uart_init", "=== DELAYED UART RESET (priority -100) ===");
           
-          // UART1 is used for vedirect on GPIO4
-          // First, make sure driver isn't installed, then reinstall fresh
-          
-          // Try to delete driver if it exists (ignore errors if not installed)
+          // Check if UART1 driver exists and delete it
+          ESP_LOGI("uart_init", "Attempting to delete UART1 driver...");
           esp_err_t err = uart_driver_delete(UART_NUM_1);
-          if (err == ESP_OK) {
-            ESP_LOGI("uart_init", "Deleted existing UART1 driver");
-          } else if (err == ESP_ERR_INVALID_STATE) {
-            ESP_LOGI("uart_init", "UART1 driver not installed yet (expected)");
-          } else {
-            ESP_LOGW("uart_init", "UART1 delete returned: %d", err);
-          }
+          ESP_LOGI("uart_init", "uart_driver_delete returned: %d", err);
           
-          // Small delay after deletion
-          delayMicroseconds(1000);
+          delay(10);  // 10ms delay
           
-          // Configure UART1 parameters fresh
+          // Configure UART1 fresh
           uart_config_t uart_config = {
             .baud_rate = 19200,
             .data_bits = UART_DATA_8_BITS,
@@ -57,32 +47,22 @@ esphome:
             .source_clk = UART_SCLK_DEFAULT,
           };
           
-          // Install driver with fresh config
+          ESP_LOGI("uart_init", "Installing UART1 driver...");
           err = uart_driver_install(UART_NUM_1, 1024, 0, 0, NULL, 0);
-          if (err != ESP_OK) {
-            ESP_LOGW("uart_init", "UART1 driver install failed: %d", err);
-          } else {
-            ESP_LOGI("uart_init", "UART1 driver installed fresh");
-            
-            // Configure the UART
+          ESP_LOGI("uart_init", "uart_driver_install returned: %d", err);
+          
+          if (err == ESP_OK) {
+            ESP_LOGI("uart_init", "Configuring UART1 parameters...");
             err = uart_param_config(UART_NUM_1, &uart_config);
-            if (err != ESP_OK) {
-              ESP_LOGW("uart_init", "UART1 param config failed: %d", err);
-            } else {
-              ESP_LOGI("uart_init", "UART1 configured: 19200 8N1");
-            }
+            ESP_LOGI("uart_init", "uart_param_config returned: %d", err);
             
-            // Set GPIO4 as RX pin
+            ESP_LOGI("uart_init", "Setting UART1 RX pin to GPIO4...");
             err = uart_set_pin(UART_NUM_1, UART_PIN_NO_CHANGE, GPIO_NUM_4, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-            if (err != ESP_OK) {
-              ESP_LOGW("uart_init", "UART1 set pin failed: %d", err);
-            } else {
-              ESP_LOGI("uart_init", "UART1 RX pin set to GPIO4");
-            }
+            ESP_LOGI("uart_init", "uart_set_pin returned: %d", err);
           }
           
-          ESP_LOGI("uart_init", "UART1 nuclear reset complete");
-      - delay: 100ms
+          ESP_LOGI("uart_init", "=== UART RESET COMPLETE ===");
+      - delay: 1s
 
 esp32:
   board: esp32-s3-devkitc-1
