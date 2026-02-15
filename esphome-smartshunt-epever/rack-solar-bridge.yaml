@@ -637,12 +637,31 @@ binary_sensor:
     entity_category: diagnostic
     lambda: |-
       float rate = get_bitflip_rate_per_minute(id(bitflip_count), id(bitflip_window_start), millis());
-      return rate > 5.0f;  // Alert if >5 bitflips/minute
+      return rate > 5.0f;
     on_state:
       then:
         - lambda: |-
             const char* payload = x ? "ON" : "OFF";
             id(mqtt_client).publish("rack-solar/bitflip_rate_alert", payload);
+
+switch:
+  - platform: template
+    name: "UART Diagnostic Mode"
+    id: uart_diagnostic_mode
+    state_topic: null
+    optimistic: true
+    restore_mode: RESTORE_DEFAULT_OFF
+    entity_category: diagnostic
+    on_turn_on:
+      then:
+        - lambda: |-
+            ESP_LOGI("diagnostic", "UART Diagnostic Mode ENABLED");
+            ESP_LOGI("diagnostic", "Will log detailed edge counts and raw bytes");
+    on_turn_off:
+      then:
+        - lambda: |-
+            ESP_LOGI("diagnostic", "UART Diagnostic Mode DISABLED");
+            ESP_LOGI("diagnostic", "Normal operation resumed");
 
 # Modbus controller for EPEVER - 30s update_interval (kept as-is)
 modbus:
@@ -1981,6 +2000,62 @@ interval:
             }
             ESP_LOGW("uart_diag", "==============================");
           }
+
+  # DIAGNOSTIC MODE: Detailed byte analysis when switch is enabled
+  - interval: 2s
+    then:
+      - lambda: |-
+          if (!id(uart_diagnostic_mode).state) {
+            return;
+          }
+          
+          // Read bytes from UART
+          uint8_t byte_buffer[64];
+          int bytes_read = 0;
+          while (id(vedirect_uart).available() && bytes_read < sizeof(byte_buffer)) {
+            uint8_t byte;
+            if (id(vedirect_uart).read_byte(&byte)) {
+              byte_buffer[bytes_read++] = byte;
+            }
+          }
+          
+          // Always log in diagnostic mode (even if no bytes)
+          ESP_LOGI("diag_detail", "=== UART DIAGNOSTIC (2s window) ===");
+          ESP_LOGI("diag_detail", "Bytes from UART: %d", bytes_read);
+          
+          if (bytes_read > 0) {
+            // Show hex dump
+            char hex_str[192];
+            int hex_pos = 0;
+            for (int i = 0; i < bytes_read && hex_pos < sizeof(hex_str) - 4; i++) {
+              snprintf(&hex_str[hex_pos], sizeof(hex_str) - hex_pos, "%02X ", byte_buffer[i]);
+              hex_pos += 3;
+            }
+            hex_str[hex_pos] = '\0';
+            ESP_LOGI("diag_detail", "Raw bytes: %s", hex_str);
+            
+            // Check for patterns
+            bool has_crlf = false;
+            bool has_pid = false;
+            bool has_h1 = false;
+            for (int i = 0; i < bytes_read - 3; i++) {
+              if (byte_buffer[i] == 0x0D && byte_buffer[i+1] == 0x0A) {
+                has_crlf = true;
+                if (i+3 < bytes_read) {
+                  if (byte_buffer[i+2] == 'P' && byte_buffer[i+3] == 'I') has_pid = true;
+                  if (byte_buffer[i+2] == 'H' && byte_buffer[i+3] == '1') has_h1 = true;
+                }
+              }
+            }
+            
+            if (has_pid) ESP_LOGI("diag_detail", "Pattern: TEXT protocol detected");
+            else if (has_h1) ESP_LOGW("diag_detail", "Pattern: HEX protocol detected");
+            else if (has_crlf) ESP_LOGW("diag_detail", "Pattern: Has framing but unknown content");
+            else ESP_LOGW("diag_detail", "Pattern: No valid framing (garbled/noise)");
+          } else {
+            ESP_LOGW("diag_detail", "NO BYTES - Check wiring or power");
+          }
+          ESP_LOGI("diag_detail", "===================================");
 
 # =============================================================================
 # BUTTONS
