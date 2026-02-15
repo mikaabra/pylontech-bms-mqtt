@@ -573,12 +573,12 @@ text_sensor:
     entity_category: diagnostic
     lambda: return id(logger_level);
 
-  # Stale detection status - 60s interval, only publish on change
+  # Stale detection status - 300s interval, only publish on change
   - platform: template
     name: "SmartShunt Stale"
     id: smartshunt_stale_sensor
     state_topic: null
-    update_interval: 60s
+    update_interval: 300s
     icon: "mdi:connection"
     entity_category: diagnostic
     lambda: |-
@@ -596,7 +596,7 @@ text_sensor:
     name: "EPEVER Stale"
     id: epever_stale_sensor
     state_topic: null
-    update_interval: 60s
+    update_interval: 300s
     icon: "mdi:connection"
     entity_category: diagnostic
     lambda: |-
@@ -708,7 +708,7 @@ sensor:
     state_topic: null
     lambda: |-
       return (float)id(rs485_crc_errors);
-    update_interval: 60s
+    update_interval: 300s
     entity_category: diagnostic
     on_value:
       then:
@@ -725,7 +725,7 @@ sensor:
     state_topic: null
     lambda: |-
       return (float)id(rs485_timeout_errors);
-    update_interval: 60s
+    update_interval: 300s
     entity_category: diagnostic
     on_value:
       then:
@@ -742,7 +742,7 @@ sensor:
     state_topic: null
     lambda: |-
       return (float)id(rs485_frame_errors);
-    update_interval: 60s
+    update_interval: 300s
     entity_category: diagnostic
     on_value:
       then:
@@ -753,9 +753,7 @@ sensor:
               last_val = (int)x;
             }
 
-  # ============================================================
-  # DATA QUALITY SENSORS (Phase 2 hardening) - 60s interval, only publish on change
-  # ============================================================
+  # Bitflip Rate sensor - 300s interval, only publish on change
   - platform: template
     name: "Bitflip Rate"
     id: bitflip_rate_sensor
@@ -763,7 +761,7 @@ sensor:
     unit_of_measurement: "events/min"
     lambda: |-
       return get_bitflip_rate_per_minute(id(bitflip_count), id(bitflip_window_start), millis());
-    update_interval: 60s
+    update_interval: 300s
     state_class: measurement
     entity_category: diagnostic
     on_value:
@@ -791,15 +789,19 @@ sensor:
       }
       float score = (float)passed / (float)total * 100.0f;
       return score;
-    update_interval: 10s
+    update_interval: 300s
     state_class: measurement
     entity_category: diagnostic
     on_value:
       then:
         - lambda: |-
-            static char val[16];
-            snprintf(val, sizeof(val), "%.1f", x);
-            id(mqtt_client).publish("rack-solar/data_quality_score", val);
+            static float last_val = -1.0f;
+            if (fabs(x - last_val) > 0.5f) {
+              static char val[16];
+              snprintf(val, sizeof(val), "%.1f", x);
+              id(mqtt_client).publish("rack-solar/data_quality_score", val);
+              last_val = x;
+            }
 
   - platform: template
     name: "Bitflip Window Total"
