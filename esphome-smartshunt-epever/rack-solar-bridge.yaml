@@ -17,52 +17,41 @@ esphome:
   includes:
     - includes/solar_helpers.h
   on_boot:
-    priority: -100
+    priority: 100
     then:
       - logger.log:
-          format: "=== BOOT COMPLETE - Running delayed UART reset ==="
+          format: "=== BOOT LOGGER ==="
           level: INFO
       - lambda: |-
+          // Start with INFO level to see discovery logs, can be toggled to WARN at runtime
           id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_INFO);
           id(logger_level) = "INFO";
           
-          // Delayed UART reset - run after everything is initialized
-          ESP_LOGI("uart_init", "=== DELAYED UART RESET (priority -100) ===");
+          // ESP32-S3 GPIO4 UART fix: Prime the GPIO by configuring as input with interrupt
+          // This mimics what pulse_counter does that makes UART work afterwards
+          ESP_LOGI("gpio_fix", "Priming GPIO4 for UART...");
           
-          // Check if UART1 driver exists and delete it
-          ESP_LOGI("uart_init", "Attempting to delete UART1 driver...");
-          esp_err_t err = uart_driver_delete(UART_NUM_1);
-          ESP_LOGI("uart_init", "uart_driver_delete returned: %d", err);
+          // Configure GPIO4 as input (like pulse_counter does)
+          gpio_config_t io_conf = {};
+          io_conf.intr_type = GPIO_INTR_ANYEDGE;  // Edge detection like pulse_counter
+          io_conf.mode = GPIO_MODE_INPUT;
+          io_conf.pin_bit_mask = (1ULL << GPIO_NUM_4);
+          io_conf.pull_down_en = GPIO_PULLDOWN_DISABLE;
+          io_conf.pull_up_en = GPIO_PULLUP_DISABLE;
+          gpio_config(&io_conf);
           
-          delay(10);  // 10ms delay
+          // Brief delay to let the GPIO settle
+          delayMicroseconds(100);
           
-          // Configure UART1 fresh
-          uart_config_t uart_config = {
-            .baud_rate = 19200,
-            .data_bits = UART_DATA_8_BITS,
-            .parity = UART_PARITY_DISABLE,
-            .stop_bits = UART_STOP_BITS_1,
-            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-            .rx_flow_ctrl_thresh = 0,
-            .source_clk = UART_SCLK_DEFAULT,
-          };
+          // Disable interrupt (UART will take over)
+          gpio_intr_disable(GPIO_NUM_4);
           
-          ESP_LOGI("uart_init", "Installing UART1 driver...");
-          err = uart_driver_install(UART_NUM_1, 1024, 0, 0, NULL, 0);
-          ESP_LOGI("uart_init", "uart_driver_install returned: %d", err);
+          // Reset to input without interrupt (UART will configure properly)
+          io_conf.intr_type = GPIO_INTR_DISABLE;
+          gpio_config(&io_conf);
           
-          if (err == ESP_OK) {
-            ESP_LOGI("uart_init", "Configuring UART1 parameters...");
-            err = uart_param_config(UART_NUM_1, &uart_config);
-            ESP_LOGI("uart_init", "uart_param_config returned: %d", err);
-            
-            ESP_LOGI("uart_init", "Setting UART1 RX pin to GPIO4...");
-            err = uart_set_pin(UART_NUM_1, UART_PIN_NO_CHANGE, GPIO_NUM_4, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-            ESP_LOGI("uart_init", "uart_set_pin returned: %d", err);
-          }
-          
-          ESP_LOGI("uart_init", "=== UART RESET COMPLETE ===");
-      - delay: 1s
+          ESP_LOGI("gpio_fix", "GPIO4 primed - UART can now take over");
+      - delay: 50ms
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -405,7 +394,7 @@ script:
 # UART interfaces (VE.Direct + RS485)
 uart:
   - id: vedirect_uart
-    rx_pin: GPIO5  # DEBUG: Moved to GPIO5 to test GPIO4 edge detection
+    rx_pin: GPIO4
     baud_rate: 19200
     data_bits: 8
     parity: NONE
@@ -690,24 +679,6 @@ modbus_controller:
 # =============================================================================
 
 sensor:
-  # DEBUG: GPIO4 Edge Detection - verify SmartShunt signal is reaching the pin
-  - platform: pulse_counter
-    pin: GPIO4
-    name: "GPIO4 Edge Count"
-    id: gpio4_edge_count
-    unit_of_measurement: "edges/min"
-    update_interval: 5s
-    filters:
-      - multiply: 12  # Convert edges/5s to edges/min
-    on_value:
-      then:
-        - lambda: |-
-            if (x > 0) {
-              ESP_LOGI("edge_detect", "GPIO4 signal detected: %.0f edges/min", x);
-            } else {
-              ESP_LOGW("edge_detect", "GPIO4 NO SIGNAL");
-            }
-
   # Uptime sensor for basic monitoring
   - platform: uptime
     name: "Uptime"
@@ -1915,111 +1886,6 @@ interval:
             }
           }
 
-  # UART Diagnostic - Only runs when SmartShunt is stale to debug the issue
-  # This peeks at the UART without consuming bytes (non-intrusive)
-  - interval: 10s
-    then:
-      - lambda: |-
-          // Only diagnose when SmartShunt is stale (no valid data being parsed)
-          if (!id(smartshunt_stale)) {
-            return;
-          }
-          
-          static uint32_t diag_sample_count = 0;
-          diag_sample_count++;
-          
-          // Check if UART has any bytes available (peek only - don't consume)
-          int bytes_available = id(vedirect_uart).available();
-          
-          if (bytes_available == 0) {
-            // No data at all - could be wiring, power, or UART init issue
-            if (diag_sample_count % 6 == 0) {  // Log every 60s to avoid spam
-              ESP_LOGW("uart_diag", "=== SMARTSHUNT DIAGNOSTIC ===");
-              ESP_LOGW("uart_diag", "Status: NO DATA ON UART");
-              ESP_LOGW("uart_diag", "Possible causes:");
-              ESP_LOGW("uart_diag", "  1. Cable disconnected or loose");
-              ESP_LOGW("uart_diag", "  2. SmartShunt powered off");
-              ESP_LOGW("uart_diag", "  3. Wrong GPIO pin (check GPIO4 wiring)");
-              ESP_LOGW("uart_diag", "  4. UART init failure (power cycle issue)");
-              ESP_LOGW("uart_diag", "==============================");
-            }
-          } else {
-            // Data is present but not being parsed - peek at it
-            ESP_LOGW("uart_diag", "=== SMARTSHUNT DIAGNOSTIC ===");
-            ESP_LOGW("uart_diag", "Status: DATA PRESENT (%d bytes in buffer)", bytes_available);
-            
-            // Read up to 64 bytes for analysis (we'll put them back conceptually,
-            // though UART doesn't support unget, we just log what we see)
-            uint8_t byte_buffer[64];
-            int bytes_to_read = std::min(bytes_available, 64);
-            int bytes_actually_read = 0;
-            bool has_crlf = false;
-            bool has_pid = false;
-            bool has_h1 = false;
-            bool has_printable = false;
-            
-            for (int i = 0; i < bytes_to_read; i++) {
-              uint8_t byte;
-              if (id(vedirect_uart).read_byte(&byte)) {
-                byte_buffer[bytes_actually_read++] = byte;
-                
-                if (byte >= 32 && byte <= 126) {
-                  has_printable = true;
-                }
-                if (byte == 0x0D || byte == 0x0A) {
-                  has_crlf = true;
-                }
-              }
-            }
-            
-            // Build hex string for logging
-            char hex_str[193];  // 64 bytes * 3 chars + null
-            int hex_pos = 0;
-            for (int i = 0; i < bytes_actually_read && hex_pos < sizeof(hex_str) - 4; i++) {
-              snprintf(&hex_str[hex_pos], sizeof(hex_str) - hex_pos, "%02X ", byte_buffer[i]);
-              hex_pos += 3;
-            }
-            if (hex_pos > 0) {
-              hex_str[hex_pos - 1] = '\0';  // Remove trailing space
-            } else {
-              hex_str[0] = '\0';
-            }
-            
-            // Check for protocol indicators in what we read
-            for (int i = 0; i < bytes_actually_read - 1; i++) {
-              if (byte_buffer[i] == 'P' && byte_buffer[i+1] == 'I') has_pid = true;
-              if (byte_buffer[i] == 'H' && (i+1 < bytes_actually_read) && 
-                  (byte_buffer[i+1] >= '0' && byte_buffer[i+1] <= '9')) has_h1 = true;
-            }
-            
-            ESP_LOGW("uart_diag", "Hex dump: %s", hex_str);
-            
-            // Protocol analysis
-            if (has_h1) {
-              ESP_LOGW("uart_diag", "PROTOCOL: HEX MODE DETECTED");
-              ESP_LOGW("uart_diag", "ACTION: Use VictronConnect app to switch SmartShunt to TEXT mode");
-            } else if (has_pid) {
-              ESP_LOGI("uart_diag", "PROTOCOL: TEXT MODE (valid VE.Direct)");
-              ESP_LOGI("uart_diag", "ISSUE: Data present but victron component not parsing");
-              ESP_LOGI("uart_diag", "POSSIBLE: Wrong baud rate or framing issue");
-            } else if (has_crlf && has_printable) {
-              ESP_LOGW("uart_diag", "PROTOCOL: TEXT framing detected but no PID field");
-              ESP_LOGW("uart_diag", "POSSIBLE: Partial/garbled data or wrong protocol version");
-            } else if (!has_printable) {
-              ESP_LOGW("uart_diag", "PROTOCOL: Binary/non-printable data");
-              ESP_LOGW("uart_diag", "POSSIBLE: Wrong baud rate (try 115200?) or electrical noise");
-            } else {
-              ESP_LOGW("uart_diag", "PROTOCOL: Unknown data pattern");
-            }
-            
-            ESP_LOGW("uart_diag", "==============================");
-            
-            // Note: We consumed these bytes from UART, but that's OK because:
-            // 1. SmartShunt is already stale (victron component isn't parsing anyway)
-            // 2. New bytes will arrive from the SmartShunt
-            // 3. This only happens during stale conditions
-          }
-
 # =============================================================================
 # BUTTONS
 # =============================================================================
@@ -2041,47 +1907,3 @@ button:
             ESP_LOGI("main", "Debug level changed to WARN");
           }
           id(debug_level_sensor).publish_state(id(logger_level));
-
-  - platform: template
-    name: "Reset UART1"
-    id: reset_uart_button
-    icon: "mdi:serial-port"
-    entity_category: diagnostic
-    on_press:
-      - lambda: |-
-          ESP_LOGI("uart_reset", "=== MANUAL UART1 RESET ===");
-          
-          // Delete existing driver
-          ESP_LOGI("uart_reset", "Deleting UART1 driver...");
-          esp_err_t err = uart_driver_delete(UART_NUM_1);
-          ESP_LOGI("uart_reset", "uart_driver_delete returned: %d", err);
-          
-          delay(100);  // 100ms delay
-          
-          // Configure fresh
-          uart_config_t uart_config = {
-            .baud_rate = 19200,
-            .data_bits = UART_DATA_8_BITS,
-            .parity = UART_PARITY_DISABLE,
-            .stop_bits = UART_STOP_BITS_1,
-            .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-            .rx_flow_ctrl_thresh = 0,
-            .source_clk = UART_SCLK_DEFAULT,
-          };
-          
-          ESP_LOGI("uart_reset", "Installing UART1 driver...");
-          err = uart_driver_install(UART_NUM_1, 1024, 0, 0, NULL, 0);
-          ESP_LOGI("uart_reset", "uart_driver_install returned: %d", err);
-          
-          if (err == ESP_OK) {
-            ESP_LOGI("uart_reset", "Configuring UART1...");
-            err = uart_param_config(UART_NUM_1, &uart_config);
-            ESP_LOGI("uart_reset", "uart_param_config returned: %d", err);
-            
-            ESP_LOGI("uart_reset", "Setting RX pin to GPIO4...");
-            err = uart_set_pin(UART_NUM_1, UART_PIN_NO_CHANGE, GPIO_NUM_4, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
-            ESP_LOGI("uart_reset", "uart_set_pin returned: %d", err);
-          }
-          
-          ESP_LOGI("uart_reset", "=== UART RESET COMPLETE ===");
-          ESP_LOGI("uart_reset", "Check if SmartShunt data starts flowing...");
