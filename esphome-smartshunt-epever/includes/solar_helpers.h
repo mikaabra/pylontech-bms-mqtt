@@ -361,6 +361,80 @@ inline bool check_threshold_int(int new_val, int &last_val, uint32_t &last_publi
     return publish;
 }
 
+// Integer stability window for spike rejection (5-sample buffer)
+struct IntStabilityWindow {
+    int values[5];
+    uint8_t count;
+    uint8_t index;
+    int last_published;
+
+    IntStabilityWindow() : count(0), index(0), last_published(-1) {
+        for (int i = 0; i < 5; i++) values[i] = -1;
+    }
+};
+
+inline void int_window_add(IntStabilityWindow& w, int val) {
+    w.values[w.index] = val;
+    w.index = (w.index + 1) % 5;
+    if (w.count < 5) w.count++;
+}
+
+inline int int_window_avg(const IntStabilityWindow& w) {
+    if (w.count == 0) return -1;
+    int sum = 0, valid = 0;
+    for (uint8_t i = 0; i < w.count; i++) {
+        if (w.values[i] >= 0) { sum += w.values[i]; valid++; }
+    }
+    return valid > 0 ? (sum + valid/2) / valid : -1;
+}
+
+inline bool int_window_stable(const IntStabilityWindow& w, int max_range) {
+    if (w.count < 3) return false;
+    int min_v = w.values[0], max_v = w.values[0];
+    for (uint8_t i = 1; i < w.count; i++) {
+        if (w.values[i] < min_v) min_v = w.values[i];
+        if (w.values[i] > max_v) max_v = w.values[i];
+    }
+    return (max_v - min_v) <= max_range;
+}
+
+inline bool check_threshold_int_stable(int new_val, int& last_val, uint32_t& last_publish,
+                                       IntStabilityWindow& window, int threshold, 
+                                       int max_stability_range, int min_val = 0, 
+                                       int max_val = 100, uint32_t heartbeat_ms = 60000) {
+    if (new_val < min_val || new_val > max_val) return false;
+    uint32_t now = millis();
+    
+    if (last_publish == 0 || last_val < min_val || last_val > max_val) {
+        int_window_add(window, new_val);
+        last_val = new_val;
+        last_publish = now;
+        window.last_published = new_val;
+        return true;
+    }
+    
+    int_window_add(window, new_val);
+    if (!int_window_stable(window, max_stability_range)) return false;
+    
+    int avg = int_window_avg(window);
+    if (avg < 0) return false;
+    
+    if (std::abs(avg - window.last_published) >= threshold) {
+        last_val = avg;
+        last_publish = now;
+        window.last_published = avg;
+        return true;
+    }
+    
+    if (safe_elapsed(now, last_publish) >= heartbeat_ms) {
+        last_val = avg;
+        last_publish = now;
+        window.last_published = avg;
+        return true;
+    }
+    return false;
+}
+
 inline bool check_threshold_bool(bool new_val, bool &last_val, uint32_t &last_change_time, bool &pending_val, bool &has_pending) {
     uint32_t now = millis();
     const uint32_t DEBOUNCE_MS = 2000;
