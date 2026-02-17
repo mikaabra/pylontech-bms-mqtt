@@ -917,7 +917,7 @@ sensor:
               if (check_threshold_float_stable(x, id(last_ss_instantaneous_power),
                                                id(last_ss_instantaneous_power_publish),
                                                power_window,
-                                               5.0f, 50.0f, -10000.0f, 10000.0f)) {
+                                               3.0f, 50.0f, -10000.0f, 10000.0f)) {
                 static char val[16];
                 snprintf(val, sizeof(val), "%.0f", id(last_ss_instantaneous_power));
                 id(mqtt_client).publish("rack-solar/smartshunt/instantaneous_power", val);
