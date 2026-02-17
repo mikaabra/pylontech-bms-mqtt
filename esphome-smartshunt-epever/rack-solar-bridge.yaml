@@ -773,9 +773,13 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            static char val[16];
-            snprintf(val, sizeof(val), "%.2f", x);
-            id(mqtt_client).publish("rack-solar/bitflip_rate", val);
+            static float last_publish = -1.0f;
+            if (x != last_publish) {
+              last_publish = x;
+              static char val[16];
+              snprintf(val, sizeof(val), "%.2f", x);
+              id(mqtt_client).publish("rack-solar/bitflip_rate", val);
+            }
 
   - platform: template
     name: "Data Quality Score"
@@ -797,9 +801,13 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            static char val[16];
-            snprintf(val, sizeof(val), "%.1f", x);
-            id(mqtt_client).publish("rack-solar/data_quality_score", val);
+            static float last_publish = -1.0f;
+            if (x != last_publish) {
+              last_publish = x;
+              static char val[16];
+              snprintf(val, sizeof(val), "%.1f", x);
+              id(mqtt_client).publish("rack-solar/data_quality_score", val);
+            }
 
   - platform: template
     name: "Bitflip Window Total"
@@ -814,7 +822,12 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/bitflip_window_total", to_string((int)x));
+            static int last_publish = -1;
+            int current = (int)x;
+            if (current != last_publish) {
+              last_publish = current;
+              id(mqtt_client).publish("rack-solar/bitflip_window_total", to_string(current));
+            }
 
   # ============================================================
   # SMARTSHUNT SENSORS (victron platform with direct MQTT publishing)
