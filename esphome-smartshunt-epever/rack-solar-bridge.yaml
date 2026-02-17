@@ -590,7 +590,11 @@ text_sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/smartshunt_stale", x.c_str());
+            static std::string last_smartshunt_stale = "";
+            if (x != last_smartshunt_stale) {
+              id(mqtt_client).publish("rack-solar/smartshunt_stale", x.c_str());
+              last_smartshunt_stale = x;
+            }
 
   - platform: template
     name: "EPEVER Stale"
@@ -604,7 +608,11 @@ text_sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/epever_stale", x.c_str());
+            static std::string last_epever_stale = "";
+            if (x != last_epever_stale) {
+              id(mqtt_client).publish("rack-solar/epever_stale", x.c_str());
+              last_epever_stale = x;
+            }
 
 # Internal binary sensor (receive from SmartShunt) + Template for MQTT/HA
 binary_sensor:
@@ -709,7 +717,11 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/rs485_crc_errors", to_string((int)x));
+            static int last_crc_errors = -1;
+            if ((int)x != last_crc_errors) {
+              id(mqtt_client).publish("rack-solar/rs485_crc_errors", to_string((int)x));
+              last_crc_errors = (int)x;
+            }
 
   - platform: template
     name: "RS485 Timeout Errors"
@@ -722,7 +734,11 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/rs485_timeout_errors", to_string((int)x));
+            static int last_timeout_errors = -1;
+            if ((int)x != last_timeout_errors) {
+              id(mqtt_client).publish("rack-solar/rs485_timeout_errors", to_string((int)x));
+              last_timeout_errors = (int)x;
+            }
 
   - platform: template
     name: "RS485 Frame Errors"
@@ -735,7 +751,11 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/rs485_frame_errors", to_string((int)x));
+            static int last_frame_errors = -1;
+            if ((int)x != last_frame_errors) {
+              id(mqtt_client).publish("rack-solar/rs485_frame_errors", to_string((int)x));
+              last_frame_errors = (int)x;
+            }
 
   # ============================================================
   # DATA QUALITY SENSORS (Phase 2 hardening)
