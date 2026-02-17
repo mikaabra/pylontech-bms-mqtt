@@ -898,10 +898,11 @@ sensor:
           - lambda: |-
               id(last_smartshunt_data_rx) = millis();
               int val = (int) roundf(x);
-              if (val < 0 || val > 100) return;
-              if (check_threshold_int(val, id(last_ss_state_of_charge),
-                                      id(last_ss_state_of_charge_publish), 1)) {
-                id(mqtt_client).publish("rack-solar/smartshunt/state_of_charge", to_string(val));
+              static IntStabilityWindow soc_window;
+              if (check_threshold_int_stable(val, id(last_ss_state_of_charge),
+                                             id(last_ss_state_of_charge_publish),
+                                             soc_window, 1, 5, 0, 100, 60000)) {
+                id(mqtt_client).publish("rack-solar/smartshunt/state_of_charge", to_string(id(last_ss_state_of_charge)));
               }
     instantaneous_power:
       id: ss_instantaneous_power

@@ -361,6 +361,111 @@ inline bool check_threshold_int(int new_val, int &last_val, uint32_t &last_publi
     return publish;
 }
 
+// Integer version with stability window (5-sample buffer for spike rejection)
+// Use this for critical integer values like SOC that shouldn't spike
+struct IntStabilityWindow {
+    int values[STABILITY_WINDOW_SIZE];
+    uint8_t count;
+    uint8_t index;
+    int last_published;
+
+    IntStabilityWindow() : count(0), index(0), last_published(-1) {
+        for (int i = 0; i < STABILITY_WINDOW_SIZE; i++) {
+            values[i] = -1;
+        }
+    }
+};
+
+inline void int_stability_window_add(IntStabilityWindow& window, int value) {
+    window.values[window.index] = value;
+    window.index = (window.index + 1) % STABILITY_WINDOW_SIZE;
+    if (window.count < STABILITY_WINDOW_SIZE) {
+        window.count++;
+    }
+}
+
+inline int int_stability_window_average(const IntStabilityWindow& window) {
+    if (window.count == 0) return -1;
+
+    int sum = 0;
+    int valid_count = 0;
+    for (uint8_t i = 0; i < window.count; i++) {
+        if (window.values[i] >= 0) {
+            sum += window.values[i];
+            valid_count++;
+        }
+    }
+
+    return valid_count > 0 ? (sum + valid_count / 2) / valid_count : -1;  // Round to nearest
+}
+
+inline bool int_stability_window_is_stable(const IntStabilityWindow& window, int max_range) {
+    if (window.count < STABILITY_WINDOW_SIZE) {
+        // Not enough samples yet, consider stable if we have at least 3
+        return window.count >= 3;
+    }
+
+    // Check if all values are within max_range of each other
+    int min_val = window.values[0];
+    int max_val = window.values[0];
+    for (uint8_t i = 1; i < STABILITY_WINDOW_SIZE; i++) {
+        if (window.values[i] < min_val) min_val = window.values[i];
+        if (window.values[i] > max_val) max_val = window.values[i];
+    }
+    return (max_val - min_val) <= max_range;
+}
+
+inline bool check_threshold_int_stable(int new_val, int& last_val, uint32_t& last_publish,
+                                       IntStabilityWindow& window,
+                                       int threshold, int max_stability_range,
+                                       int min_val = 0, int max_val = 100,
+                                       uint32_t heartbeat_ms = 60000) {
+    // Range check first
+    if (new_val < min_val || new_val > max_val) return false;
+
+    uint32_t now = millis();
+
+    // Always publish first valid value
+    if (last_publish == 0 || last_val < min_val || last_val > max_val) {
+        int_stability_window_add(window, new_val);
+        last_val = new_val;
+        last_publish = now;
+        window.last_published = new_val;
+        return true;
+    }
+
+    // Add to window
+    int_stability_window_add(window, new_val);
+
+    // Check if window is stable
+    if (!int_stability_window_is_stable(window, max_stability_range)) {
+        // Window not stable yet - spike detected, don't publish
+        return false;
+    }
+
+    // Calculate average of stable window
+    int avg_val = int_stability_window_average(window);
+    if (avg_val < 0) return false;
+
+    // Check if changed enough from last published
+    if (std::abs(avg_val - window.last_published) >= threshold) {
+        last_val = avg_val;
+        last_publish = now;
+        window.last_published = avg_val;
+        return true;
+    }
+
+    // Heartbeat publish
+    if (safe_elapsed(now, last_publish) >= heartbeat_ms) {
+        last_val = avg_val;
+        last_publish = now;
+        window.last_published = avg_val;
+        return true;
+    }
+
+    return false;
+}
+
 inline bool check_threshold_bool(bool new_val, bool &last_val, uint32_t &last_change_time, bool &pending_val, bool &has_pending) {
     uint32_t now = millis();
     const uint32_t DEBOUNCE_MS = 2000;
