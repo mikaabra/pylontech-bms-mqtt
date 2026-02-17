@@ -835,7 +835,12 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/bitflip_window_total", to_string((int)x));
+            static int last_window_total = -1;
+            int current = (int)x;
+            if (current != last_window_total) {
+              last_window_total = current;
+              id(mqtt_client).publish("rack-solar/bitflip_window_total", to_string(current));
+            }
 
   # ============================================================
   # SMARTSHUNT SENSORS (victron platform with direct MQTT publishing)
