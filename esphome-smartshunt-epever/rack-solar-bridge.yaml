@@ -677,7 +677,12 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/uptime", to_string((int)x));
+            static int last_uptime = -1;
+            int current = (int)x;
+            if (current != last_uptime) {
+              last_uptime = current;
+              id(mqtt_client).publish("rack-solar/uptime", to_string(current));
+            }
 
   # WiFi signal strength
   - platform: wifi_signal
@@ -690,7 +695,12 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/wifi_signal", to_string((int)x));
+            static int last_wifi_signal = -1000;
+            int current = (int)x;
+            if (current != last_wifi_signal) {
+              last_wifi_signal = current;
+              id(mqtt_client).publish("rack-solar/wifi_signal", to_string(current));
+            }
 
   # Free heap for diagnostics
   - platform: template
@@ -704,7 +714,12 @@ sensor:
     on_value:
       then:
         - lambda: |-
-            id(mqtt_client).publish("rack-solar/free_heap", to_string((int)x));
+            static int last_free_heap = -1;
+            int current = (int)x;
+            if (current != last_free_heap) {
+              last_free_heap = current;
+              id(mqtt_client).publish("rack-solar/free_heap", to_string(current));
+            }
 
   - platform: template
     name: "RS485 CRC Errors"
