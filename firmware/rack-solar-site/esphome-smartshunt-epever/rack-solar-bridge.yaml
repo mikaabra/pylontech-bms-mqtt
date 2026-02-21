@@ -166,6 +166,9 @@ mqtt:
         payload: "Rack Solar Bridge - Refactored version"
         retain: false
 
+
+  reboot_timeout: 0s  # Disable watchdog - don't reboot when no API clients connected
+api:
 # OTA configuration
 ota:
   - platform: esphome
