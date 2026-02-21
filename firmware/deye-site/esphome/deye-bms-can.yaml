@@ -24,6 +24,7 @@ substitutions:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
+  min_version: "2026.1.0"
   includes:
     - includes/set_include.h
   on_boot:
@@ -613,6 +614,9 @@ script:
           id(discovery_sent) = true;
           ESP_LOGI("mqtt", "HA discovery complete (%d publishes)", publish_count);
 
+
+  reboot_timeout: 0s  # Disable watchdog - don't reboot when no API clients connected
+api:
 ota:
   - platform: esphome
     password: !secret ota_password
