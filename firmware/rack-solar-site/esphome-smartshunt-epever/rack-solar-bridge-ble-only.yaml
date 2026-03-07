@@ -379,10 +379,42 @@ script:
 # HARDWARE INTERFACES
 # =============================================================================
 
+# UART interfaces (VE.Direct + RS485)
+# INPUT_PULLUP required: ESP32-S3 UART on GPIO5 needs explicit pull-up for proper
+# idle state (HIGH) to initialize correctly on cold boot.
+uart:
+  - id: vedirect_uart
+    rx_pin:
+      number: GPIO5
+      mode: INPUT_PULLUP
+    baud_rate: 19200
+    data_bits: 8
+    parity: NONE
+    stop_bits: 1
+    rx_buffer_size: 1024
+  
+  - id: rs485_uart
+    tx_pin: GPIO17
+    rx_pin: GPIO18
+    baud_rate: 115200
+    data_bits: 8
+    stop_bits: 1
+    parity: NONE
+    flow_control_pin: GPIO21
+    rx_buffer_size: 1024
+
 # External component for Victron (SmartShunt)
 external_components:
+  - source: github://KinDR007/VictronMPPT-ESPHOME@main
+    refresh: 0s
   - source: github://Fabian-Schmidt/esphome-victron_ble
     refresh: 0s
+
+# Victron component - 1s throttle (kept as-is)
+victron:
+  uart_id: vedirect_uart
+  id: smartshunt
+  throttle: 1s
 
 # =============================================================================
 # Internal victron text sensors (receive data from SmartShunt)
@@ -406,17 +438,229 @@ text_sensor:
     update_interval: 5s
     entity_category: diagnostic
 
+  - platform: victron
+    victron_id: smartshunt
+    model_description:
+      id: ss_model_description_internal
+      on_value:
+        then:
+          - lambda: |-
+              if (!x.empty() && validate_model_description(x)) {
+                id(ss_model_description_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
+                ESP_LOGW("validation", "Rejected corrupted model: %s", x.c_str());
+              }
+    firmware_version:
+      id: ss_firmware_version_internal
+      on_value:
+        then:
+          - lambda: |-
+              if (!x.empty() && validate_firmware_version(x)) {
+                id(ss_firmware_version_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
+                ESP_LOGW("validation", "Rejected corrupted firmware: %s", x.c_str());
+              }
+    device_type:
+      id: ss_device_type_internal
+      on_value:
+        then:
+          - lambda: |-
+              if (!x.empty() && validate_device_type(x)) {
+                id(ss_device_type_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
+                ESP_LOGW("validation", "Rejected corrupted device_type: %s", x.c_str());
+              }
+    serial_number:
+      id: ss_serial_number_internal
+      on_value:
+        then:
+          - lambda: |-
+              if (!x.empty() && validate_serial_number(x)) {
+                id(ss_serial_number_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
+                ESP_LOGW("validation", "Rejected corrupted serial: %s", x.c_str());
+              }
+    dc_monitor_mode:
+      id: ss_dc_monitor_mode_internal
+      on_value:
+        then:
+          - lambda: |-
+              if (!x.empty() && validate_dc_monitor_mode(x)) {
+                id(ss_dc_monitor_mode_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
+                ESP_LOGW("validation", "Rejected corrupted monitor_mode: %s", x.c_str());
+              }
+    alarm_condition_active:
+      id: ss_alarm_condition_internal
+      on_value:
+        then:
+          - lambda: |-
+              if (!x.empty() && validate_alarm_condition(x)) {
+                id(ss_alarm_condition_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
+                ESP_LOGW("validation", "Rejected corrupted alarm_condition: %s", x.c_str());
+              }
+    alarm_reason:
+      id: ss_alarm_reason_internal
+      on_value:
+        then:
+          - lambda: |-
+              if (!x.empty() && validate_alarm_reason(x)) {
+                id(ss_alarm_reason_val) = x;
+                id(text_validation_passed)++;
+              } else if (!x.empty()) {
+                id(text_validation_failed)++;
+                record_bitflip_event(id(bitflip_count), id(bitflip_window_start), millis());
+                ESP_LOGW("validation", "Rejected corrupted alarm_reason: %s", x.c_str());
+              }
+
+  - platform: version
+    name: "ESPHome Version"
+    id: esphome_version
+    state_topic: null
+
+  - platform: template
+    name: "Build Date"
+    id: build_date
+    icon: "mdi:calendar-clock"
+    update_interval: never
+    state_topic: null
+    lambda: return std::string(__DATE__ " " __TIME__);
+
+  # Template text sensors for MQTT/HA (update_interval: never - manual updates only)
+  - platform: template
+    name: "SmartShunt Model"
+    id: ss_model_description
+    state_topic: null
+    icon: "mdi:information"
+    update_interval: never
+    lambda: return id(ss_model_description_val);
+
+  - platform: template
+    name: "SmartShunt Firmware"
+    id: ss_firmware_version
+    state_topic: null
+    icon: "mdi:information"
+    update_interval: never
+    lambda: return id(ss_firmware_version_val);
+
+  - platform: template
+    name: "SmartShunt Device Type"
+    id: ss_device_type
+    state_topic: null
+    icon: "mdi:information"
+    update_interval: never
+    lambda: return id(ss_device_type_val);
+
+  - platform: template
+    name: "SmartShunt Serial"
+    id: ss_serial_number
+    state_topic: null
+    icon: "mdi:numeric"
+    update_interval: never
+    lambda: return id(ss_serial_number_val);
+
+  - platform: template
+    name: "SmartShunt Monitor Mode"
+    id: ss_dc_monitor_mode
+    state_topic: null
+    icon: "mdi:cog"
+    update_interval: never
+    lambda: return id(ss_dc_monitor_mode_val);
+
+  - platform: template
+    name: "SmartShunt Alarm Condition"
+    id: ss_alarm_condition
+    state_topic: null
+    icon: "mdi:alert"
+    update_interval: never
+    lambda: return id(ss_alarm_condition_val);
+
+  - platform: template
+    name: "SmartShunt Alarm Reason"
+    id: ss_alarm_reason
+    state_topic: null
+    icon: "mdi:alert-circle"
+    update_interval: never
+    lambda: return id(ss_alarm_reason_val);
+
+  # Debug level indicator for runtime log toggle
   - platform: template
     name: "Debug Level"
     id: debug_level_sensor
     state_topic: null
-    lambda: return id(logger_level);
-    update_interval: 5s
+    icon: "mdi:console"
+    update_interval: never
     entity_category: diagnostic
+    lambda: return id(logger_level);
 
+  # Stale detection status
+  - platform: template
+    name: "SmartShunt Stale"
+    id: smartshunt_stale_sensor
+    state_topic: null
+    update_interval: 5s
+    icon: "mdi:connection"
+    entity_category: diagnostic
+    lambda: |-
+      return id(smartshunt_stale) ? std::string("STALE") : std::string("OK");
+    on_value:
+      then:
+        - lambda: |-
+            static std::string last_smartshunt_stale = "";
+            if (x != last_smartshunt_stale) {
+              id(mqtt_client).publish("rack-solar/smartshunt_stale", x.c_str());
+              last_smartshunt_stale = x;
+            }
+
+  - platform: template
+    name: "EPEVER Stale"
+    id: epever_stale_sensor
+    state_topic: null
+    update_interval: 5s
+    icon: "mdi:connection"
+    entity_category: diagnostic
+    lambda: |-
+      return id(epever_stale) ? std::string("STALE") : std::string("OK");
+    on_value:
+      then:
+        - lambda: |-
+            static std::string last_epever_stale = "";
+            if (x != last_epever_stale) {
+              id(mqtt_client).publish("rack-solar/epever_stale", x.c_str());
+              last_epever_stale = x;
+            }
 
 # Internal binary sensor (receive from SmartShunt) + Template for MQTT/HA
 binary_sensor:
+  - platform: victron
+    victron_id: smartshunt
+    relay_state:
+      id: ss_relay_state_internal
+      on_state:
+        then:
+          - lambda: |-
+              id(ss_relay_state_val) = x;
+              id(last_smartshunt_data_rx) = millis();
+
   - platform: template
     name: "SmartShunt Relay State"
     id: ss_relay_state
@@ -438,18 +682,6 @@ binary_sensor:
         - lambda: |-
             const char* payload = x ? "ON" : "OFF";
             id(mqtt_client).publish("rack-solar/bitflip_rate_alert", payload);
-
-# UART for EPEVER RS485
-uart:
-  - id: rs485_uart
-    tx_pin: GPIO17
-    rx_pin: GPIO18
-    baud_rate: 115200
-    data_bits: 8
-    stop_bits: 1
-    parity: NONE
-    flow_control_pin: GPIO21
-    rx_buffer_size: 1024
 
 # Modbus controller for EPEVER - 30s update_interval (kept as-is)
 modbus:
@@ -1381,10 +1613,74 @@ globals:
     initial_value: '-1'
 
 # =============================================================================
-# INTERVALS
+# INTERVAL-BASED PUBLISHING FOR TEXT/BINARY SENSORS
+# Publishes to MQTT only when values change (following deye-bms-can.yaml pattern)
 # =============================================================================
 
 interval:
+  - interval: 5s
+    then:
+      - lambda: |-
+          // Helper lambda to publish text sensor with change detection
+          auto publish_text = [&](const char* topic, 
+                                  const std::string& current_val, 
+                                  std::string& last_val,
+                                  esphome::text_sensor::TextSensor* sensor) {
+            if (current_val != last_val) {
+              // Publish to MQTT
+              id(mqtt_client).publish(topic, current_val.c_str());
+              // Update entity state for HA
+              sensor->publish_state(current_val);
+              // Track last published value
+              last_val = current_val;
+            }
+          };
+          
+          // Publish all 7 text sensors
+          publish_text("rack-solar/smartshunt/model_description",
+                       id(ss_model_description_val),
+                       id(last_ss_model_description),
+                       id(ss_model_description));
+          
+          publish_text("rack-solar/smartshunt/firmware_version",
+                       id(ss_firmware_version_val),
+                       id(last_ss_firmware_version),
+                       id(ss_firmware_version));
+          
+          publish_text("rack-solar/smartshunt/device_type",
+                       id(ss_device_type_val),
+                       id(last_ss_device_type),
+                       id(ss_device_type));
+          
+          publish_text("rack-solar/smartshunt/serial_number",
+                       id(ss_serial_number_val),
+                       id(last_ss_serial_number),
+                       id(ss_serial_number));
+          
+          publish_text("rack-solar/smartshunt/dc_monitor_mode",
+                       id(ss_dc_monitor_mode_val),
+                       id(last_ss_dc_monitor_mode),
+                       id(ss_dc_monitor_mode));
+          
+          publish_text("rack-solar/smartshunt/alarm_condition",
+                       id(ss_alarm_condition_val),
+                       id(last_ss_alarm_condition),
+                       id(ss_alarm_condition));
+          
+          publish_text("rack-solar/smartshunt/alarm_reason",
+                       id(ss_alarm_reason_val),
+                       id(last_ss_alarm_reason),
+                       id(ss_alarm_reason));
+          
+          // Publish binary sensor with tristate logic
+          int current_relay = id(ss_relay_state_val) ? 1 : 0;
+          if (current_relay != id(last_ss_relay_state)) {
+            const char* payload = id(ss_relay_state_val) ? "ON" : "OFF";
+            id(mqtt_client).publish("rack-solar/smartshunt/relay_state", payload);
+            id(ss_relay_state).publish_state(id(ss_relay_state_val));
+            id(last_ss_relay_state) = current_relay;
+          }
+
   # Availability heartbeat - republish online status every 10 minutes
   - interval: 10min
     then:
