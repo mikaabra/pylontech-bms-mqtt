@@ -99,9 +99,7 @@ mqtt:
         }
     - delay: 500ms
     - lambda: |-
-        id(discovery_sent) = false;
         id(publish_discovery).execute();
-        id(discovery_sent) = true;
         ESP_LOGI("mqtt", "Discovery republished on reconnect");
     - lambda: |-
         ESP_LOGI("mqtt", "Resetting publish timestamps...");
@@ -148,12 +146,53 @@ script:
           snprintf(epever_avail, sizeof(epever_avail),
             "\"availability_topic\":\"rack-solar/epever/status\",\"payload_available\":\"online\",\"payload_not_available\":\"offline\"");
           char topic[160];
-          char payload[768];
           int publish_count = 0;
           auto pace_publish = [&publish_count]() {
             publish_count++;
             if (publish_count % 10 == 0) delay(50);
           };
+          
+          // Helper lambda to build discovery payload with conditional fields
+          auto build_payload = [&](const char* name, const char* state_topic, const char* unique_id,
+                                   const char* unit, const char* device_class, const char* state_class,
+                                   const char* avail, const char* device) -> std::string {
+            std::string json = "{";
+            json += "\"name\":\"" + std::string(name) + "\",";
+            json += "\"state_topic\":\"" + std::string(state_topic) + "\",";
+            json += "\"unique_id\":\"" + std::string(unique_id) + "\"";
+            if (strlen(unit) > 0) {
+              json += ",\"unit_of_measurement\":\"" + std::string(unit) + "\"";
+            }
+            if (strlen(device_class) > 0) {
+              json += ",\"device_class\":\"" + std::string(device_class) + "\"";
+            }
+            if (strlen(state_class) > 0) {
+              json += ",\"state_class\":\"" + std::string(state_class) + "\"";
+            }
+            json += "," + std::string(avail) + "," + std::string(device) + "}";
+            return json;
+          };
+          
+          auto build_payload_diag = [&](const char* name, const char* state_topic, const char* unique_id,
+                                        const char* unit, const char* device_class, const char* state_class,
+                                        const char* device) -> std::string {
+            std::string json = "{";
+            json += "\"name\":\"" + std::string(name) + "\",";
+            json += "\"state_topic\":\"" + std::string(state_topic) + "\",";
+            json += "\"unique_id\":\"" + std::string(unique_id) + "\"";
+            if (strlen(unit) > 0) {
+              json += ",\"unit_of_measurement\":\"" + std::string(unit) + "\"";
+            }
+            if (strlen(device_class) > 0) {
+              json += ",\"device_class\":\"" + std::string(device_class) + "\"";
+            }
+            if (strlen(state_class) > 0) {
+              json += ",\"state_class\":\"" + std::string(state_class) + "\"";
+            }
+            json += ",\"entity_category\":\"diagnostic\"," + std::string(device) + "}";
+            return json;
+          };
+          
           const char* smartshunt_sensors[][6] = {
             {"ss_battery_voltage", "SmartShunt Battery Voltage", "rack-solar/smartshunt/battery_voltage", "V", "voltage", "measurement"},
             {"ss_battery_current", "SmartShunt Battery Current", "rack-solar/smartshunt/battery_current", "A", "current", "measurement"},
@@ -164,32 +203,13 @@ script:
           };
           for (int i = 0; i < 6; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", smartshunt_sensors[i][0]);
-            bool ok = false;
-            if (strlen(smartshunt_sensors[i][4]) > 0 && strlen(smartshunt_sensors[i][5]) > 0) {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"%s",%s,%s})",
-                smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0],
-                smartshunt_sensors[i][3], smartshunt_sensors[i][4], smartshunt_sensors[i][5], smartshunt_avail, device_payload) > 0;
-            } else if (strlen(smartshunt_sensors[i][4]) > 0) {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s",%s,%s})",
-                smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0],
-                smartshunt_sensors[i][3], smartshunt_sensors[i][4], smartshunt_avail, device_payload) > 0;
-            } else if (strlen(smartshunt_sensors[i][5]) > 0) {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","state_class":"%s",%s,%s})",
-                smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0],
-                smartshunt_sensors[i][3], smartshunt_sensors[i][5], smartshunt_avail, device_payload) > 0;
-            } else {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s",%s,%s})",
-                smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0],
-                smartshunt_sensors[i][3], smartshunt_avail, device_payload) > 0;
-            }
-            if (ok) {
-              id(mqtt_client).publish(std::string(topic), std::string(payload), 0, true);
-              pace_publish();
-            }
+            char unique_id[64];
+            snprintf(unique_id, sizeof(unique_id), "rack_solar_%s", smartshunt_sensors[i][0]);
+            std::string payload_str = build_payload(smartshunt_sensors[i][1], smartshunt_sensors[i][2], unique_id,
+                                                    smartshunt_sensors[i][3], smartshunt_sensors[i][4], smartshunt_sensors[i][5],
+                                                    smartshunt_avail, device_payload);
+            id(mqtt_client).publish(std::string(topic), payload_str, 0, true);
+            pace_publish();
           }
           const char* epever_sensors[][6] = {
             {"epever_solar_voltage", "EPEVER Solar Voltage", "rack-solar/epever/solar_voltage", "V", "voltage", "measurement"},
@@ -203,32 +223,13 @@ script:
           };
           for (int i = 0; i < 8; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", epever_sensors[i][0]);
-            bool ok = false;
-            if (strlen(epever_sensors[i][4]) > 0 && strlen(epever_sensors[i][5]) > 0) {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"%s",%s,%s})",
-                epever_sensors[i][1], epever_sensors[i][2], epever_sensors[i][0],
-                epever_sensors[i][3], epever_sensors[i][4], epever_sensors[i][5], epever_avail, device_payload) > 0;
-            } else if (strlen(epever_sensors[i][4]) > 0) {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s",%s,%s})",
-                epever_sensors[i][1], epever_sensors[i][2], epever_sensors[i][0],
-                epever_sensors[i][3], epever_sensors[i][4], epever_avail, device_payload) > 0;
-            } else if (strlen(epever_sensors[i][5]) > 0) {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","state_class":"%s",%s,%s})",
-                epever_sensors[i][1], epever_sensors[i][2], epever_sensors[i][0],
-                epever_sensors[i][3], epever_sensors[i][5], epever_avail, device_payload) > 0;
-            } else {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s",%s,%s})",
-                epever_sensors[i][1], epever_sensors[i][2], epever_sensors[i][0],
-                epever_sensors[i][3], epever_avail, device_payload) > 0;
-            }
-            if (ok) {
-              id(mqtt_client).publish(std::string(topic), std::string(payload), 0, true);
-              pace_publish();
-            }
+            char unique_id[64];
+            snprintf(unique_id, sizeof(unique_id), "rack_solar_%s", epever_sensors[i][0]);
+            std::string payload_str = build_payload(epever_sensors[i][1], epever_sensors[i][2], unique_id,
+                                                    epever_sensors[i][3], epever_sensors[i][4], epever_sensors[i][5],
+                                                    epever_avail, device_payload);
+            id(mqtt_client).publish(std::string(topic), payload_str, 0, true);
+            pace_publish();
           }
           const char* diagnostic_sensors[][6] = {
             {"rs485_crc_errors", "RS485 CRC Errors", "rack-solar/rs485_crc_errors", "", "", ""},
@@ -242,36 +243,13 @@ script:
           };
           for (int i = 0; i < 8; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", diagnostic_sensors[i][0]);
-            bool ok = false;
-            if (strlen(diagnostic_sensors[i][4]) > 0 && strlen(diagnostic_sensors[i][5]) > 0) {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"%s","entity_category":"diagnostic",%s})",
-                diagnostic_sensors[i][1], diagnostic_sensors[i][2], diagnostic_sensors[i][0],
-                diagnostic_sensors[i][3], diagnostic_sensors[i][4], diagnostic_sensors[i][5], device_payload) > 0;
-            } else if (strlen(diagnostic_sensors[i][4]) > 0) {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","entity_category":"diagnostic",%s})",
-                diagnostic_sensors[i][1], diagnostic_sensors[i][2], diagnostic_sensors[i][0],
-                diagnostic_sensors[i][3], diagnostic_sensors[i][4], device_payload) > 0;
-            } else if (strlen(diagnostic_sensors[i][5]) > 0) {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","state_class":"%s","entity_category":"diagnostic",%s})",
-                diagnostic_sensors[i][1], diagnostic_sensors[i][2], diagnostic_sensors[i][0],
-                diagnostic_sensors[i][3], diagnostic_sensors[i][5], device_payload) > 0;
-            } else if (strlen(diagnostic_sensors[i][3]) > 0) {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","entity_category":"diagnostic",%s})",
-                diagnostic_sensors[i][1], diagnostic_sensors[i][2], diagnostic_sensors[i][0],
-                diagnostic_sensors[i][3], device_payload) > 0;
-            } else {
-              ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","entity_category":"diagnostic",%s})",
-                diagnostic_sensors[i][1], diagnostic_sensors[i][2], diagnostic_sensors[i][0], device_payload) > 0;
-            }
-            if (ok) {
-              id(mqtt_client).publish(std::string(topic), std::string(payload), 0, true);
-              pace_publish();
-            }
+            char unique_id[64];
+            snprintf(unique_id, sizeof(unique_id), "rack_solar_%s", diagnostic_sensors[i][0]);
+            std::string payload_str = build_payload_diag(diagnostic_sensors[i][1], diagnostic_sensors[i][2], unique_id,
+                                                         diagnostic_sensors[i][3], diagnostic_sensors[i][4], diagnostic_sensors[i][5],
+                                                         device_payload);
+            id(mqtt_client).publish(std::string(topic), payload_str, 0, true);
+            pace_publish();
           }
           ESP_LOGI("mqtt", "Published %d discovery configs", publish_count);
 
@@ -901,11 +879,6 @@ button:
           id(debug_level_sensor).publish_state(id(logger_level));
 
 globals:
-  - id: discovery_sent
-    type: bool
-    initial_value: 'false'
-    restore_value: false
-
   - id: logger_level
     type: std::string
     initial_value: '"WARN"'
