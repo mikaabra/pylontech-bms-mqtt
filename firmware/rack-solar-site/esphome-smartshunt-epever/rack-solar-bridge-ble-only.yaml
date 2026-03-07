@@ -164,10 +164,18 @@ script:
           };
           for (int i = 0; i < 6; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", smartshunt_sensors[i][0]);
-            bool ok = snprintf(payload, sizeof(payload),
-              R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
-              smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0],
-              smartshunt_sensors[i][3], smartshunt_sensors[i][4], smartshunt_avail, device_payload) > 0;
+            bool ok = false;
+            if (strlen(smartshunt_sensors[i][4]) > 0) {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+                smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0],
+                smartshunt_sensors[i][3], smartshunt_sensors[i][4], smartshunt_avail, device_payload) > 0;
+            } else {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
+                smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0],
+                smartshunt_sensors[i][3], smartshunt_avail, device_payload) > 0;
+            }
             if (ok) {
               id(mqtt_client).publish(std::string(topic), std::string(payload), 0, true);
               pace_publish();
@@ -185,10 +193,18 @@ script:
           };
           for (int i = 0; i < 8; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", epever_sensors[i][0]);
-            bool ok = snprintf(payload, sizeof(payload),
-              R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
-              epever_sensors[i][1], epever_sensors[i][2], epever_sensors[i][0],
-              epever_sensors[i][3], epever_sensors[i][4], epever_avail, device_payload) > 0;
+            bool ok = false;
+            if (strlen(epever_sensors[i][4]) > 0) {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+                epever_sensors[i][1], epever_sensors[i][2], epever_sensors[i][0],
+                epever_sensors[i][3], epever_sensors[i][4], epever_avail, device_payload) > 0;
+            } else {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
+                epever_sensors[i][1], epever_sensors[i][2], epever_sensors[i][0],
+                epever_sensors[i][3], epever_avail, device_payload) > 0;
+            }
             if (ok) {
               id(mqtt_client).publish(std::string(topic), std::string(payload), 0, true);
               pace_publish();
