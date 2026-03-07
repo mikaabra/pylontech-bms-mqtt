@@ -154,25 +154,35 @@ script:
             publish_count++;
             if (publish_count % 10 == 0) delay(50);
           };
-          const char* smartshunt_sensors[][5] = {
-            {"ss_battery_voltage", "SmartShunt Battery Voltage", "rack-solar/smartshunt/battery_voltage", "V", "voltage"},
-            {"ss_battery_current", "SmartShunt Battery Current", "rack-solar/smartshunt/battery_current", "A", "current"},
-            {"ss_state_of_charge", "SmartShunt State of Charge", "rack-solar/smartshunt/state_of_charge", "%", "battery"},
-            {"ss_instantaneous_power", "SmartShunt Power", "rack-solar/smartshunt/instantaneous_power", "W", "power"},
-            {"ss_consumed_amp_hours", "SmartShunt Consumed Ah", "rack-solar/smartshunt/consumed_amp_hours", "Ah", ""},
-            {"ss_time_to_go", "SmartShunt Time To Go", "rack-solar/smartshunt/time_to_go", "min", ""},
+          const char* smartshunt_sensors[][6] = {
+            {"ss_battery_voltage", "SmartShunt Battery Voltage", "rack-solar/smartshunt/battery_voltage", "V", "voltage", "measurement"},
+            {"ss_battery_current", "SmartShunt Battery Current", "rack-solar/smartshunt/battery_current", "A", "current", "measurement"},
+            {"ss_state_of_charge", "SmartShunt State of Charge", "rack-solar/smartshunt/state_of_charge", "%", "battery", "measurement"},
+            {"ss_instantaneous_power", "SmartShunt Power", "rack-solar/smartshunt/instantaneous_power", "W", "power", "measurement"},
+            {"ss_consumed_amp_hours", "SmartShunt Consumed Ah", "rack-solar/smartshunt/consumed_amp_hours", "Ah", "", "measurement"},
+            {"ss_time_to_go", "SmartShunt Time To Go", "rack-solar/smartshunt/time_to_go", "min", "", "measurement"},
           };
           for (int i = 0; i < 6; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", smartshunt_sensors[i][0]);
             bool ok = false;
-            if (strlen(smartshunt_sensors[i][4]) > 0) {
+            if (strlen(smartshunt_sensors[i][4]) > 0 && strlen(smartshunt_sensors[i][5]) > 0) {
               ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"%s",%s,%s})",
+                smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0],
+                smartshunt_sensors[i][3], smartshunt_sensors[i][4], smartshunt_sensors[i][5], smartshunt_avail, device_payload) > 0;
+            } else if (strlen(smartshunt_sensors[i][4]) > 0) {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s",%s,%s})",
                 smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0],
                 smartshunt_sensors[i][3], smartshunt_sensors[i][4], smartshunt_avail, device_payload) > 0;
+            } else if (strlen(smartshunt_sensors[i][5]) > 0) {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","state_class":"%s",%s,%s})",
+                smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0],
+                smartshunt_sensors[i][3], smartshunt_sensors[i][5], smartshunt_avail, device_payload) > 0;
             } else {
               ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s",%s,%s})",
                 smartshunt_sensors[i][1], smartshunt_sensors[i][2], smartshunt_sensors[i][0],
                 smartshunt_sensors[i][3], smartshunt_avail, device_payload) > 0;
             }
@@ -181,27 +191,37 @@ script:
               pace_publish();
             }
           }
-          const char* epever_sensors[][5] = {
-            {"epever_solar_voltage", "EPEVER Solar Voltage", "rack-solar/epever/solar_voltage", "V", "voltage"},
-            {"epever_pv_current", "EPEVER PV Current", "rack-solar/epever/pv_current", "A", "current"},
-            {"epever_solar_power", "EPEVER Solar Power", "rack-solar/epever/solar_power", "W", "power"},
-            {"epever_battery_capacity", "EPEVER Battery Capacity", "rack-solar/epever/battery_capacity", "%", "battery"},
-            {"epever_device_temp", "EPEVER Device Temperature", "rack-solar/epever/device_temp", "°C", "temperature"},
-            {"epever_battery_voltage", "EPEVER Battery Voltage", "rack-solar/epever/battery_voltage", "V", "voltage"},
-            {"epever_battery_current", "EPEVER Battery Current", "rack-solar/epever/battery_current", "A", "current"},
-            {"epever_total_energy", "EPEVER Total Energy", "rack-solar/epever/total_energy", "kWh", "energy"},
+          const char* epever_sensors[][6] = {
+            {"epever_solar_voltage", "EPEVER Solar Voltage", "rack-solar/epever/solar_voltage", "V", "voltage", "measurement"},
+            {"epever_pv_current", "EPEVER PV Current", "rack-solar/epever/pv_current", "A", "current", "measurement"},
+            {"epever_solar_power", "EPEVER Solar Power", "rack-solar/epever/solar_power", "W", "power", "measurement"},
+            {"epever_battery_capacity", "EPEVER Battery Capacity", "rack-solar/epever/battery_capacity", "%", "battery", "measurement"},
+            {"epever_device_temp", "EPEVER Device Temperature", "rack-solar/epever/device_temp", "°C", "temperature", "measurement"},
+            {"epever_battery_voltage", "EPEVER Battery Voltage", "rack-solar/epever/battery_voltage", "V", "voltage", "measurement"},
+            {"epever_battery_current", "EPEVER Battery Current", "rack-solar/epever/battery_current", "A", "current", "measurement"},
+            {"epever_total_energy", "EPEVER Total Energy", "rack-solar/epever/total_energy", "kWh", "energy", "total_increasing"},
           };
           for (int i = 0; i < 8; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", epever_sensors[i][0]);
             bool ok = false;
-            if (strlen(epever_sensors[i][4]) > 0) {
+            if (strlen(epever_sensors[i][4]) > 0 && strlen(epever_sensors[i][5]) > 0) {
               ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"%s",%s,%s})",
+                epever_sensors[i][1], epever_sensors[i][2], epever_sensors[i][0],
+                epever_sensors[i][3], epever_sensors[i][4], epever_sensors[i][5], epever_avail, device_payload) > 0;
+            } else if (strlen(epever_sensors[i][4]) > 0) {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s",%s,%s})",
                 epever_sensors[i][1], epever_sensors[i][2], epever_sensors[i][0],
                 epever_sensors[i][3], epever_sensors[i][4], epever_avail, device_payload) > 0;
+            } else if (strlen(epever_sensors[i][5]) > 0) {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","state_class":"%s",%s,%s})",
+                epever_sensors[i][1], epever_sensors[i][2], epever_sensors[i][0],
+                epever_sensors[i][3], epever_sensors[i][5], epever_avail, device_payload) > 0;
             } else {
               ok = snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s",%s,%s})",
                 epever_sensors[i][1], epever_sensors[i][2], epever_sensors[i][0],
                 epever_sensors[i][3], epever_avail, device_payload) > 0;
             }
@@ -210,24 +230,34 @@ script:
               pace_publish();
             }
           }
-          const char* diagnostic_sensors[][5] = {
-            {"rs485_crc_errors", "RS485 CRC Errors", "rack-solar/rs485_crc_errors", "", ""},
-            {"rs485_timeout_errors", "RS485 Timeout Errors", "rack-solar/rs485_timeout_errors", "", ""},
-            {"rs485_frame_errors", "RS485 Frame Errors", "rack-solar/rs485_frame_errors", "", ""},
-            {"smartshunt_stale", "SmartShunt Stale", "rack-solar/smartshunt_stale", "", ""},
-            {"epever_stale", "EPEVER Stale", "rack-solar/epever_stale", "", ""},
-            {"free_heap", "Free Heap", "rack-solar/free_heap", "bytes", ""},
-            {"wifi_signal", "WiFi Signal", "rack-solar/wifi_signal", "dBm", "signal_strength"},
-            {"uptime", "Uptime", "rack-solar/uptime", "s", "duration"},
+          const char* diagnostic_sensors[][6] = {
+            {"rs485_crc_errors", "RS485 CRC Errors", "rack-solar/rs485_crc_errors", "", "", ""},
+            {"rs485_timeout_errors", "RS485 Timeout Errors", "rack-solar/rs485_timeout_errors", "", "", ""},
+            {"rs485_frame_errors", "RS485 Frame Errors", "rack-solar/rs485_frame_errors", "", "", ""},
+            {"smartshunt_stale", "SmartShunt Stale", "rack-solar/smartshunt_stale", "", "", ""},
+            {"epever_stale", "EPEVER Stale", "rack-solar/epever_stale", "", "", ""},
+            {"free_heap", "Free Heap", "rack-solar/free_heap", "bytes", "", ""},
+            {"wifi_signal", "WiFi Signal", "rack-solar/wifi_signal", "dBm", "signal_strength", ""},
+            {"uptime", "Uptime", "rack-solar/uptime", "s", "duration", "total_increasing"},
           };
           for (int i = 0; i < 8; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", diagnostic_sensors[i][0]);
             bool ok = false;
-            if (strlen(diagnostic_sensors[i][4]) > 0) {
+            if (strlen(diagnostic_sensors[i][4]) > 0 && strlen(diagnostic_sensors[i][5]) > 0) {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"%s","entity_category":"diagnostic",%s})",
+                diagnostic_sensors[i][1], diagnostic_sensors[i][2], diagnostic_sensors[i][0],
+                diagnostic_sensors[i][3], diagnostic_sensors[i][4], diagnostic_sensors[i][5], device_payload) > 0;
+            } else if (strlen(diagnostic_sensors[i][4]) > 0) {
               ok = snprintf(payload, sizeof(payload),
                 R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","device_class":"%s","entity_category":"diagnostic",%s})",
                 diagnostic_sensors[i][1], diagnostic_sensors[i][2], diagnostic_sensors[i][0],
                 diagnostic_sensors[i][3], diagnostic_sensors[i][4], device_payload) > 0;
+            } else if (strlen(diagnostic_sensors[i][5]) > 0) {
+              ok = snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","state_class":"%s","entity_category":"diagnostic",%s})",
+                diagnostic_sensors[i][1], diagnostic_sensors[i][2], diagnostic_sensors[i][0],
+                diagnostic_sensors[i][3], diagnostic_sensors[i][5], device_payload) > 0;
             } else if (strlen(diagnostic_sensors[i][3]) > 0) {
               ok = snprintf(payload, sizeof(payload),
                 R"({"name":"%s","state_topic":"%s","unique_id":"rack_solar_%s","unit_of_measurement":"%s","entity_category":"diagnostic",%s})",
