@@ -203,6 +203,8 @@ mqtt:
           ESP_LOGI("mqtt", "Discovery already sent this boot, skipping");
         }
 
+  reboot_timeout: 0s
+
 # HA Discovery publishing script (called from on_connect and manual button)
 script:
   - id: publish_discovery
@@ -229,33 +231,53 @@ script:
             }
           };
 
-          // Stack sensors
-          const char* stack_sensors[][5] = {
-            {"stack_cell_min", "Stack Cell Min", "${rs485_prefix}/stack/cell_min", "V", "voltage"},
-            {"stack_cell_max", "Stack Cell Max", "${rs485_prefix}/stack/cell_max", "V", "voltage"},
-            {"stack_cell_delta", "Stack Cell Delta", "${rs485_prefix}/stack/cell_delta_mv", "mV", ""},
-            {"stack_voltage", "Stack Voltage", "${rs485_prefix}/stack/voltage", "V", "voltage"},
-            {"stack_current", "Stack Current", "${rs485_prefix}/stack/current", "A", "current"},
-            {"stack_temp_min", "Stack Temp Min", "${rs485_prefix}/stack/temp_min", "°C", "temperature"},
-            {"stack_temp_max", "Stack Temp Max", "${rs485_prefix}/stack/temp_max", "°C", "temperature"},
-            {"stack_balancing_count", "Stack Balancing Cells", "${rs485_prefix}/stack/balancing_count", "", ""},
-            {"stack_balancing_cells", "Stack Balancing Cells List", "${rs485_prefix}/stack/balancing_cells", "", ""},
-            {"stack_overvolt_count", "Stack Overvolt Cells", "${rs485_prefix}/stack/overvolt_count", "", ""},
-            {"stack_overvolt_cells", "Stack Overvolt Cells List", "${rs485_prefix}/stack/overvolt_cells", "", ""},
-            {"stack_alarms", "Stack Alarms", "${rs485_prefix}/stack/alarms", "", ""},
+          // Stack sensors - {id, name, topic, unit, device_class, state_class}
+          const char* stack_sensors[][6] = {
+            {"stack_cell_min", "Stack Cell Min", "${rs485_prefix}/stack/cell_min", "V", "voltage", "measurement"},
+            {"stack_cell_max", "Stack Cell Max", "${rs485_prefix}/stack/cell_max", "V", "voltage", "measurement"},
+            {"stack_cell_delta", "Stack Cell Delta", "${rs485_prefix}/stack/cell_delta_mv", "mV", "voltage", "measurement"},
+            {"stack_voltage", "Stack Voltage", "${rs485_prefix}/stack/voltage", "V", "voltage", "measurement"},
+            {"stack_current", "Stack Current", "${rs485_prefix}/stack/current", "A", "current", "measurement"},
+            {"stack_temp_min", "Stack Temp Min", "${rs485_prefix}/stack/temp_min", "°C", "temperature", "measurement"},
+            {"stack_temp_max", "Stack Temp Max", "${rs485_prefix}/stack/temp_max", "°C", "temperature", "measurement"},
+            {"stack_balancing_count", "Stack Balancing Cells", "${rs485_prefix}/stack/balancing_count", "", "", "total_increasing"},
+            {"stack_balancing_cells", "Stack Balancing Cells List", "${rs485_prefix}/stack/balancing_cells", "", "", ""},
+            {"stack_overvolt_count", "Stack Overvolt Cells", "${rs485_prefix}/stack/overvolt_count", "", "", "total_increasing"},
+            {"stack_overvolt_cells", "Stack Overvolt Cells List", "${rs485_prefix}/stack/overvolt_cells", "", "", ""},
+            {"stack_alarms", "Stack Alarms", "${rs485_prefix}/stack/alarms", "", "", ""},
           };
 
           for (int i = 0; i < 12; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", stack_sensors[i][0]);
             bool ok = false;
-            if (strlen(stack_sensors[i][3]) > 0 && strlen(stack_sensors[i][4]) > 0) {
+            if (strlen(stack_sensors[i][3]) > 0 && strlen(stack_sensors[i][4]) > 0 && strlen(stack_sensors[i][5]) > 0) {
               ok = safe_snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"%s",%s,%s})",
+                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], stack_sensors[i][4], stack_sensors[i][5], avail_json, device_json);
+            } else if (strlen(stack_sensors[i][3]) > 0 && strlen(stack_sensors[i][4]) > 0) {
+              ok = safe_snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s",%s,%s})",
                 stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], stack_sensors[i][4], avail_json, device_json);
+            } else if (strlen(stack_sensors[i][3]) > 0 && strlen(stack_sensors[i][5]) > 0) {
+              ok = safe_snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"%s",%s,%s})",
+                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], stack_sensors[i][5], avail_json, device_json);
             } else if (strlen(stack_sensors[i][3]) > 0) {
               ok = safe_snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s",%s,%s})",
                 stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], avail_json, device_json);
+            } else if (strlen(stack_sensors[i][4]) > 0 && strlen(stack_sensors[i][5]) > 0) {
+              ok = safe_snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","device_class":"%s","state_class":"%s",%s,%s})",
+                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][4], stack_sensors[i][5], avail_json, device_json);
+            } else if (strlen(stack_sensors[i][4]) > 0) {
+              ok = safe_snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","device_class":"%s",%s,%s})",
+                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][4], avail_json, device_json);
+            } else if (strlen(stack_sensors[i][5]) > 0) {
+              ok = safe_snprintf(payload, sizeof(payload),
+                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","state_class":"%s",%s,%s})",
+                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][5], avail_json, device_json);
             } else {
               ok = safe_snprintf(payload, sizeof(payload),
                 R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s",%s,%s})",
@@ -290,25 +312,25 @@ script:
             snprintf(prefix, sizeof(prefix), "batt%d", batt);
             snprintf(state_prefix, sizeof(state_prefix), "${rs485_prefix}/battery%d", batt);
 
-            // Battery sensors
-            const char* batt_sensor_names[][4] = {
-              {"cell_min", "Cell Min", "V", "voltage"},
-              {"cell_max", "Cell Max", "V", "voltage"},
-              {"cell_delta", "Cell Delta", "mV", ""},
-              {"voltage", "Voltage", "V", "voltage"},
-              {"current", "Current", "A", "current"},
-              {"soc", "SOC", "%", ""},
-              {"remain_ah", "Remaining Capacity", "Ah", ""},
-              {"total_ah", "Total Capacity", "Ah", ""},
-              {"cycles", "Cycles", "", ""},
-              {"balancing_count", "Balancing Cells", "", ""},
-              {"balancing_cells", "Balancing Cells List", "", ""},
-              {"overvolt_count", "Overvolt Cells", "", ""},
-              {"overvolt_cells", "Overvolt Cells List", "", ""},
-              {"state", "State", "", ""},
-              {"warnings", "Warnings", "", ""},
-              {"alarms", "Alarms", "", ""},
-              {"cw_cells", "CW Cells List", "", ""},
+            // Battery sensors - {id, name, unit, device_class, state_class}
+            const char* batt_sensor_names[][5] = {
+              {"cell_min", "Cell Min", "V", "voltage", "measurement"},
+              {"cell_max", "Cell Max", "V", "voltage", "measurement"},
+              {"cell_delta", "Cell Delta", "mV", "voltage", "measurement"},
+              {"voltage", "Voltage", "V", "voltage", "measurement"},
+              {"current", "Current", "A", "current", "measurement"},
+              {"soc", "SOC", "%", "battery", "measurement"},
+              {"remain_ah", "Remaining Capacity", "Ah", "", "measurement"},
+              {"total_ah", "Total Capacity", "Ah", "", "measurement"},
+              {"cycles", "Cycles", "", "", "total_increasing"},
+              {"balancing_count", "Balancing Cells", "", "", "total_increasing"},
+              {"balancing_cells", "Balancing Cells List", "", "", ""},
+              {"overvolt_count", "Overvolt Cells", "", "", "total_increasing"},
+              {"overvolt_cells", "Overvolt Cells List", "", "", ""},
+              {"state", "State", "", "", ""},
+              {"warnings", "Warnings", "", "", ""},
+              {"alarms", "Alarms", "", "", ""},
+              {"cw_cells", "CW Cells List", "", "", ""},
             };
 
             for (int i = 0; i < 17; i++) {
@@ -323,14 +345,34 @@ script:
 
               snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
               bool ok = false;
-              if (strlen(batt_sensor_names[i][2]) > 0 && strlen(batt_sensor_names[i][3]) > 0) {
+              if (strlen(batt_sensor_names[i][2]) > 0 && strlen(batt_sensor_names[i][3]) > 0 && strlen(batt_sensor_names[i][4]) > 0) {
                 ok = safe_snprintf(payload, sizeof(payload),
-                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"measurement",%s,%s})",
+                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"%s",%s,%s})",
+                  name, st, obj_id, batt_sensor_names[i][2], batt_sensor_names[i][3], batt_sensor_names[i][4], avail_json, device_json);
+              } else if (strlen(batt_sensor_names[i][2]) > 0 && strlen(batt_sensor_names[i][3]) > 0) {
+                ok = safe_snprintf(payload, sizeof(payload),
+                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s",%s,%s})",
                   name, st, obj_id, batt_sensor_names[i][2], batt_sensor_names[i][3], avail_json, device_json);
+              } else if (strlen(batt_sensor_names[i][2]) > 0 && strlen(batt_sensor_names[i][4]) > 0) {
+                ok = safe_snprintf(payload, sizeof(payload),
+                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"%s",%s,%s})",
+                  name, st, obj_id, batt_sensor_names[i][2], batt_sensor_names[i][4], avail_json, device_json);
               } else if (strlen(batt_sensor_names[i][2]) > 0) {
                 ok = safe_snprintf(payload, sizeof(payload),
-                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"measurement",%s,%s})",
+                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s",%s,%s})",
                   name, st, obj_id, batt_sensor_names[i][2], avail_json, device_json);
+              } else if (strlen(batt_sensor_names[i][3]) > 0 && strlen(batt_sensor_names[i][4]) > 0) {
+                ok = safe_snprintf(payload, sizeof(payload),
+                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","device_class":"%s","state_class":"%s",%s,%s})",
+                  name, st, obj_id, batt_sensor_names[i][3], batt_sensor_names[i][4], avail_json, device_json);
+              } else if (strlen(batt_sensor_names[i][3]) > 0) {
+                ok = safe_snprintf(payload, sizeof(payload),
+                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","device_class":"%s",%s,%s})",
+                  name, st, obj_id, batt_sensor_names[i][3], avail_json, device_json);
+              } else if (strlen(batt_sensor_names[i][4]) > 0) {
+                ok = safe_snprintf(payload, sizeof(payload),
+                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","state_class":"%s",%s,%s})",
+                  name, st, obj_id, batt_sensor_names[i][4], avail_json, device_json);
               } else {
                 ok = safe_snprintf(payload, sizeof(payload),
                   R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s",%s,%s})",
@@ -551,7 +593,7 @@ script:
 
           snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soh/config");
           if (safe_snprintf(payload, sizeof(payload),
-            R"({"name":"BMS SOH","state_topic":"${can_prefix}/soh","unique_id":"deye_bms_can_soh","unit_of_measurement":"%%","icon":"mdi:battery-heart-variant","state_class":"measurement",%s,%s})",
+            R"({"name":"BMS SOH","state_topic":"${can_prefix}/soh","unique_id":"deye_bms_can_soh","unit_of_measurement":"%%","device_class":"battery","icon":"mdi:battery-heart-variant","state_class":"measurement",%s,%s})",
             can_avail_json, can_device_json)) {
             id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
             pace_publish();
@@ -614,8 +656,6 @@ script:
           id(discovery_sent) = true;
           ESP_LOGI("mqtt", "HA discovery complete (%d publishes)", publish_count);
 
-
-  reboot_timeout: 0s  # Disable watchdog - don't reboot when no API clients connected
 api:
 ota:
   - platform: esphome
