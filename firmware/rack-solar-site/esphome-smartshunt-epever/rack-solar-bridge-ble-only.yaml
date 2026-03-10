@@ -75,28 +75,26 @@ mqtt:
   on_connect:
     - lambda: |-
         ESP_LOGI("mqtt", "=== on_connect START ===");
+        // Always republish availability on connect (handles MQTT broker restart)
         bool ss_stale = id(smartshunt_stale);
-        bool ss_was_online = id(last_smartshunt_online);
-        if (ss_stale && ss_was_online) {
+        if (ss_stale) {
           id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
           id(last_smartshunt_online) = false;
-        } else if (!ss_stale && !ss_was_online) {
+        } else {
           id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("online"), (uint8_t)0, true);
           id(last_smartshunt_online) = true;
-        } else if (ss_stale && !ss_was_online) {
-          id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
         }
         bool ep_stale = id(epever_stale);
-        bool ep_was_online = id(last_epever_online);
-        if (ep_stale && ep_was_online) {
+        if (ep_stale) {
           id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("offline"), (uint8_t)0, true);
           id(last_epever_online) = false;
-        } else if (!ep_stale && !ep_was_online) {
+        } else {
           id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("online"), (uint8_t)0, true);
           id(last_epever_online) = true;
-        } else if (ep_stale && !ep_was_online) {
-          id(mqtt_client).publish(std::string("rack-solar/epever/status"), std::string("offline"), (uint8_t)0, true);
         }
+        // Reset initialization flag so interval-based availability also republishes
+        id(mqtt_init_complete) = false;
+        ESP_LOGI("mqtt", "Availability republished, init flag reset for interval handler");
     - delay: 500ms
     - lambda: |-
         id(publish_discovery).execute();
@@ -122,9 +120,8 @@ mqtt:
         payload: "Rack Solar Bridge - BLE Only version"
         retain: false
 
-  reboot_timeout: 0s
-
 api:
+  reboot_timeout: 0s
 
 ota:
   - platform: esphome
@@ -138,7 +135,7 @@ script:
           ESP_LOGI("mqtt", "Publishing HA Discovery configs...");
           char device_payload[256];
           snprintf(device_payload, sizeof(device_payload),
-            R"({"device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"}})");
+            R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})");
           char smartshunt_avail[128];
           snprintf(smartshunt_avail, sizeof(smartshunt_avail),
             "\"availability_topic\":\"rack-solar/smartshunt/status\",\"payload_available\":\"online\",\"payload_not_available\":\"offline\"");
@@ -841,6 +838,10 @@ globals:
     initial_value: '"WARN"'
     restore_value: false
 
+  - id: mqtt_init_complete
+    type: bool
+    initial_value: 'false'
+
   - id: last_smartshunt_online
     type: bool
     initial_value: 'false'
@@ -993,9 +994,8 @@ interval:
   - interval: 3s
     then:
       - lambda: |-
-          static bool initialized = false;
-          if (!initialized && id(mqtt_client).is_connected()) {
-            initialized = true;
+          if (!id(mqtt_init_complete) && id(mqtt_client).is_connected()) {
+            id(mqtt_init_complete) = true;
             if (id(smartshunt_stale)) {
               id(mqtt_client).publish(std::string("rack-solar/smartshunt/status"), std::string("offline"), (uint8_t)0, true);
             } else {
