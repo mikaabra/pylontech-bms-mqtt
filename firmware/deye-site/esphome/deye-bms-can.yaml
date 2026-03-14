@@ -657,6 +657,8 @@ script:
           ESP_LOGI("mqtt", "HA discovery complete (%d publishes)", publish_count);
 
 api:
+  reboot_timeout: 0s
+
 ota:
   - platform: esphome
     password: !secret ota_password
