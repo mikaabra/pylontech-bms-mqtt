@@ -196,12 +196,9 @@ mqtt:
         id(last_stack_overvolt_cells) = "\x01";
         id(last_stack_alarms) = "\x01";
 
-        // Only publish HA Discovery once per boot (not on every reconnect)
-        if (!id(discovery_sent)) {
-          id(publish_discovery).execute();
-        } else {
-          ESP_LOGI("mqtt", "Discovery already sent this boot, skipping");
-        }
+        // Always publish HA Discovery on MQTT connect
+        // This is required because MQTT broker may have lost retained messages during restart
+        id(publish_discovery).execute();
 
   reboot_timeout: 0s
 
@@ -652,8 +649,6 @@ script:
             pace_publish();
           }
 
-          // Mark discovery as sent - won't be repeated on reconnect
-          id(discovery_sent) = true;
           ESP_LOGI("mqtt", "HA discovery complete (%d publishes)", publish_count);
 
 api:
@@ -980,11 +975,6 @@ canbus:
 
 # Global variables
 globals:
-  # HA Discovery publish tracking - only publish once per boot
-  - id: discovery_sent
-    type: bool
-    initial_value: 'false'
-
   # Availability status tracking - publish only on transitions
   - id: last_can_status_online
     type: bool
@@ -2763,7 +2753,6 @@ button:
     on_press:
       - lambda: |-
           ESP_LOGI("mqtt", "Manual discovery re-publish requested");
-          id(discovery_sent) = false;
           id(publish_discovery).execute();
 
   - platform: template
