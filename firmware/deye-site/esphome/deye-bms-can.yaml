@@ -15,7 +15,7 @@ substitutions:
   can_prefix: deye_bms
   rs485_prefix: deye_bms/rs485
   # Number of batteries in stack
-  num_batteries: "3"
+  num_batteries: "5"
   # Pylontech RS485 address
   pylontech_addr: "2"
 
@@ -24,7 +24,7 @@ substitutions:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
-  min_version: "2026.1.0"
+  min_version: "2026.6.5"
   includes:
     - includes/set_include.h
   on_boot:
@@ -1314,12 +1314,12 @@ globals:
     type: int
     initial_value: '0'
 
-  # Cell voltages: 3 batteries x 16 cells = 48
+  # Cell voltages: 5 batteries x 16 cells = 80
   - id: cell_voltages
     type: std::vector<float>
     restore_value: no
 
-  # Temperatures: 3 batteries x 6 sensors = 18
+  # Temperatures: 5 batteries x 6 sensors = 30
   - id: cell_temps
     type: std::vector<float>
     restore_value: no
@@ -2646,6 +2646,16 @@ binary_sensor:
     name: "Battery 2 Poll Alarm"
     device_class: problem
     lambda: 'return id(batt_poll_alarm).size() > 2 ? id(batt_poll_alarm)[2] : false;'
+
+  - platform: template
+    name: "Battery 3 Poll Alarm"
+    device_class: problem
+    lambda: 'return id(batt_poll_alarm).size() > 3 ? id(batt_poll_alarm)[3] : false;'
+
+  - platform: template
+    name: "Battery 4 Poll Alarm"
+    device_class: problem
+    lambda: 'return id(batt_poll_alarm).size() > 4 ? id(batt_poll_alarm)[4] : false;'
 
   # CAN 0x359 Protection flags (device_class: problem for alerts)
   - platform: template
