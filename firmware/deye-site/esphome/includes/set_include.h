@@ -1,7 +1,5 @@
 #pragma once
-#include <set>
 #include <string>
-#include <sstream>
 #include <vector>
 #include <cstdint>
 #include <cstdarg>
@@ -63,7 +61,7 @@ inline std::string rs485_make_cmd(int addr, int cid2, int batt_num) {
 
 // CAN frame processing helper - common preamble for all CAN handlers
 // Returns true if frame is valid (expected_size), false if invalid
-inline bool can_frame_preamble(const std::vector<uint8_t>& x, int& frame_count, unsigned long& last_rx, bool& stale, int& error_count, size_t expected_size = 8) {
+inline bool can_frame_preamble(const std::vector<uint8_t>& x, int& frame_count, uint32_t& last_rx, bool& stale, int& error_count, size_t expected_size = 8) {
     frame_count++;
     last_rx = millis();
     if (stale) { stale = false; }

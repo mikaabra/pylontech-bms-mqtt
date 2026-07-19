@@ -168,6 +168,23 @@ mqtt:
         id(last_stack_cell_max) = -1.0f;
         id(last_stack_cell_delta) = -1.0f;
 
+        // Reset CAN tracking to force re-publish on reconnect
+        id(last_can_v_charge_max) = -1.0f;
+        id(last_can_v_low) = -1.0f;
+        id(last_can_i_charge) = -1.0f;
+        id(last_can_i_discharge) = -1.0f;
+        id(last_can_temp_min) = -999.0f;
+        id(last_can_temp_max) = -999.0f;
+        id(last_can_cell_v_min) = -1.0f;
+        id(last_can_cell_v_max) = -1.0f;
+        id(last_flags_value) = 0;
+        id(last_can_decoded_state) = 0;
+        id(last_can_charge_state) = 0xFF;
+        id(last_can_charge_publish) = 0;
+        for (size_t i = 0; i < id(last_batt_temps).size(); i++) {
+            id(last_batt_temps)[i] = -999.0f;
+        }
+
         for (int i = 0; i < ${num_batteries}; i++) {
             id(last_batt_voltages)[i] = -1.0f;
             id(last_batt_currents)[i] = -1.0f;
@@ -182,10 +199,10 @@ mqtt:
             id(last_batt_balancing_cells)[i] = "\x01";
             id(last_batt_overvolt_count)[i] = -1;
             id(last_batt_overvolt_cells)[i] = "\x01";
-            id(last_batt_charge_mosfet)[i] = false;
-            id(last_batt_discharge_mosfet)[i] = false;
-            id(last_batt_lmcharge_mosfet)[i] = false;
-            id(last_batt_cw_active)[i] = false;
+            id(last_batt_charge_mosfet)[i] = !id(batt_charge_mosfet)[i];
+            id(last_batt_discharge_mosfet)[i] = !id(batt_discharge_mosfet)[i];
+            id(last_batt_lmcharge_mosfet)[i] = !id(batt_lmcharge_mosfet)[i];
+            id(last_batt_cw_active)[i] = !id(batt_cw_active)[i];
             id(last_batt_cw_cells)[i] = "\x01";
             id(last_batt_cell_min)[i] = -1.0f;
             id(last_batt_cell_max)[i] = -1.0f;
@@ -2066,6 +2083,13 @@ interval:
             if (now - id(rs485_tx_time) > 1500) {
               int batt = id(rs485_alarm_batt);
               ESP_LOGW("rs485", "Batt %d alarm timeout", batt);
+              id(batt_poll_failures)[batt]++;
+              if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
+                id(batt_poll_alarm)[batt] = true;
+                char topic[64];
+                snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+                id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
+              }
               id(rs485_alarm_batt)++;
               if (id(rs485_alarm_batt) >= NUM_BATT) {
                 id(rs485_last_alarm_poll) = now;
