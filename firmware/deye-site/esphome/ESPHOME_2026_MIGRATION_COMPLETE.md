@@ -32,33 +32,23 @@ canbus:
 - ✅ Automatic updates with ESPHome releases
 - ✅ Better tested and more reliable
 
-### 2. ✅ CRC Implementation Upgrade
-**Before:** Custom software CRC16 implementation
-**After:** ESP-IDF hardware-accelerated `esp_crc16_le()`
+### 2. ✅ RS485 Checksum Implementation
+**Status:** Unchanged — Pylontech protocol uses a simple sum complement, not CRC16
 
 ```cpp
-// ✅ Before: Custom implementation
+// Pylontech RS485 checksum: sum all bytes, take two's complement of low 16 bits
 inline std::string rs485_calc_chksum(const std::string& frame) {
   uint32_t total = 0;
   for (char c : frame) total += (uint8_t)c;
   uint16_t chk = (~total + 1) & 0xFFFF;
   // ...
 }
-
-// ✅ After: Hardware-accelerated
-#include <esp_crc.h>
-
-inline std::string rs485_calc_chksum(const std::string& frame) {
-  uint16_t chk = esp_crc16_le(0xFFFF, (const uint8_t*)frame.data(), frame.length());
-  // ...
-}
 ```
 
-**Benefits:**
-- ✅ **10-50x faster** CRC calculations
-- ✅ Lower CPU usage
-- ✅ More reliable and tested
-- ✅ Consistent with ESP-IDF best practices
+**Note:** An earlier version of this document incorrectly claimed migration to
+ESP-IDF `esp_crc16_le()`. That was never done — the Pylontech RS485 protocol
+uses a simple additive checksum, not CRC16, so `esp_crc16_le()` would produce
+wrong results. The original implementation is correct and was retained.
 
 ### 3. ✅ CAN Frame Processing Optimization
 **Before:** Custom frame tracking with `std::set`/`std::map`
@@ -87,20 +77,11 @@ static uint32_t frame_counts[5] = {0};  // Fixed size, no dynamic allocation
 
 ## 📊 Performance Improvements
 
-### CRC Calculation Performance
+### Frame Tracking Memory
 | Metric | Before | After | Improvement |
 |--------|--------|-------|-------------|
-| **Algorithm** | Software | Hardware-accelerated | ✅ Better |
-| **Speed** | ~10µs/calc | ~0.2µs/calc | **50x faster** |
-| **CPU Usage** | High | Minimal | ✅ Reduced |
-| **Reliability** | Custom | ESP-IDF tested | ✅ More reliable |
-
-### Memory Usage Improvements
-| Component | Before | After | Savings |
-|-----------|--------|-------|---------|
-| **Frame Tracking** | `std::map` (dynamic) | Array (static) | ~500B |
-| **CRC Implementation** | Custom code | Library call | ~200B |
-| **Total Heap Impact** | Higher | Lower | **~700B saved** |
+| **Container** | `std::set` + `std::map` | Static arrays | ✅ Simpler |
+| **Allocation** | Dynamic | Static | ✅ No heap |
 
 ### Code Quality Metrics
 | Metric | Before | After | Improvement |
@@ -120,18 +101,20 @@ static uint32_t frame_counts[5] = {0};  // Fixed size, no dynamic allocation
    - ✅ Updated CAN configuration to use standard component
 
 2. **`includes/set_include.h`**
-   - ✅ Added `#include <esp_crc.h>`
-   - ✅ Replaced custom CRC with `esp_crc16_le()`
+   - ✅ Removed unused `#include <set>` and `#include <sstream>`
+   - ✅ Removed unused `Rs485BusyGuard` struct
    - ✅ Optimized `can_track_frame()` function
    - ✅ Improved `can_le_u16()` type safety
+   - ✅ Fixed `can_frame_preamble()` parameter type (`uint32_t` vs `unsigned long`)
 
 ### Functions Updated
 
 | Function | Change Type | Impact |
 |----------|-------------|--------|
-| `rs485_calc_chksum()` | ✅ Complete rewrite | Major performance improvement |
+| `rs485_calc_chksum()` | ✅ Unchanged | Correct as-is (sum complement, not CRC16) |
 | `can_track_frame()` | ✅ Algorithm optimization | Better memory usage |
 | `can_le_u16()` | ✅ Type safety improvement | More robust |
+| `can_frame_preamble()` | ✅ Type fix (`uint32_t`) | Correctness |
 | `can_frame_preamble()` | ✅ No changes needed | Already optimal |
 
 ## 🧪 Testing Results
@@ -144,7 +127,7 @@ INFO Configuration is valid! ✅
 
 ### Key Tests Performed
 - ✅ **CAN Component:** LISTENONLY mode works correctly
-- ✅ **CRC Calculation:** Hardware acceleration functional
+- ✅ **RS485 Checksum:** Sum complement calculation verified
 - ✅ **Frame Processing:** Optimized tracking operational
 - ✅ **Configuration:** ESPHome 2026.1.0 compliant
 - ✅ **Compilation:** Successful build with new components
@@ -160,10 +143,17 @@ static const uint32_t expected_frames[] = {0x351, 0x355, 0x359, 0x370, 0x35C, 0x
 static const size_t expected_count = sizeof(expected_frames) / sizeof(expected_frames[0]);
 ```
 
-#### 2. **Modifying CRC Parameters**
+#### 2. **Modifying RS485 Checksum**
+The Pylontech protocol uses a simple sum complement, not CRC16. Do not
+change to `esp_crc16_le()` — it will produce wrong checksums.
 ```cpp
-// Change initial CRC value if protocol requires
-uint16_t chk = esp_crc16_le(0x1234, (const uint8_t*)frame.data(), frame.length());
+// Current correct implementation:
+inline std::string rs485_calc_chksum(const std::string& frame) {
+  uint32_t total = 0;
+  for (char c : frame) total += (uint8_t)c;
+  uint16_t chk = (~total + 1) & 0xFFFF;
+  // ...
+}
 ```
 
 #### 3. **Adding New CAN Frame Handlers**
@@ -192,11 +182,18 @@ canbus:
 ### 🔧 Maintenance Benefits
 - **No custom component updates** needed
 - **Automatic ESPHome updates** work seamlessly
+### 🚀 Performance Benefits
+- **Reduced memory usage** (static arrays vs dynamic containers)
+- **Lower CPU load** (optimized algorithms)
+- **Better real-time response** (faster frame processing)
+
+### 🔧 Maintenance Benefits
+- **No custom component updates** needed
+- **Automatic ESPHome updates** work seamlessly
 - **Easier troubleshooting** (standard components)
 - **Better community support** (standard ecosystem)
 
 ### 🛡️ Reliability Benefits
-- **Tested ESP-IDF libraries** (more reliable than custom code)
 - **Standard ESPHome components** (better error handling)
 - **Reduced code complexity** (fewer bugs)
 - **Improved error recovery** (built-in mechanisms)
@@ -215,8 +212,6 @@ graph TD
     A[Custom Components] --> B[Manual Maintenance]
     B --> C[Update Challenges]
     C --> D[Compatibility Issues]
-    A --> E[Custom CRC]
-    E --> F[Performance Bottlenecks]
 ```
 
 ### After Migration
@@ -224,10 +219,8 @@ graph TD
 graph TD
     A[Standard Components] --> B[Automatic Updates]
     B --> C[Seamless Upgrades]
-    A --> D[Hardware CRC]
-    D --> E[Optimal Performance]
-    A --> F[ESPHome Ecosystem]
-    F --> G[Better Integration]
+    A --> D[ESPHome Ecosystem]
+    D --> E[Better Integration]
 ```
 
 ## 🎉 Conclusion
@@ -236,9 +229,8 @@ The migration to ESPHome 2026.1.0 has been **completely successful**, achieving 
 
 ### ✅ **Primary Goals Accomplished**
 1. **Eliminated custom CAN component** - Using standard `esp32_can`
-2. **Upgraded CRC implementation** - Hardware-accelerated performance
-3. **Optimized frame processing** - Better memory and CPU usage
-4. **Maintained full functionality** - All features preserved
+2. **Optimized frame processing** - Better memory and CPU usage
+3. **Maintained full functionality** - All features preserved
 
 ### ✅ **Secondary Benefits Achieved**
 1. **Improved code quality** - More maintainable and reliable
@@ -257,7 +249,6 @@ The system is now **production-ready** with the ESPHome 2026.1.0 migration, prov
 ## 📋 Checklist for Deployment
 
 - [x] **CAN component migration** - Complete
-- [x] **CRC implementation upgrade** - Complete
 - [x] **Frame processing optimization** - Complete
 - [x] **Configuration validation** - Complete
 - [x] **Documentation creation** - Complete
