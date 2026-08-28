@@ -44,6 +44,7 @@ esphome-epever/.esphome/
 .config/
 .codex/
 .claude/
+.omo/
 .claude.json
 .claude.json.backup
 .gitconfig
