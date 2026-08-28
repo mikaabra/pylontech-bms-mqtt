@@ -24,7 +24,7 @@ substitutions:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
-  min_version: "2026.6.5"
+  min_version: "2026.8.1"
   includes:
     - includes/set_include.h
   on_boot:
@@ -105,7 +105,7 @@ wifi:
 
   ap:
     ssid: "${device_name}-fallback"
-    password: "fallback123"
+    password: !secret captive_portal_password
 
 captive_portal:
 
@@ -763,11 +763,11 @@ canbus:
       - can_id: 0x355
         then:
           - lambda: |-
-              if (!can_frame_preamble(x, id(can_frame_count), id(last_can_rx), id(can_stale), id(can_error_count))) {
+              if (!can_frame_preamble(x, id(can_frame_count), id(last_can_rx), id(can_stale), id(can_error_count), 4)) {
                 return;
               }
               can_track_frame(0x355, true);
-              
+
               // Check for recovery from stale state
               can_handle_stale_recovery(id(can_stale), id(mqtt_client), "${can_prefix}", id(last_can_status_online));
 
@@ -1150,7 +1150,7 @@ globals:
     initial_value: '0'
   - id: can_stale
     type: bool
-    initial_value: 'false'
+    initial_value: 'true'  # Start as stale until first CAN frame received
 
   # Flags hysteresis (text_sensor doesn't support filters)
   - id: last_flags_value
@@ -1328,11 +1328,6 @@ globals:
   - id: rs485_stale
     type: bool
     initial_value: 'true'  # Start as stale until first successful receive
-
-  # RS485 polling state
-  - id: rs485_poll_battery
-    type: int
-    initial_value: '0'
 
   # Cell voltages: 5 batteries x 16 cells = 80
   - id: cell_voltages
@@ -1873,6 +1868,13 @@ interval:
                 // Buffer overflow - clear, drain UART, set discard flag
                 int batt = id(rs485_alarm_batt);
                 ESP_LOGW("rs485", "Batt %d alarm buffer overflow, draining UART", batt);
+                id(batt_poll_failures)[batt]++;
+                if (id(batt_poll_failures)[batt] >= 10 && !id(batt_poll_alarm)[batt]) {
+                  id(batt_poll_alarm)[batt] = true;
+                  char topic[64];
+                  snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/poll_alarm", batt);
+                  id(mqtt_client).publish(std::string(topic), std::string("ON"), (uint8_t)0, true);
+                }
                 id(rs485_response_buf).clear();
                 // Drain up to 256 bytes from UART
                 for (int drain = 0; drain < 256 && id(rs485_uart).available(); drain++) {
@@ -2668,7 +2670,7 @@ text_sensor:
     id: sensor_can_alarm_summary
     name: "CAN Alarm Summary"
     icon: "mdi:alert"
-    update_interval: never  # Changed from 10s to never (on-change only)
+    update_interval: 10s
     lambda: |-
       std::string alarms;
       // Protection flags (critical)

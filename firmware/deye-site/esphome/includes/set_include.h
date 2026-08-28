@@ -60,15 +60,15 @@ inline std::string rs485_make_cmd(int addr, int cid2, int batt_num) {
 }
 
 // CAN frame processing helper - common preamble for all CAN handlers
-// Returns true if frame is valid (expected_size), false if invalid
-inline bool can_frame_preamble(const std::vector<uint8_t>& x, int& frame_count, uint32_t& last_rx, bool& stale, int& error_count, size_t expected_size = 8) {
+// Returns true if frame is valid (at least min_size bytes), false if invalid
+inline bool can_frame_preamble(const std::vector<uint8_t>& x, int& frame_count, uint32_t& last_rx, bool& stale, int& error_count, size_t min_size = 8) {
     frame_count++;
     last_rx = millis();
     if (stale) { stale = false; }
 
-    if (x.size() != expected_size) { 
+    if (x.size() < min_size) { 
         error_count++;
-        ESP_LOGW("can", "Invalid CAN frame size: expected %zu bytes, got %zu bytes", expected_size, x.size());
+        ESP_LOGW("can", "Invalid CAN frame size: expected at least %zu bytes, got %zu bytes", min_size, x.size());
         return false;
     }
     return true;
