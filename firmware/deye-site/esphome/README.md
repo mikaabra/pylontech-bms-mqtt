@@ -30,7 +30,7 @@ This directory contains the ESPHome configuration to replace both `pylon_can2mqt
 
 - `deye-bms-can.yaml` - Main ESPHome configuration
 - `secrets.yaml` - WiFi/MQTT credentials (edit before flashing)
-- `custom_components/esp32_can_listen/` - Custom CAN component with listen-only mode
+- `includes/set_include.h` - Shared C++ helper functions
 
 ## Runtime Debug Logging
 
@@ -61,9 +61,9 @@ The system includes a **runtime debug logging toggle** feature that allows you t
 ### CAN Bus Listen-Only Mode
 
 The ESP32 must operate in **listen-only mode** on the CAN bus to avoid interfering with
-the existing BMS-to-inverter communication. Standard ESPHome `esp32_can` component doesn't
-support this, so we use a custom component (`esp32_can_listen`) that sets the ESP-IDF
-TWAI driver to `TWAI_MODE_LISTEN_ONLY`.
+the existing BMS-to-inverter communication. The standard ESPHome `esp32_can` component
+supports this via `mode: LISTENONLY`, which sets the ESP-IDF TWAI driver to
+`TWAI_MODE_LISTEN_ONLY`.
 
 **Why this matters**: Without listen-only mode, the ESP32 sends ACK signals on the CAN bus,
 which can cause the inverter to think batteries are offline or behave erratically.
@@ -376,8 +376,7 @@ esphome/
 ├── secrets.yaml               # WiFi/MQTT credentials (not in git)
 ├── includes/
 │   └── set_include.h          # Shared C++ helper functions
-└── custom_components/
-    └── esp32_can_listen/      # Custom CAN component for listen-only mode
+└── upstream-pr/               # ESPHome PR for esp32_can listen-only mode
 ```
 
 ### Helper Functions (includes/set_include.h)

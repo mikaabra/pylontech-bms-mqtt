@@ -60,15 +60,15 @@ inline std::string rs485_make_cmd(int addr, int cid2, int batt_num) {
 }
 
 // CAN frame processing helper - common preamble for all CAN handlers
-// Returns true if frame is valid (expected_size), false if invalid
-inline bool can_frame_preamble(const std::vector<uint8_t>& x, int& frame_count, uint32_t& last_rx, bool& stale, int& error_count, size_t expected_size = 8) {
+// Returns true if frame is valid (at least min_size bytes), false if invalid
+inline bool can_frame_preamble(const std::vector<uint8_t>& x, int& frame_count, uint32_t& last_rx, bool& stale, int& error_count, size_t min_size = 8) {
     frame_count++;
     last_rx = millis();
     if (stale) { stale = false; }
 
-    if (x.size() != expected_size) { 
+    if (x.size() < min_size) { 
         error_count++;
-        ESP_LOGW("can", "Invalid CAN frame size: expected %zu bytes, got %zu bytes", expected_size, x.size());
+        ESP_LOGW("can", "Invalid CAN frame size: expected at least %zu bytes, got %zu bytes", min_size, x.size());
         return false;
     }
     return true;
@@ -211,4 +211,56 @@ inline std::string build_stack_cells_string(const std::vector<std::string>& batt
     }
   }
   return result;
+}
+
+// Build a Home Assistant MQTT discovery sensor JSON payload with conditional fields.
+// Handles all 8 combinations of unit_of_measurement, device_class, and state_class presence.
+// Returns true if payload was built successfully, false if truncated.
+inline bool build_ha_sensor_payload(
+    char* buf, size_t buf_size,
+    const char* name, const char* state_topic, const char* unique_id,
+    const char* unit, const char* device_class, const char* state_class,
+    const char* avail_json, const char* device_json) {
+  bool has_unit = strlen(unit) > 0;
+  bool has_dc = strlen(device_class) > 0;
+  bool has_sc = strlen(state_class) > 0;
+
+  if (has_unit && has_dc && has_sc) {
+    return safe_snprintf(buf, buf_size,
+      R"({"name":"%s","state_topic":"%s","unique_id":"%s","unit_of_measurement":"%s","device_class":"%s","state_class":"%s",%s,%s})",
+      name, state_topic, unique_id, unit, device_class, state_class, avail_json, device_json);
+  }
+  if (has_unit && has_dc) {
+    return safe_snprintf(buf, buf_size,
+      R"({"name":"%s","state_topic":"%s","unique_id":"%s","unit_of_measurement":"%s","device_class":"%s",%s,%s})",
+      name, state_topic, unique_id, unit, device_class, avail_json, device_json);
+  }
+  if (has_unit && has_sc) {
+    return safe_snprintf(buf, buf_size,
+      R"({"name":"%s","state_topic":"%s","unique_id":"%s","unit_of_measurement":"%s","state_class":"%s",%s,%s})",
+      name, state_topic, unique_id, unit, state_class, avail_json, device_json);
+  }
+  if (has_unit) {
+    return safe_snprintf(buf, buf_size,
+      R"({"name":"%s","state_topic":"%s","unique_id":"%s","unit_of_measurement":"%s",%s,%s})",
+      name, state_topic, unique_id, unit, avail_json, device_json);
+  }
+  if (has_dc && has_sc) {
+    return safe_snprintf(buf, buf_size,
+      R"({"name":"%s","state_topic":"%s","unique_id":"%s","device_class":"%s","state_class":"%s",%s,%s})",
+      name, state_topic, unique_id, device_class, state_class, avail_json, device_json);
+  }
+  if (has_dc) {
+    return safe_snprintf(buf, buf_size,
+      R"({"name":"%s","state_topic":"%s","unique_id":"%s","device_class":"%s",%s,%s})",
+      name, state_topic, unique_id, device_class, avail_json, device_json);
+  }
+  if (has_sc) {
+    return safe_snprintf(buf, buf_size,
+      R"({"name":"%s","state_topic":"%s","unique_id":"%s","state_class":"%s",%s,%s})",
+      name, state_topic, unique_id, state_class, avail_json, device_json);
+  }
+  return safe_snprintf(buf, buf_size,
+    R"({"name":"%s","state_topic":"%s","unique_id":"%s",%s,%s})",
+    name, state_topic, unique_id, avail_json, device_json);
 }

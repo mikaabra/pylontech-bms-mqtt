@@ -7,7 +7,7 @@ The Deye BMS CAN Bridge is an ESP32-based monitoring system that reads battery d
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
 │                    Pylontech Battery Stack                           │
-│                  (3× US3000C in parallel = 840Ah)                    │
+│                  (5× US3000C in parallel = 1400Ah)                    │
 │                                                                       │
 │                  ┌──────────────────────┐                            │
 │                  │   Battery BMS        │                            │
@@ -96,7 +96,7 @@ The Deye BMS CAN Bridge is an ESP32-based monitoring system that reads battery d
 - **Mode**: Half-duplex master (polls batteries sequentially)
 - **Bitrate**: 9600 baud, 8N1
 - **Protocol**: Pylontech RS485 ASCII protocol
-- **Addressing**: Battery addresses 1-3 (configurable via `num_batteries`)
+- **Addressing**: Battery addresses 0-4 (configurable via `num_batteries`)
 
 ### 3. CAN Protocol Decoder
 Parses incoming CAN frames and extracts:
@@ -290,13 +290,13 @@ The ESP32 publishes sensor data to the same MQTT topics as the original Python s
 
 ## Configuration Examples
 
-### Example 1: 3-Battery Stack (Default)
+### Example 1: 5-Battery Stack (Default)
 ```yaml
 substitutions:
-  num_batteries: "3"
+  num_batteries: "5"
   pylontech_addr: "2"
 ```
-**Result**: Monitors 3 batteries × 16 cells = 48 cell voltages
+**Result**: Monitors 5 batteries × 16 cells = 80 cell voltages
 
 ### Example 2: Single Battery
 ```yaml
@@ -333,14 +333,12 @@ substitutions:
 - Alarm/warning status
 - MOSFET states (charge, discharge, limiting)
 
-**Total for 3 batteries**: ~120+ sensors
+**Total for 5 batteries**: ~200+ sensors
 
 ## Related Documentation
 
 - **LLD.md**: Low-level technical implementation details
 - **README.md**: Quick start and troubleshooting
-- **PROTOCOL_REFERENCE.md**: CAN and RS485 protocol specifications
-- **docs/guides/TROUBLESHOOTING.md**: Common issues and solutions
 
 ## Future Enhancements
 
