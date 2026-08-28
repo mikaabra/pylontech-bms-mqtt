@@ -261,15 +261,21 @@ public:
 
     void check_stale() {
         uint32_t now = millis();
+
+        if (last_can_rx_ == 0) {
+            if (!availability_.stale) availability_.mark_stale(esphome::mqtt::global_mqtt_client);
+            return;
+        }
+
         uint32_t elapsed = now - last_can_rx_;
 
-        if (elapsed > 30000 && !availability_.stale && last_can_rx_ > 0) {
+        if (elapsed > 30000 && !availability_.stale) {
             availability_.mark_stale(esphome::mqtt::global_mqtt_client);
             received_0x359_ = false;
             received_0x35C_ = false;
         }
 
-        if (!availability_.stale && last_can_rx_ > 0) {
+        if (!availability_.stale) {
             if (now - last_status_heartbeat_ >= 600000) {
                 esphome::mqtt::global_mqtt_client->publish(can_prefix_ + "/status", std::string("online"), (uint8_t)0, true);
                 last_status_heartbeat_ = now;

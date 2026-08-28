@@ -109,19 +109,29 @@ canbus:
     on_frame:
       - can_id: 0x351
         then:
-          - lambda: ((PylontechCAN*)id(pylontech_can))->handle_0x351(x);
+          - lambda: |-
+              if (!id(pylontech_can)) return;
+              ((PylontechCAN*)id(pylontech_can))->handle_0x351(x);
       - can_id: 0x355
         then:
-          - lambda: ((PylontechCAN*)id(pylontech_can))->handle_0x355(x);
+          - lambda: |-
+              if (!id(pylontech_can)) return;
+              ((PylontechCAN*)id(pylontech_can))->handle_0x355(x);
       - can_id: 0x359
         then:
-          - lambda: ((PylontechCAN*)id(pylontech_can))->handle_0x359(x);
+          - lambda: |-
+              if (!id(pylontech_can)) return;
+              ((PylontechCAN*)id(pylontech_can))->handle_0x359(x);
       - can_id: 0x35C
         then:
-          - lambda: ((PylontechCAN*)id(pylontech_can))->handle_0x35C(x);
+          - lambda: |-
+              if (!id(pylontech_can)) return;
+              ((PylontechCAN*)id(pylontech_can))->handle_0x35C(x);
       - can_id: 0x370
         then:
-          - lambda: ((PylontechCAN*)id(pylontech_can))->handle_0x370(x);
+          - lambda: |-
+              if (!id(pylontech_can)) return;
+              ((PylontechCAN*)id(pylontech_can))->handle_0x370(x);
 
 globals:
   - id: pylontech_can
@@ -139,17 +149,26 @@ globals:
   - id: mqtt_was_connected
     type: bool
     initial_value: 'false'
+  - id: mqtt_disconnect_count
+    type: int
+    initial_value: '0'
 
 interval:
   - interval: 3s
     then:
       - lambda: |-
+          if (!id(pylontech_can) || !id(pylontech_rs485)) return;
           bool connected = id(mqtt_client).is_connected();
-          if (!connected && id(mqtt_was_connected)) {
-            id(discovery_published) = false;
-            id(mqtt_was_connected) = false;
+          if (connected) {
+            id(mqtt_was_connected) = true;
+            id(mqtt_disconnect_count) = 0;
+          } else if (id(mqtt_was_connected)) {
+            id(mqtt_disconnect_count)++;
+            if (id(mqtt_disconnect_count) >= 2) {
+              id(discovery_published) = false;
+              id(mqtt_was_connected) = false;
+            }
           }
-          if (connected) id(mqtt_was_connected) = true;
           if (!id(discovery_published) && connected) {
             id(discovery_published) = true;
             ESP_LOGI("mqtt", "Publishing discovery...");
@@ -158,16 +177,23 @@ interval:
           }
   - interval: 5s
     then:
-      - lambda: ((PylontechCAN*)id(pylontech_can))->check_stale();
+      - lambda: |-
+          if (!id(pylontech_can)) return;
+          ((PylontechCAN*)id(pylontech_can))->check_stale();
   - interval: 10s
     then:
-      - lambda: ((PylontechCAN*)id(pylontech_can))->publish_diagnostics();
+      - lambda: |-
+          if (!id(pylontech_can)) return;
+          ((PylontechCAN*)id(pylontech_can))->publish_diagnostics();
   - interval: 50ms
     then:
-      - lambda: ((PylontechRS485*)id(pylontech_rs485))->tick();
+      - lambda: |-
+          if (!id(pylontech_rs485)) return;
+          ((PylontechRS485*)id(pylontech_rs485))->tick();
   - interval: 30s
     then:
       - lambda: |-
+          if (!id(pylontech_rs485)) return;
           ((PylontechRS485*)id(pylontech_rs485))->publish_data();
           ((PylontechRS485*)id(pylontech_rs485))->check_stale();
 
@@ -216,6 +242,7 @@ button:
     entity_category: config
     on_press:
       - lambda: |-
+          if (!id(pylontech_can) || !id(pylontech_rs485)) return;
           ((PylontechCAN*)id(pylontech_can))->publish_discovery();
           ((PylontechRS485*)id(pylontech_rs485))->publish_discovery();
 

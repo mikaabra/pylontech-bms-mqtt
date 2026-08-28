@@ -557,8 +557,12 @@ public:
 
     void check_stale() {
         uint32_t now = millis();
+        if (last_rx_ == 0) {
+            if (!availability_.stale) availability_.mark_stale(esphome::mqtt::global_mqtt_client);
+            return;
+        }
         uint32_t elapsed = now - last_rx_;
-        if (elapsed > 90000 && !availability_.stale && last_rx_ > 0) {
+        if (elapsed > 90000 && !availability_.stale) {
             availability_.mark_stale(esphome::mqtt::global_mqtt_client);
         }
     }
