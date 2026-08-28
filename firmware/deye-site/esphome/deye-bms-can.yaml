@@ -61,6 +61,8 @@ esphome:
           id(batt_cw_cells).resize(num_batt, std::string(""));
           id(batt_poll_failures).resize(num_batt, 0);
           id(batt_poll_alarm).resize(num_batt, false);
+          id(batt_has_analog).resize(num_batt, false);
+          id(batt_has_alarm).resize(num_batt, false);
           // Initialize temperature hysteresis tracking (6 temps per battery, use -999 as invalid)
           id(last_batt_temps).resize(6 * num_batt, -999.0f);
           
@@ -192,7 +194,7 @@ mqtt:
             id(last_batt_socs)[i] = -1.0f;
             id(last_batt_remain_ah)[i] = -1.0f;
             id(last_batt_total_ah)[i] = -1.0f;
-            id(last_batt_states)[i] = "\x01";  // Sentinel to force publish
+            id(last_batt_states)[i] = "\x01";
             id(last_batt_warnings)[i] = "\x01";
             id(last_batt_alarms)[i] = "\x01";
             id(last_batt_cycles)[i] = -1;
@@ -209,7 +211,6 @@ mqtt:
             id(last_batt_cell_max)[i] = -1.0f;
             id(last_batt_cell_delta)[i] = -1.0f;
         }
-        // Reset stack string fields with sentinel
         id(last_stack_balancing_cells) = "\x01";
         id(last_stack_overvolt_cells) = "\x01";
         id(last_stack_alarms) = "\x01";
@@ -264,41 +265,12 @@ script:
 
           for (int i = 0; i < 12; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", stack_sensors[i][0]);
-            bool ok = false;
-            if (strlen(stack_sensors[i][3]) > 0 && strlen(stack_sensors[i][4]) > 0 && strlen(stack_sensors[i][5]) > 0) {
-              ok = safe_snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"%s",%s,%s})",
-                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], stack_sensors[i][4], stack_sensors[i][5], avail_json, device_json);
-            } else if (strlen(stack_sensors[i][3]) > 0 && strlen(stack_sensors[i][4]) > 0) {
-              ok = safe_snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s",%s,%s})",
-                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], stack_sensors[i][4], avail_json, device_json);
-            } else if (strlen(stack_sensors[i][3]) > 0 && strlen(stack_sensors[i][5]) > 0) {
-              ok = safe_snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"%s",%s,%s})",
-                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], stack_sensors[i][5], avail_json, device_json);
-            } else if (strlen(stack_sensors[i][3]) > 0) {
-              ok = safe_snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s",%s,%s})",
-                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][3], avail_json, device_json);
-            } else if (strlen(stack_sensors[i][4]) > 0 && strlen(stack_sensors[i][5]) > 0) {
-              ok = safe_snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","device_class":"%s","state_class":"%s",%s,%s})",
-                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][4], stack_sensors[i][5], avail_json, device_json);
-            } else if (strlen(stack_sensors[i][4]) > 0) {
-              ok = safe_snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","device_class":"%s",%s,%s})",
-                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][4], avail_json, device_json);
-            } else if (strlen(stack_sensors[i][5]) > 0) {
-              ok = safe_snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","state_class":"%s",%s,%s})",
-                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], stack_sensors[i][5], avail_json, device_json);
-            } else {
-              ok = safe_snprintf(payload, sizeof(payload),
-                R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s",%s,%s})",
-                stack_sensors[i][1], stack_sensors[i][2], stack_sensors[i][0], avail_json, device_json);
-            }
-            if (ok) {
+            char uid[64];
+            snprintf(uid, sizeof(uid), "pylontech_rs485_%s", stack_sensors[i][0]);
+            if (build_ha_sensor_payload(payload, sizeof(payload),
+                stack_sensors[i][1], stack_sensors[i][2], uid,
+                stack_sensors[i][3], stack_sensors[i][4], stack_sensors[i][5],
+                avail_json, device_json)) {
               id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
               pace_publish();
             }
@@ -349,51 +321,20 @@ script:
             };
 
             for (int i = 0; i < 17; i++) {
-              char obj_id[32], name[48], st[64];
+              char obj_id[32], name[48], st[64], uid[64];
               snprintf(obj_id, sizeof(obj_id), "%s_%s", prefix, batt_sensor_names[i][0]);
               snprintf(name, sizeof(name), "Battery %d %s", batt, batt_sensor_names[i][1]);
               snprintf(st, sizeof(st), "%s/%s", state_prefix, batt_sensor_names[i][0]);
-              // Fix topic names for cell_delta
               if (strcmp(batt_sensor_names[i][0], "cell_delta") == 0) {
                 snprintf(st, sizeof(st), "%s/cell_delta_mv", state_prefix);
               }
+              snprintf(uid, sizeof(uid), "pylontech_rs485_%s", obj_id);
 
               snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
-              bool ok = false;
-              if (strlen(batt_sensor_names[i][2]) > 0 && strlen(batt_sensor_names[i][3]) > 0 && strlen(batt_sensor_names[i][4]) > 0) {
-                ok = safe_snprintf(payload, sizeof(payload),
-                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s","state_class":"%s",%s,%s})",
-                  name, st, obj_id, batt_sensor_names[i][2], batt_sensor_names[i][3], batt_sensor_names[i][4], avail_json, device_json);
-              } else if (strlen(batt_sensor_names[i][2]) > 0 && strlen(batt_sensor_names[i][3]) > 0) {
-                ok = safe_snprintf(payload, sizeof(payload),
-                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","device_class":"%s",%s,%s})",
-                  name, st, obj_id, batt_sensor_names[i][2], batt_sensor_names[i][3], avail_json, device_json);
-              } else if (strlen(batt_sensor_names[i][2]) > 0 && strlen(batt_sensor_names[i][4]) > 0) {
-                ok = safe_snprintf(payload, sizeof(payload),
-                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s","state_class":"%s",%s,%s})",
-                  name, st, obj_id, batt_sensor_names[i][2], batt_sensor_names[i][4], avail_json, device_json);
-              } else if (strlen(batt_sensor_names[i][2]) > 0) {
-                ok = safe_snprintf(payload, sizeof(payload),
-                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","unit_of_measurement":"%s",%s,%s})",
-                  name, st, obj_id, batt_sensor_names[i][2], avail_json, device_json);
-              } else if (strlen(batt_sensor_names[i][3]) > 0 && strlen(batt_sensor_names[i][4]) > 0) {
-                ok = safe_snprintf(payload, sizeof(payload),
-                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","device_class":"%s","state_class":"%s",%s,%s})",
-                  name, st, obj_id, batt_sensor_names[i][3], batt_sensor_names[i][4], avail_json, device_json);
-              } else if (strlen(batt_sensor_names[i][3]) > 0) {
-                ok = safe_snprintf(payload, sizeof(payload),
-                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","device_class":"%s",%s,%s})",
-                  name, st, obj_id, batt_sensor_names[i][3], avail_json, device_json);
-              } else if (strlen(batt_sensor_names[i][4]) > 0) {
-                ok = safe_snprintf(payload, sizeof(payload),
-                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s","state_class":"%s",%s,%s})",
-                  name, st, obj_id, batt_sensor_names[i][4], avail_json, device_json);
-              } else {
-                ok = safe_snprintf(payload, sizeof(payload),
-                  R"({"name":"%s","state_topic":"%s","unique_id":"pylontech_rs485_%s",%s,%s})",
-                  name, st, obj_id, avail_json, device_json);
-              }
-              if (ok) {
+              if (build_ha_sensor_payload(payload, sizeof(payload),
+                  name, st, uid,
+                  batt_sensor_names[i][2], batt_sensor_names[i][3], batt_sensor_names[i][4],
+                  avail_json, device_json)) {
                 id(mqtt_client).publish(std::string(topic), std::string(payload), (uint8_t)0, true);
                 pace_publish();
               }
@@ -1436,6 +1377,15 @@ globals:
     type: std::vector<bool>
     restore_value: no
 
+  # Per-battery "has received valid data" flags — prevents publishing
+  # zero/empty defaults before the first successful RS485 poll completes
+  - id: batt_has_analog
+    type: std::vector<bool>
+    restore_value: no
+  - id: batt_has_alarm
+    type: std::vector<bool>
+    restore_value: no
+
 # Intervals for stale detection and RS485 polling
 interval:
   # CAN stale detection and availability heartbeat
@@ -1739,6 +1689,7 @@ interval:
 
                   // Mark online
                   id(last_rs485_rx) = now;
+                  id(batt_has_analog)[batt] = true;
                   if (id(rs485_stale)) {
                     id(rs485_stale) = false;
                     if (!id(last_rs485_status_online)) {
@@ -1914,6 +1865,7 @@ interval:
 
                 std::string error = rs485_validate_response(response, ADDR);
                 if (error.empty() && response.length() > 18) {
+                  id(batt_has_alarm)[batt] = true;
                   std::string data = response.substr(13, response.length() - 13 - 5);
                   if (data.length() >= 40) {
                     // Parse alarm data (same logic as before, condensed)
@@ -2154,23 +2106,19 @@ interval:
               id(last_batt_cell_min)[i] = -1.0f;
               id(last_batt_cell_max)[i] = -1.0f;
               id(last_batt_cell_delta)[i] = -1.0f;
-              // Force string/bool fields by resetting to impossible values
               id(last_batt_balancing_count)[i] = -1;
               id(last_batt_overvolt_count)[i] = -1;
-              // Reset string fields with sentinel to force publish
               id(last_batt_states)[i] = "\x01";
               id(last_batt_warnings)[i] = "\x01";
               id(last_batt_alarms)[i] = "\x01";
               id(last_batt_balancing_cells)[i] = "\x01";
               id(last_batt_overvolt_cells)[i] = "\x01";
               id(last_batt_cw_cells)[i] = "\x01";
-              // Force MOSFET and CW active re-publish (bool fields use inverted sentinel)
               id(last_batt_charge_mosfet)[i] = !id(batt_charge_mosfet)[i];
               id(last_batt_discharge_mosfet)[i] = !id(batt_discharge_mosfet)[i];
               id(last_batt_lmcharge_mosfet)[i] = !id(batt_lmcharge_mosfet)[i];
               id(last_batt_cw_active)[i] = !id(batt_cw_active)[i];
             }
-            // Also reset stack string fields
             id(last_stack_balancing_cells) = "\x01";
             id(last_stack_overvolt_cells) = "\x01";
             id(last_stack_alarms) = "\x01";
@@ -2217,10 +2165,12 @@ interval:
               stack_voltage += id(batt_voltage)[batt];
               valid_batts++;
             }
-            stack_current += id(batt_current)[batt];
+            if (id(batt_has_analog)[batt]) {
+              stack_current += id(batt_current)[batt];
+            }
 
             // Publish per-battery data with hysteresis
-            if (batt_min < 99.0f) {
+            if (id(batt_has_analog)[batt] && batt_min < 99.0f) {
               // Cell min/max/delta with 5mV hysteresis
               if (id(last_batt_cell_min)[batt] < 0 || fabsf(batt_min - id(last_batt_cell_min)[batt]) >= 0.005f) {
                 snprintf(topic, sizeof(topic), "${rs485_prefix}/battery%d/cell_min", batt);
@@ -2289,10 +2239,10 @@ interval:
                 id(last_batt_cycles)[batt] = id(batt_cycles)[batt];
               }
 
-            } // end if (batt_min < 99.0f) — analog-poll-derived data
+            } // end if (batt_has_analog) — analog-poll-derived data
 
-            // Alarm-poll-derived data: publish regardless of cell voltage availability.
-            // These come from CID 0x44 (alarm poll), not CID 0x42 (analog poll).
+            // Alarm-poll-derived data: only publish after first successful alarm poll
+            if (id(batt_has_alarm)[batt]) {
 
             // Balancing with change detection
             if (id(batt_balancing_count)[batt] != id(last_batt_balancing_count)[batt] ||
@@ -2371,8 +2321,10 @@ interval:
               id(last_batt_cw_cells)[batt] = id(batt_cw_cells)[batt];
             }
 
-            // Individual cell voltages and temperatures — analog-poll-derived, gate on valid data
-            if (batt_min < 99.0f) {
+            } // end alarm-poll-derived data
+
+            // Individual cell voltages and temperatures — analog-poll-derived
+            if (id(batt_has_analog)[batt] && batt_min < 99.0f) {
               // Individual cell voltages with 10mV hysteresis
               for (int cell = 0; cell < 16; cell++) {
                 float v = id(cell_voltages)[batt * 16 + cell];
@@ -2750,6 +2702,8 @@ binary_sensor:
     lambda: 'return id(can_force_charge_request);'
 
   # Per-battery poll alarms (10 consecutive failures)
+  # NOTE: Must be manually updated when num_batteries changes — ESPHome
+  # template binary_sensor platform doesn't support dynamic generation
   - platform: template
     name: "Battery 0 Poll Alarm"
     device_class: problem
