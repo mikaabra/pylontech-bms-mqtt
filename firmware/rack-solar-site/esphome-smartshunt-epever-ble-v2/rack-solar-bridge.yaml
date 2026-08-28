@@ -15,7 +15,7 @@ esphome:
     - ../../shared/esphome/hysteresis.h
     - ../../shared/esphome/availability.h
     - includes/smartshunt_ble_handler.h
-    - includes/epever_handler.h
+    - ../../shared/esphome/epever_handler.h
   on_boot:
     priority: -100
     then:
@@ -115,7 +115,9 @@ victron_ble:
     bindkey: !secret smartshunt_ble_bindkey
     on_battery_monitor_message:
       then:
-        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->on_ble_message();
+        - lambda: |-
+            if (!id(handler_sm)) return;
+            ((SmartShuntBLEHandler*)id(handler_sm))->on_ble_message();
 
 globals:
   - id: handler_sm
@@ -133,6 +135,9 @@ globals:
   - id: mqtt_was_connected
     type: bool
     initial_value: 'false'
+  - id: mqtt_disconnect_count
+    type: int
+    initial_value: '0'
   - id: rs485_crc_errors
     type: uint32_t
     initial_value: '0'
@@ -168,6 +173,7 @@ text_sensor:
     icon: "mdi:connection"
     entity_category: diagnostic
     lambda: |-
+      if (!id(handler_sm)) return std::string("INIT");
       return ((SmartShuntBLEHandler*)id(handler_sm))->is_stale() ? std::string("STALE") : std::string("OK");
     on_value:
       then:
@@ -187,6 +193,7 @@ text_sensor:
     icon: "mdi:connection"
     entity_category: diagnostic
     lambda: |-
+      if (!id(handler_ep)) return std::string("INIT");
       return ((EPEverHandler*)id(handler_ep))->is_stale() ? std::string("STALE") : std::string("OK");
     on_value:
       then:
@@ -205,6 +212,7 @@ text_sensor:
     update_interval: 5s
     entity_category: diagnostic
     lambda: |-
+      if (!id(handler_sm)) return std::string("INITIALIZING");
       return std::string(((SmartShuntBLEHandler*)id(handler_sm))->get_ble_connection_status());
     on_value:
       then:
@@ -328,7 +336,7 @@ sensor:
     state_topic: null
     unit_of_measurement: "msgs"
     state_class: measurement
-    lambda: 'return (float)((SmartShuntBLEHandler*)id(handler_sm))->get_ble_message_count();'
+    lambda: 'return id(handler_sm) ? (float)((SmartShuntBLEHandler*)id(handler_sm))->get_ble_message_count() : 0.0f;'
     update_interval: 5s
     entity_category: diagnostic
     on_value:
@@ -348,7 +356,7 @@ sensor:
     state_topic: null
     unit_of_measurement: "s"
     state_class: measurement
-    lambda: 'return (float)((SmartShuntBLEHandler*)id(handler_sm))->get_ble_time_since_last();'
+    lambda: 'return id(handler_sm) ? (float)((SmartShuntBLEHandler*)id(handler_sm))->get_ble_time_since_last() : 0.0f;'
     update_interval: 5s
     entity_category: diagnostic
     on_value:
@@ -375,7 +383,9 @@ sensor:
       - throttle_average: 5s
     on_value:
       then:
-        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->handle_battery_voltage(x);
+        - lambda: |-
+            if (!id(handler_sm)) return;
+            ((SmartShuntBLEHandler*)id(handler_sm))->handle_battery_voltage(x);
 
   - platform: victron_ble
     victron_ble_id: smartshunt_ble
@@ -389,7 +399,9 @@ sensor:
       - throttle_average: 5s
     on_value:
       then:
-        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->handle_battery_current(x);
+        - lambda: |-
+            if (!id(handler_sm)) return;
+            ((SmartShuntBLEHandler*)id(handler_sm))->handle_battery_current(x);
 
   - platform: victron_ble
     victron_ble_id: smartshunt_ble
@@ -403,7 +415,9 @@ sensor:
       - throttle_average: 5s
     on_value:
       then:
-        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->handle_state_of_charge(x);
+        - lambda: |-
+            if (!id(handler_sm)) return;
+            ((SmartShuntBLEHandler*)id(handler_sm))->handle_state_of_charge(x);
 
   - platform: victron_ble
     victron_ble_id: smartshunt_ble
@@ -417,7 +431,9 @@ sensor:
       - throttle_average: 5s
     on_value:
       then:
-        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->handle_instantaneous_power(x);
+        - lambda: |-
+            if (!id(handler_sm)) return;
+            ((SmartShuntBLEHandler*)id(handler_sm))->handle_instantaneous_power(x);
 
   - platform: victron_ble
     victron_ble_id: smartshunt_ble
@@ -430,7 +446,9 @@ sensor:
       - throttle_average: 30s
     on_value:
       then:
-        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->handle_consumed_amp_hours(x);
+        - lambda: |-
+            if (!id(handler_sm)) return;
+            ((SmartShuntBLEHandler*)id(handler_sm))->handle_consumed_amp_hours(x);
 
   - platform: victron_ble
     victron_ble_id: smartshunt_ble
@@ -443,7 +461,9 @@ sensor:
       - throttle_average: 30s
     on_value:
       then:
-        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->handle_time_to_go(x);
+        - lambda: |-
+            if (!id(handler_sm)) return;
+            ((SmartShuntBLEHandler*)id(handler_sm))->handle_time_to_go(x);
 
   # EPEVER sensors (Modbus/RS485 — same as VE.Direct v2)
   - platform: modbus_controller
@@ -460,7 +480,9 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_solar_voltage(x);
+        - lambda: |-
+            if (!id(handler_ep)) return;
+            ((EPEverHandler*)id(handler_ep))->handle_solar_voltage(x);
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -476,7 +498,9 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_pv_current(x);
+        - lambda: |-
+            if (!id(handler_ep)) return;
+            ((EPEverHandler*)id(handler_ep))->handle_pv_current(x);
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -492,7 +516,9 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_solar_power(x);
+        - lambda: |-
+            if (!id(handler_ep)) return;
+            ((EPEverHandler*)id(handler_ep))->handle_solar_power(x);
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -507,7 +533,9 @@ sensor:
     state_class: measurement
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_battery_capacity(x);
+        - lambda: |-
+            if (!id(handler_ep)) return;
+            ((EPEverHandler*)id(handler_ep))->handle_battery_capacity(x);
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -523,7 +551,9 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_device_temp(x);
+        - lambda: |-
+            if (!id(handler_ep)) return;
+            ((EPEverHandler*)id(handler_ep))->handle_device_temp(x);
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -539,7 +569,9 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_battery_voltage(x);
+        - lambda: |-
+            if (!id(handler_ep)) return;
+            ((EPEverHandler*)id(handler_ep))->handle_battery_voltage(x);
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -555,7 +587,9 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_battery_current(x);
+        - lambda: |-
+            if (!id(handler_ep)) return;
+            ((EPEverHandler*)id(handler_ep))->handle_battery_current(x);
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -571,18 +605,26 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_total_energy(x);
+        - lambda: |-
+            if (!id(handler_ep)) return;
+            ((EPEverHandler*)id(handler_ep))->handle_total_energy(x);
 
 interval:
   - interval: 3s
     then:
       - lambda: |-
+          if (!id(handler_sm) || !id(handler_ep)) return;
           bool connected = esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected();
-          if (!connected && id(mqtt_was_connected)) {
-            id(discovery_published) = false;
-            id(mqtt_was_connected) = false;
+          if (connected) {
+            id(mqtt_was_connected) = true;
+            id(mqtt_disconnect_count) = 0;
+          } else if (id(mqtt_was_connected)) {
+            id(mqtt_disconnect_count)++;
+            if (id(mqtt_disconnect_count) >= 2) {
+              id(discovery_published) = false;
+              id(mqtt_was_connected) = false;
+            }
           }
-          if (connected) id(mqtt_was_connected) = true;
           if (!id(discovery_published) && connected) {
             id(discovery_published) = true;
             ESP_LOGI("mqtt", "Publishing discovery...");
@@ -592,13 +634,18 @@ interval:
           }
   - interval: 10s
     then:
-      - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->check_stale();
+      - lambda: |-
+          if (!id(handler_sm)) return;
+          ((SmartShuntBLEHandler*)id(handler_sm))->check_stale();
   - interval: 30s
     then:
-      - lambda: ((EPEverHandler*)id(handler_ep))->check_stale();
+      - lambda: |-
+          if (!id(handler_ep)) return;
+          ((EPEverHandler*)id(handler_ep))->check_stale();
   - interval: 10min
     then:
       - lambda: |-
+          if (!id(handler_sm) || !id(handler_ep)) return;
           if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected()) {
             if (!((SmartShuntBLEHandler*)id(handler_sm))->is_stale())
               esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/smartshunt/status"), std::string("online"), 0, true);
