@@ -136,12 +136,21 @@ globals:
   - id: discovery_published
     type: bool
     initial_value: 'false'
+  - id: mqtt_was_connected
+    type: bool
+    initial_value: 'false'
 
 interval:
   - interval: 3s
     then:
       - lambda: |-
-          if (!id(discovery_published) && id(mqtt_client).is_connected()) {
+          bool connected = id(mqtt_client).is_connected();
+          if (!connected && id(mqtt_was_connected)) {
+            id(discovery_published) = false;
+            id(mqtt_was_connected) = false;
+          }
+          if (connected) id(mqtt_was_connected) = true;
+          if (!id(discovery_published) && connected) {
             id(discovery_published) = true;
             ESP_LOGI("mqtt", "Publishing discovery...");
             ((PylontechCAN*)id(pylontech_can))->on_mqtt_connect();
