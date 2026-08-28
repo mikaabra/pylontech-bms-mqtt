@@ -298,6 +298,46 @@ public:
         relay_first_ = true;
         relay_pending_ = false;
         publish_discovery();
+        publish_diagnostic_discovery();
+    }
+
+    void publish_diagnostic_discovery() {
+        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
+        char topic[160], payload[768];
+        const char* device_json = R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})";
+        const char* diag_avail = R"("availability_topic":"rack-solar/status","payload_available":"online","payload_not_available":"offline")";
+
+        const char* diag_sensors[][5] = {
+            {"bitflip_rate",            "Bitflip Rate",             "events/min", "",                      ""},
+            {"data_quality_score",      "Data Quality Score",      "%",          "",                      ""},
+            {"bitflip_window_total",    "Bitflip Window Total",    "events",     "",                      ""},
+            {"rs485_crc_errors",        "RS485 CRC Errors",        "",           "",                      ""},
+            {"rs485_timeout_errors",   "RS485 Timeout Errors",   "",           "",                      ""},
+            {"rs485_frame_errors",      "RS485 Frame Errors",     "",           "",                      ""},
+            {"smartshunt_stale",        "SmartShunt Stale",       "",           "",                      ""},
+            {"epever_stale",            "EPEVER Stale",           "",           "",                      ""},
+            {"free_heap",               "Free Heap",              "bytes",      "",                      ""},
+            {"wifi_signal",             "WiFi Signal",            "dBm",        "signal_strength",       ""},
+            {"uptime",                  "Uptime",                 "s",          "duration",              ""},
+        };
+        for (int i = 0; i < 11; i++) {
+            snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", diag_sensors[i][0]);
+            char st[96], uid[64];
+            snprintf(st, sizeof(st), "rack-solar/%s", diag_sensors[i][0]);
+            snprintf(uid, sizeof(uid), "rack_solar_%s", diag_sensors[i][0]);
+            if (build_ha_sensor_payload(payload, sizeof(payload), diag_sensors[i][1], st, uid,
+                                        diag_sensors[i][2], diag_sensors[i][3], "",
+                                        diag_avail, device_json, "", "diagnostic")) {
+                esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+            }
+            if (i % 5 == 4) delay(50);
+        }
+        snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/rack_solar/bitflip_rate_alert/config");
+        if (build_ha_binary_sensor_payload(payload, sizeof(payload), "Bitflip Rate Alert",
+            "rack-solar/bitflip_rate_alert", "rack_solar_bitflip_rate_alert",
+            "problem", "", "ON", "OFF", diag_avail, device_json, "diagnostic")) {
+            esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+        }
     }
 
     void publish_discovery() {
