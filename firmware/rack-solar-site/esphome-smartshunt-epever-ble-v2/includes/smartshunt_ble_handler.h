@@ -146,7 +146,7 @@ public:
                                         diag_avail, device_json, "", "diagnostic")) {
                 esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
             }
-            if (i % 5 == 4) delay(50);
+            if (i % 5 == 4) yield();
         }
         ESP_LOGI("mqtt", "Diagnostic discovery published");
     }

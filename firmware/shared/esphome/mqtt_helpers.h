@@ -22,7 +22,7 @@ struct PublishPacer {
     void pace() {
         count++;
         if (count % yield_every == 0) {
-            delay(delay_ms);
+            yield();
         }
     }
 };

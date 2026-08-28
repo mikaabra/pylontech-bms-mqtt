@@ -330,7 +330,7 @@ public:
                                         diag_avail, device_json, "", "diagnostic")) {
                 esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
             }
-            if (i % 5 == 4) delay(50);
+            if (i % 5 == 4) yield();
         }
         snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/rack_solar/bitflip_rate_alert/config");
         if (build_ha_binary_sensor_payload(payload, sizeof(payload), "Bitflip Rate Alert",
