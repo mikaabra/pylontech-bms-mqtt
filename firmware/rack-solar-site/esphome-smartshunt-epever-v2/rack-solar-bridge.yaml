@@ -16,7 +16,7 @@ esphome:
     - ../../shared/esphome/availability.h
     - includes/solar_validation.h
     - includes/smartshunt_handler.h
-    - includes/epever_handler.h
+    - ../../shared/esphome/epever_handler.h
   on_boot:
     priority: -100
     then:
@@ -145,6 +145,9 @@ globals:
   - id: mqtt_was_connected
     type: bool
     initial_value: 'false'
+  - id: mqtt_disconnect_count
+    type: int
+    initial_value: '0'
 
 # Text sensors from victron platform
 text_sensor:
@@ -154,37 +157,37 @@ text_sensor:
       id: ss_model_description_internal
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_model_description(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_model_description(x);'
     firmware_version:
       id: ss_firmware_version_internal
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_firmware_version(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_firmware_version(x);'
     device_type:
       id: ss_device_type_internal
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_device_type(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_device_type(x);'
     serial_number:
       id: ss_serial_number_internal
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_serial_number(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_serial_number(x);'
     dc_monitor_mode:
       id: ss_dc_monitor_mode_internal
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_dc_monitor_mode(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_dc_monitor_mode(x);'
     alarm_condition_active:
       id: ss_alarm_condition_internal
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_alarm_condition(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_alarm_condition(x);'
     alarm_reason:
       id: ss_alarm_reason_internal
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_alarm_reason(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_alarm_reason(x);'
 
   - platform: version
     name: "ESPHome Version"
@@ -244,7 +247,7 @@ binary_sensor:
       id: ss_relay_state_internal
       on_state:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_relay_state(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_relay_state(x);'
 
   - platform: template
     name: "Bitflip Rate Alert"
@@ -253,7 +256,7 @@ binary_sensor:
     device_class: problem
     entity_category: diagnostic
     lambda: |-
-      return ((SmartShuntHandler*)id(handler_sm))->get_bitflip_rate() > 5.0f;
+      return id(handler_sm) ? ((SmartShuntHandler*)id(handler_sm))->get_bitflip_rate() > 5.0f : false;
     on_state:
       then:
         - lambda: |-
@@ -433,109 +436,109 @@ sensor:
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_battery_voltage(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_battery_voltage(x);'
     battery_current:
       id: ss_battery_current
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_battery_current(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_battery_current(x);'
     state_of_charge:
       id: ss_state_of_charge
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_state_of_charge(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_state_of_charge(x);'
     instantaneous_power:
       id: ss_instantaneous_power
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_instantaneous_power(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_instantaneous_power(x);'
     battery_temperature:
       id: ss_battery_temperature
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_battery_temperature(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_battery_temperature(x);'
     consumed_amp_hours:
       id: ss_consumed_amp_hours
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_consumed_amp_hours(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_consumed_amp_hours(x);'
     time_to_go:
       id: ss_time_to_go
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_time_to_go(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_time_to_go(x);'
     depth_of_the_deepest_discharge:
       id: ss_depth_deepest_discharge
       internal: true
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_depth_deepest_discharge(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_depth_deepest_discharge(x);'
     depth_of_the_last_discharge:
       id: ss_depth_last_discharge
       internal: true
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_depth_last_discharge(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_depth_last_discharge(x);'
     depth_of_the_average_discharge:
       id: ss_depth_average_discharge
       internal: true
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_depth_average_discharge(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_depth_average_discharge(x);'
     number_of_charge_cycles:
       id: ss_number_charge_cycles
       internal: true
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_number_charge_cycles(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_number_charge_cycles(x);'
     number_of_full_discharges:
       id: ss_number_full_discharges
       internal: true
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_number_full_discharges(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_number_full_discharges(x);'
     cumulative_amp_hours_drawn:
       id: ss_cumulative_amp_hours
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_cumulative_amp_hours(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_cumulative_amp_hours(x);'
     min_battery_voltage:
       id: ss_min_battery_voltage
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_min_battery_voltage(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_min_battery_voltage(x);'
     max_battery_voltage:
       id: ss_max_battery_voltage
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_max_battery_voltage(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_max_battery_voltage(x);'
     last_full_charge:
       id: ss_last_full_charge
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_last_full_charge(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_last_full_charge(x);'
     amount_of_discharged_energy:
       id: ss_amount_discharged_energy
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_amount_discharged_energy(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_amount_discharged_energy(x);'
     amount_of_charged_energy:
       id: ss_amount_charged_energy
       state_topic: null
       on_value:
         then:
-          - lambda: ((SmartShuntHandler*)id(handler_sm))->handle_amount_charged_energy(x);
+          - lambda: 'if (!id(handler_sm)) return; ((SmartShuntHandler*)id(handler_sm))->handle_amount_charged_energy(x);'
 
   # EPEVER sensors (modbus_controller)
   - platform: modbus_controller
@@ -552,7 +555,7 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_solar_voltage(x);
+        - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_solar_voltage(x);'
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -568,7 +571,7 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_pv_current(x);
+        - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_pv_current(x);'
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -584,7 +587,7 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_solar_power(x);
+        - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_solar_power(x);'
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -599,7 +602,7 @@ sensor:
     state_class: measurement
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_battery_capacity(x);
+        - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_battery_capacity(x);'
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -615,7 +618,7 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_device_temp(x);
+        - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_device_temp(x);'
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -631,7 +634,7 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_battery_voltage(x);
+        - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_battery_voltage(x);'
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -647,7 +650,7 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_battery_current(x);
+        - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_battery_current(x);'
 
   - platform: modbus_controller
     modbus_controller_id: epever
@@ -663,18 +666,24 @@ sensor:
     filters: [multiply: 0.01]
     on_value:
       then:
-        - lambda: ((EPEverHandler*)id(handler_ep))->handle_total_energy(x);
+        - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_total_energy(x);'
 
 interval:
   - interval: 3s
     then:
       - lambda: |-
+          if (!id(handler_sm) || !id(handler_ep)) return;
           bool connected = esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected();
-          if (!connected && id(mqtt_was_connected)) {
-            id(discovery_published) = false;
-            id(mqtt_was_connected) = false;
+          if (connected) {
+            id(mqtt_was_connected) = true;
+            id(mqtt_disconnect_count) = 0;
+          } else if (id(mqtt_was_connected)) {
+            id(mqtt_disconnect_count)++;
+            if (id(mqtt_disconnect_count) >= 2) {
+              id(discovery_published) = false;
+              id(mqtt_was_connected) = false;
+            }
           }
-          if (connected) id(mqtt_was_connected) = true;
           if (!id(discovery_published) && connected) {
             id(discovery_published) = true;
             ESP_LOGI("mqtt", "Publishing discovery...");
@@ -684,13 +693,18 @@ interval:
           }
   - interval: 10s
     then:
-      - lambda: ((SmartShuntHandler*)id(handler_sm))->check_stale();
+      - lambda: |-
+          if (!id(handler_sm)) return;
+          ((SmartShuntHandler*)id(handler_sm))->check_stale();
   - interval: 30s
     then:
-      - lambda: ((EPEverHandler*)id(handler_ep))->check_stale();
+      - lambda: |-
+          if (!id(handler_ep)) return;
+          ((EPEverHandler*)id(handler_ep))->check_stale();
   - interval: 10min
     then:
       - lambda: |-
+          if (!id(handler_sm) || !id(handler_ep)) return;
           if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected()) {
             if (!((SmartShuntHandler*)id(handler_sm))->is_stale())
               esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/smartshunt/status"), std::string("online"), 0, true);
