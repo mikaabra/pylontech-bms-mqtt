@@ -162,6 +162,7 @@ mqtt:
 
         id(last_can_soc) = 0;
         id(last_can_soh) = 0;
+        id(last_can_soc_publish) = 0;
         id(last_stack_voltage) = -1.0f;
         id(last_stack_current) = -1.0f;
         id(last_stack_cell_min) = -1.0f;
@@ -776,18 +777,23 @@ canbus:
 
               if (soc <= 100 && soh <= 100) {
                 static char val[8];
-                // SOC and SOH with 1% hysteresis
-                if (id(last_can_soc) == 0 || abs(soc - id(last_can_soc)) >= 1) {
+                uint32_t now = millis();
+                bool heartbeat = (now - id(last_can_soc_publish) >= 60000);
+                // SOC and SOH with 1% hysteresis OR 60s heartbeat
+                if (id(last_can_soc) == 0 || abs(soc - id(last_can_soc)) >= 1 || heartbeat) {
                   id(sensor_soc).publish_state(soc);
                   id(last_can_soc) = soc;
                   snprintf(val, sizeof(val), "%d", soc);
                   id(mqtt_client).publish("${can_prefix}/soc", val);
                 }
-                if (id(last_can_soh) == 0 || abs(soh - id(last_can_soh)) >= 1) {
+                if (id(last_can_soh) == 0 || abs(soh - id(last_can_soh)) >= 1 || heartbeat) {
                   id(sensor_soh).publish_state(soh);
                   id(last_can_soh) = soh;
                   snprintf(val, sizeof(val), "%d", soh);
                   id(mqtt_client).publish("${can_prefix}/soh", val);
+                }
+                if (heartbeat) {
+                  id(last_can_soc_publish) = now;
                 }
               }
 
@@ -1062,6 +1068,9 @@ globals:
     initial_value: '0'
   - id: last_can_soh
     type: uint16_t
+    initial_value: '0'
+  - id: last_can_soc_publish
+    type: uint32_t
     initial_value: '0'
 
   # RS485 hysteresis tracking - prevent excessive MQTT updates
