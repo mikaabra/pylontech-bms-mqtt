@@ -10,10 +10,10 @@
 - **Power**: USB-C or 5V terminal block
 
 ### Firmware Environment
-- **Framework**: ESPHome 2026.1.0+
+- **Framework**: ESPHome 2026.8.1+
 - **Platform**: ESP-IDF 5.x
-- **Language**: C++ (Arduino/ESP-IDF)
-- **Build System**: PlatformIO
+- **Language**: C++ (ESP-IDF)
+- **Build System**: ESP-IDF native
 - **OTA**: Supported via WiFi
 
 ## Protocol Implementations
@@ -50,7 +50,7 @@ if (v_charge_max >= 30.0f && v_charge_max <= 65.0f &&
 ```
 
 #### Frame ID 0x355 - SOC/SOH
-**Length**: 4 bytes, 16-bit little-endian values
+**Length**: 4-8 bytes (CAN frame padded to 8, 4 meaningful), 16-bit little-endian values
 
 | Byte | Field | Units |
 |------|-------|-------|
@@ -153,11 +153,11 @@ float cell1_v = cell1_raw / 1000.0f;  // Convert mV to V
 globals:
   - id: rs485_state
     type: int
-    initial_value: '0'  # 0=IDLE, 1=SEND_ANALOG, 2=WAIT_ANALOG, 3=PARSE_ANALOG, etc.
-  
+    initial_value: '0'  # 0=IDLE, 1=SEND_ANALOG, 2=WAIT_RX, 3=SEND_ALARM, 4=WAIT_ALARM_RX
+   
   - id: rs485_current_batt
     type: int
-    initial_value: '0'  # Current battery being polled (1-3)
+    initial_value: '0'  # Current battery being polled (0-4)
   
   - id: rs485_tx_time
     type: uint32_t
@@ -168,7 +168,7 @@ globals:
     restore_value: no
 ```
 
-### State Machine Logic (interval: 10ms)
+### State Machine Logic (interval: 50ms)
 ```cpp
 switch (id(rs485_state)) {
   case 0: // IDLE
@@ -338,9 +338,7 @@ for (int i = 0; i < num_batt; i++) {
 ```yaml
 esphome:
   name: deye-bms-can
-  platform: ESP32
-  board: esp32-s3-devkitc-1
-  min_version: "2026.1.0"
+  min_version: "2026.8.1"
   includes:
     - includes/set_include.h
 
@@ -435,5 +433,3 @@ INFO Successfully compiled program.
 
 - **HLD.md**: High-level system architecture
 - **README.md**: Quick start guide
-- **PROTOCOL_REFERENCE.md**: Complete protocol specifications
-- **docs/guides/TROUBLESHOOTING.md**: Common issues
