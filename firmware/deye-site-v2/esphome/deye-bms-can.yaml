@@ -72,15 +72,9 @@ mqtt:
     retain: true
 
   discovery: false
-
-  on_connect:
-    - lambda: |-
-        ESP_LOGI("mqtt", "MQTT connected");
-        ((PylontechCAN*)id(pylontech_can))->on_mqtt_connect();
-        ((PylontechRS485*)id(pylontech_rs485))->on_mqtt_connect();
-        ((PylontechCAN*)id(pylontech_can))->publish_discovery();
-        ((PylontechRS485*)id(pylontech_rs485))->publish_discovery();
-
+  # on_connect trigger doesn't fire reliably on this ESP32-S3 + ESP-IDF build.
+  # Discovery publishing is handled by the 3s interval fallback below, which
+  # detects MQTT connection and publishes discovery + resets hysteresis.
   reboot_timeout: 0s
 
 api:
@@ -139,8 +133,20 @@ globals:
   - id: logger_level
     type: std::string
     initial_value: '"WARN"'
+  - id: discovery_published
+    type: bool
+    initial_value: 'false'
 
 interval:
+  - interval: 3s
+    then:
+      - lambda: |-
+          if (!id(discovery_published) && id(mqtt_client).is_connected()) {
+            id(discovery_published) = true;
+            ESP_LOGI("mqtt", "Publishing discovery...");
+            ((PylontechCAN*)id(pylontech_can))->on_mqtt_connect();
+            ((PylontechRS485*)id(pylontech_rs485))->on_mqtt_connect();
+          }
   - interval: 5s
     then:
       - lambda: ((PylontechCAN*)id(pylontech_can))->check_stale();
