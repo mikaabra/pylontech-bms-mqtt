@@ -1,0 +1,616 @@
+# Rack Solar Bridge v2 (BLE Only) — Clean rewrite using custom C++ handlers
+# ESP32-S3 Waveshare: SmartShunt (BLE via victron_ble) + EPEVER MPPT (RS485/Modbus)
+# MQTT topics match the original rack-solar-bridge-ble-only.yaml for seamless migration.
+
+substitutions:
+  device_name: rack-solar-bridge
+  friendly_name: "Rack Solar Bridge"
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  min_version: "2026.8.1"
+  includes:
+    - ../../shared/esphome/mqtt_helpers.h
+    - ../../shared/esphome/hysteresis.h
+    - ../../shared/esphome/availability.h
+    - includes/smartshunt_ble_handler.h
+    - includes/epever_handler.h
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_INFO);
+          id(logger_level) = "INFO";
+          id(handler_sm) = (void*) new SmartShuntBLEHandler();
+          id(handler_ep) = (void*) new EPEverHandler();
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  id: logger_level_global
+  baud_rate: 115200
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  ap:
+    ssid: "${device_name}-fallback"
+    password: !secret captive_portal_password
+
+captive_portal:
+
+web_server:
+  port: 80
+
+mqtt:
+  id: mqtt_client
+  broker: !secret mqtt_host
+  port: 1883
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  topic_prefix: "esphome_unused"
+  birth_message:
+    topic: rack-solar/status
+    payload: "online"
+    retain: true
+  will_message:
+    topic: rack-solar/status
+    payload: "offline"
+    retain: true
+  discovery: false
+  # on_connect trigger doesn't fire reliably on this ESP32-S3 + ESP-IDF build.
+  # Discovery publishing is handled by the 3s interval fallback below, which
+  # detects MQTT connection and publishes discovery + resets hysteresis.
+  reboot_timeout: 0s
+
+api:
+  reboot_timeout: 0s
+
+ota:
+  - platform: esphome
+    password: !secret ota_password
+
+# BLE tracker for Victron SmartShunt
+esp32_ble_tracker:
+  scan_parameters:
+    interval: 1100ms
+    window: 1100ms
+    active: true
+
+# RS485 for EPEVER MPPT
+uart:
+  - id: rs485_uart
+    tx_pin: GPIO17
+    rx_pin: GPIO18
+    baud_rate: 115200
+    data_bits: 8
+    stop_bits: 1
+    parity: NONE
+    flow_control_pin: GPIO21
+    rx_buffer_size: 1024
+
+external_components:
+  - source: github://Fabian-Schmidt/esphome-victron_ble
+    refresh: 0s
+
+modbus:
+  id: modbus1
+  uart_id: rs485_uart
+
+modbus_controller:
+  - id: epever
+    address: 0x1
+    modbus_id: modbus1
+    command_throttle: 0ms
+    update_interval: 30s
+
+victron_ble:
+  - id: smartshunt_ble
+    mac_address: !secret smartshunt_ble_mac
+    bindkey: !secret smartshunt_ble_bindkey
+    on_battery_monitor_message:
+      then:
+        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->on_ble_message();
+
+globals:
+  - id: handler_sm
+    type: void*
+    initial_value: 'nullptr'
+  - id: handler_ep
+    type: void*
+    initial_value: 'nullptr'
+  - id: logger_level
+    type: std::string
+    initial_value: '"INFO"'
+  - id: discovery_published
+    type: bool
+    initial_value: 'false'
+  - id: rs485_crc_errors
+    type: uint32_t
+    initial_value: '0'
+    restore_value: true
+  - id: rs485_timeout_errors
+    type: uint32_t
+    initial_value: '0'
+    restore_value: true
+  - id: rs485_frame_errors
+    type: uint32_t
+    initial_value: '0'
+    restore_value: true
+
+text_sensor:
+  - platform: version
+    name: "ESPHome Version"
+    state_topic: null
+
+  - platform: template
+    name: "Debug Level"
+    id: debug_level_sensor
+    state_topic: null
+    icon: "mdi:console"
+    update_interval: never
+    entity_category: diagnostic
+    lambda: 'return id(logger_level);'
+
+  - platform: template
+    name: "SmartShunt Stale"
+    id: smartshunt_stale_sensor
+    state_topic: null
+    update_interval: 5s
+    icon: "mdi:connection"
+    entity_category: diagnostic
+    lambda: |-
+      return ((SmartShuntBLEHandler*)id(handler_sm))->is_stale() ? std::string("STALE") : std::string("OK");
+    on_value:
+      then:
+        - lambda: |-
+            static std::string last_val;
+            if (x != last_val) {
+              last_val = x;
+              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/smartshunt_stale"), x);
+            }
+
+  - platform: template
+    name: "EPEVER Stale"
+    id: epever_stale_sensor
+    state_topic: null
+    update_interval: 5s
+    icon: "mdi:connection"
+    entity_category: diagnostic
+    lambda: |-
+      return ((EPEverHandler*)id(handler_ep))->is_stale() ? std::string("STALE") : std::string("OK");
+    on_value:
+      then:
+        - lambda: |-
+            static std::string last_val;
+            if (x != last_val) {
+              last_val = x;
+              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/epever_stale"), x);
+            }
+
+  - platform: template
+    name: "BLE Connection Status"
+    id: ble_connection_status_sensor
+    state_topic: null
+    update_interval: 5s
+    entity_category: diagnostic
+    lambda: |-
+      return std::string(((SmartShuntBLEHandler*)id(handler_sm))->get_ble_connection_status());
+    on_value:
+      then:
+        - lambda: |-
+            static std::string last_val;
+            if (x != last_val) {
+              last_val = x;
+              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/ble_connection_status"), x);
+            }
+
+sensor:
+  - platform: uptime
+    name: "Uptime"
+    id: uptime_sensor
+    state_topic: null
+    update_interval: 60s
+    device_class: duration
+    state_class: total_increasing
+    entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            static int last_uptime = -1;
+            int current = (int)x;
+            if (current != last_uptime) {
+              last_uptime = current;
+              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/uptime"), to_string(current));
+            }
+
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    id: wifi_signal_db
+    state_topic: null
+    update_interval: 60s
+    unit_of_measurement: "dBm"
+    device_class: signal_strength
+    on_value:
+      then:
+        - lambda: |-
+            static int last_wifi = -1000;
+            int current = (int)x;
+            if (current != last_wifi) {
+              last_wifi = current;
+              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/wifi_signal"), to_string(current));
+            }
+
+  - platform: template
+    name: "Free Heap"
+    id: free_heap_sensor
+    state_topic: null
+    unit_of_measurement: "bytes"
+    lambda: 'return (float)heap_caps_get_free_size(MALLOC_CAP_8BIT);'
+    update_interval: 30s
+    entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            static int last_heap = -1;
+            int current = (int)x;
+            if (current != last_heap) {
+              last_heap = current;
+              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/free_heap"), to_string(current));
+            }
+
+  - platform: template
+    name: "RS485 CRC Errors"
+    id: rs485_crc_errors_sensor
+    state_topic: null
+    lambda: 'return (float)id(rs485_crc_errors);'
+    update_interval: 5s
+    entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            static int last_val = -1;
+            if ((int)x != last_val) {
+              last_val = (int)x;
+              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/rs485_crc_errors"), to_string((int)x));
+            }
+
+  - platform: template
+    name: "RS485 Timeout Errors"
+    state_topic: null
+    lambda: 'return (float)id(rs485_timeout_errors);'
+    update_interval: 5s
+    entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            static int last_val = -1;
+            if ((int)x != last_val) {
+              last_val = (int)x;
+              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/rs485_timeout_errors"), to_string((int)x));
+            }
+
+  - platform: template
+    name: "RS485 Frame Errors"
+    state_topic: null
+    lambda: 'return (float)id(rs485_frame_errors);'
+    update_interval: 5s
+    entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            static int last_val = -1;
+            if ((int)x != last_val) {
+              last_val = (int)x;
+              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/rs485_frame_errors"), to_string((int)x));
+            }
+
+  - platform: template
+    name: "BLE Message Count"
+    id: ble_message_count_sensor
+    state_topic: null
+    unit_of_measurement: "msgs"
+    state_class: measurement
+    lambda: 'return (float)((SmartShuntBLEHandler*)id(handler_sm))->get_ble_message_count();'
+    update_interval: 5s
+    entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            static uint32_t last_val = 0;
+            uint32_t current = (uint32_t)x;
+            if (current != last_val) {
+              last_val = current;
+              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/ble_message_count"), to_string(current));
+            }
+
+  - platform: template
+    name: "BLE Time Since Last Message"
+    id: ble_time_since_last_sensor
+    state_topic: null
+    unit_of_measurement: "s"
+    state_class: measurement
+    lambda: 'return (float)((SmartShuntBLEHandler*)id(handler_sm))->get_ble_time_since_last();'
+    update_interval: 5s
+    entity_category: diagnostic
+    on_value:
+      then:
+        - lambda: |-
+            static int last_val = -1;
+            int current = (int)x;
+            if (current != last_val) {
+              last_val = current;
+              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/ble_time_since_last"), to_string(current));
+            }
+
+  # SmartShunt BLE sensors (6 numeric values)
+  - platform: victron_ble
+    victron_ble_id: smartshunt_ble
+    name: "SmartShunt Battery Voltage"
+    id: ss_battery_voltage
+    type: BATTERY_VOLTAGE
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    filters:
+      - throttle_average: 5s
+    on_value:
+      then:
+        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->handle_battery_voltage(x);
+
+  - platform: victron_ble
+    victron_ble_id: smartshunt_ble
+    name: "SmartShunt Battery Current"
+    id: ss_battery_current
+    type: BATTERY_CURRENT
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    filters:
+      - throttle_average: 5s
+    on_value:
+      then:
+        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->handle_battery_current(x);
+
+  - platform: victron_ble
+    victron_ble_id: smartshunt_ble
+    name: "SmartShunt State of Charge"
+    id: ss_state_of_charge
+    type: STATE_OF_CHARGE
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    filters:
+      - throttle_average: 5s
+    on_value:
+      then:
+        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->handle_state_of_charge(x);
+
+  - platform: victron_ble
+    victron_ble_id: smartshunt_ble
+    name: "SmartShunt Instantaneous Power"
+    id: ss_instantaneous_power
+    type: BATTERY_POWER
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    filters:
+      - throttle_average: 5s
+    on_value:
+      then:
+        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->handle_instantaneous_power(x);
+
+  - platform: victron_ble
+    victron_ble_id: smartshunt_ble
+    name: "SmartShunt Consumed Amp Hours"
+    id: ss_consumed_amp_hours
+    type: CONSUMED_AH
+    unit_of_measurement: "Ah"
+    state_class: measurement
+    filters:
+      - throttle_average: 30s
+    on_value:
+      then:
+        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->handle_consumed_amp_hours(x);
+
+  - platform: victron_ble
+    victron_ble_id: smartshunt_ble
+    name: "SmartShunt Time To Go"
+    id: ss_time_to_go
+    type: TIME_TO_GO
+    unit_of_measurement: "min"
+    state_class: measurement
+    filters:
+      - throttle_average: 30s
+    on_value:
+      then:
+        - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->handle_time_to_go(x);
+
+  # EPEVER sensors (Modbus/RS485 — same as VE.Direct v2)
+  - platform: modbus_controller
+    modbus_controller_id: epever
+    name: "EPEVER Solar Voltage"
+    id: epever_solar_voltage
+    state_topic: null
+    register_type: read
+    address: 12544
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    filters: [multiply: 0.01]
+    on_value:
+      then:
+        - lambda: ((EPEverHandler*)id(handler_ep))->handle_solar_voltage(x);
+
+  - platform: modbus_controller
+    modbus_controller_id: epever
+    name: "EPEVER PV Current"
+    id: epever_pv_current
+    state_topic: null
+    register_type: read
+    address: 12545
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    filters: [multiply: 0.01]
+    on_value:
+      then:
+        - lambda: ((EPEverHandler*)id(handler_ep))->handle_pv_current(x);
+
+  - platform: modbus_controller
+    modbus_controller_id: epever
+    name: "EPEVER Solar Power"
+    id: epever_solar_power
+    state_topic: null
+    register_type: read
+    address: 12546
+    value_type: U_DWORD_R
+    unit_of_measurement: "W"
+    device_class: power
+    state_class: measurement
+    filters: [multiply: 0.01]
+    on_value:
+      then:
+        - lambda: ((EPEverHandler*)id(handler_ep))->handle_solar_power(x);
+
+  - platform: modbus_controller
+    modbus_controller_id: epever
+    name: "EPEVER Battery Capacity"
+    id: epever_battery_capacity
+    state_topic: null
+    register_type: read
+    address: 12570
+    value_type: U_WORD
+    unit_of_measurement: "%"
+    device_class: battery
+    state_class: measurement
+    on_value:
+      then:
+        - lambda: ((EPEverHandler*)id(handler_ep))->handle_battery_capacity(x);
+
+  - platform: modbus_controller
+    modbus_controller_id: epever
+    name: "EPEVER Device Temperature"
+    id: epever_device_temp
+    state_topic: null
+    register_type: read
+    address: 12561
+    value_type: S_WORD
+    unit_of_measurement: "°C"
+    device_class: temperature
+    state_class: measurement
+    filters: [multiply: 0.01]
+    on_value:
+      then:
+        - lambda: ((EPEverHandler*)id(handler_ep))->handle_device_temp(x);
+
+  - platform: modbus_controller
+    modbus_controller_id: epever
+    name: "EPEVER Battery Voltage"
+    id: epever_battery_voltage
+    state_topic: null
+    register_type: read
+    address: 13082
+    value_type: U_WORD
+    unit_of_measurement: "V"
+    device_class: voltage
+    state_class: measurement
+    filters: [multiply: 0.01]
+    on_value:
+      then:
+        - lambda: ((EPEverHandler*)id(handler_ep))->handle_battery_voltage(x);
+
+  - platform: modbus_controller
+    modbus_controller_id: epever
+    name: "EPEVER Battery Current"
+    id: epever_battery_current
+    state_topic: null
+    register_type: read
+    address: 13083
+    value_type: U_WORD
+    unit_of_measurement: "A"
+    device_class: current
+    state_class: measurement
+    filters: [multiply: 0.01]
+    on_value:
+      then:
+        - lambda: ((EPEverHandler*)id(handler_ep))->handle_battery_current(x);
+
+  - platform: modbus_controller
+    modbus_controller_id: epever
+    name: "EPEVER Total Energy"
+    id: epever_total_energy
+    state_topic: null
+    register_type: read
+    address: 13074
+    value_type: U_DWORD_R
+    unit_of_measurement: "kWh"
+    device_class: energy
+    state_class: total_increasing
+    filters: [multiply: 0.01]
+    on_value:
+      then:
+        - lambda: ((EPEverHandler*)id(handler_ep))->handle_total_energy(x);
+
+interval:
+  - interval: 3s
+    then:
+      - lambda: |-
+          if (!id(discovery_published) && esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected()) {
+            id(discovery_published) = true;
+            ESP_LOGI("mqtt", "Publishing discovery via interval fallback...");
+            ((SmartShuntBLEHandler*)id(handler_sm))->on_mqtt_connect();
+            ((EPEverHandler*)id(handler_ep))->on_mqtt_connect();
+            esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/info"), std::string("Rack Solar Bridge v2 BLE Only"));
+          }
+  - interval: 10s
+    then:
+      - lambda: ((SmartShuntBLEHandler*)id(handler_sm))->check_stale();
+  - interval: 30s
+    then:
+      - lambda: ((EPEverHandler*)id(handler_ep))->check_stale();
+  - interval: 10min
+    then:
+      - lambda: |-
+          if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected()) {
+            if (!((SmartShuntBLEHandler*)id(handler_sm))->is_stale())
+              esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/smartshunt/status"), std::string("online"), 0, true);
+            if (!((EPEverHandler*)id(handler_ep))->is_stale())
+              esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/epever/status"), std::string("online"), 0, true);
+          }
+
+button:
+  - platform: restart
+    name: "Restart"
+
+  - platform: template
+    name: "Toggle Debug Level"
+    icon: "mdi:toggle-switch"
+    on_press:
+      - lambda: |-
+          if (id(logger_level) == "WARN") {
+            id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_DEBUG);
+            id(logger_level) = "DEBUG";
+          } else {
+            id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_WARN);
+            id(logger_level) = "WARN";
+          }
+          id(debug_level_sensor).publish_state(id(logger_level));
