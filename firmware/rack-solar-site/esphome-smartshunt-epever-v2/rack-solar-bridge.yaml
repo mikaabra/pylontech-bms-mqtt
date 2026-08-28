@@ -64,51 +64,9 @@ mqtt:
     payload: "offline"
     retain: true
   discovery: false
-  on_connect:
-    - lambda: |-
-        ESP_LOGI("mqtt", "MQTT connected");
-        ((SmartShuntHandler*)id(handler_sm))->on_mqtt_connect();
-        ((EPEverHandler*)id(handler_ep))->on_mqtt_connect();
-        ((SmartShuntHandler*)id(handler_sm))->publish_discovery();
-        ((EPEverHandler*)id(handler_ep))->publish_discovery();
-    - lambda: |-
-        // Publish diagnostic discovery
-        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
-        char topic[160], payload[768];
-        const char* device_json = R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})";
-        const char* diag_avail = R"("availability_topic":"rack-solar/status","payload_available":"online","payload_not_available":"offline")";
-        const char* diag_sensors[][5] = {
-            {"bitflip_rate", "Bitflip Rate", "events/min", "", ""},
-            {"data_quality_score", "Data Quality Score", "%", "", ""},
-            {"bitflip_window_total", "Bitflip Window Total", "events", "", ""},
-            {"rs485_crc_errors", "RS485 CRC Errors", "", "", ""},
-            {"rs485_timeout_errors", "RS485 Timeout Errors", "", "", ""},
-            {"rs485_frame_errors", "RS485 Frame Errors", "", "", ""},
-            {"smartshunt_stale", "SmartShunt Stale", "", "", ""},
-            {"epever_stale", "EPEVER Stale", "", "", ""},
-            {"free_heap", "Free Heap", "bytes", "", ""},
-            {"wifi_signal", "WiFi Signal", "dBm", "signal_strength", ""},
-            {"uptime", "Uptime", "s", "duration", ""},
-        };
-        for (int i = 0; i < 11; i++) {
-            snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", diag_sensors[i][0]);
-            if (build_ha_sensor_payload(payload, sizeof(payload), diag_sensors[i][0],
-                (std::string("rack-solar/") + diag_sensors[i][0]).c_str(),
-                (std::string("rack_solar_") + diag_sensors[i][0]).c_str(),
-                diag_sensors[i][2], diag_sensors[i][3], "", diag_avail, device_json, "diagnostic")) {
-                esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-            }
-        }
-        snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/rack_solar/bitflip_rate_alert/config");
-        if (build_ha_binary_sensor_payload(payload, sizeof(payload), "Bitflip Rate Alert",
-            "rack-solar/bitflip_rate_alert", "rack_solar_bitflip_rate_alert",
-            "problem", "", "ON", "OFF", diag_avail, device_json, "diagnostic")) {
-            esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-        }
-    - mqtt.publish:
-        topic: rack-solar/info
-        payload: "Rack Solar Bridge v2"
-        retain: false
+  # on_connect trigger doesn't fire reliably on this ESP32-S3 + ESP-IDF build.
+  # Discovery publishing is handled by the 3s interval fallback below, which
+  # detects MQTT connection and publishes discovery + resets hysteresis.
   reboot_timeout: 0s
 
 api:
@@ -181,6 +139,12 @@ globals:
     type: uint32_t
     initial_value: '0'
     restore_value: true
+  - id: discovery_published
+    type: bool
+    initial_value: 'false'
+  - id: mqtt_was_connected
+    type: bool
+    initial_value: 'false'
 
 # Text sensors from victron platform
 text_sensor:
@@ -702,6 +666,22 @@ sensor:
         - lambda: ((EPEverHandler*)id(handler_ep))->handle_total_energy(x);
 
 interval:
+  - interval: 3s
+    then:
+      - lambda: |-
+          bool connected = esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected();
+          if (!connected && id(mqtt_was_connected)) {
+            id(discovery_published) = false;
+            id(mqtt_was_connected) = false;
+          }
+          if (connected) id(mqtt_was_connected) = true;
+          if (!id(discovery_published) && connected) {
+            id(discovery_published) = true;
+            ESP_LOGI("mqtt", "Publishing discovery...");
+            ((SmartShuntHandler*)id(handler_sm))->on_mqtt_connect();
+            ((EPEverHandler*)id(handler_ep))->on_mqtt_connect();
+            esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/info"), std::string("Rack Solar Bridge v2"));
+          }
   - interval: 10s
     then:
       - lambda: ((SmartShuntHandler*)id(handler_sm))->check_stale();
