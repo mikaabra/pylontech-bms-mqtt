@@ -447,48 +447,48 @@ public:
             if (batteries_[batt].has_analog && batt_min < 99.0f) {
                 int idx = batt;
 
-                if (hyst_batt_cell_min_[idx].check(batt_min, 0.005f, 0.0f, 5.0f, 0xFFFFFFFF)) {
+                if (hyst_batt_cell_min_[idx].check(batt_min, 0.005f, 0.0f, 5.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/cell_min", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.3f", batt_min);
                     publish_raw(topic, payload);
                 }
-                if (hyst_batt_cell_max_[idx].check(batt_max, 0.005f, 0.0f, 5.0f, 0xFFFFFFFF)) {
+                if (hyst_batt_cell_max_[idx].check(batt_max, 0.005f, 0.0f, 5.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/cell_max", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.3f", batt_max);
                     publish_raw(topic, payload);
                 }
                 float cell_delta = (batt_max - batt_min) * 1000.0f;
-                if (hyst_batt_cell_delta_[idx].check(cell_delta, 5.0f, 0.0f, 5000.0f, 0xFFFFFFFF)) {
+                if (hyst_batt_cell_delta_[idx].check(cell_delta, 5.0f, 0.0f, 5000.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/cell_delta_mv", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.1f", cell_delta);
                     publish_raw(topic, payload);
                 }
-                if (hyst_batt_voltage_[idx].check(batteries_[batt].voltage, 0.1f, 0.0f, 100.0f, 0xFFFFFFFF)) {
+                if (hyst_batt_voltage_[idx].check(batteries_[batt].voltage, 0.1f, 0.0f, 100.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/voltage", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.2f", batteries_[batt].voltage);
                     publish_raw(topic, payload);
                 }
-                if (hyst_batt_current_[idx].check(batteries_[batt].current, 0.05f, -500.0f, 500.0f, 0xFFFFFFFF)) {
+                if (hyst_batt_current_[idx].check(batteries_[batt].current, 0.05f, -500.0f, 500.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/current", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.2f", batteries_[batt].current);
                     publish_raw(topic, payload);
                 }
-                if (hyst_batt_soc_[idx].check(batteries_[batt].soc, 1.0f, 0.0f, 100.0f, 0xFFFFFFFF)) {
+                if (hyst_batt_soc_[idx].check(batteries_[batt].soc, 1.0f, 0.0f, 100.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/soc", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.0f", batteries_[batt].soc);
                     publish_raw(topic, payload);
                 }
-                if (hyst_batt_remain_ah_[idx].check(batteries_[batt].remain_ah, 0.5f, 0.0f, 1000.0f, 0xFFFFFFFF)) {
+                if (hyst_batt_remain_ah_[idx].check(batteries_[batt].remain_ah, 0.5f, 0.0f, 1000.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/remain_ah", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.1f", batteries_[batt].remain_ah);
                     publish_raw(topic, payload);
                 }
-                if (hyst_batt_total_ah_[idx].check(batteries_[batt].total_ah, 0.5f, 0.0f, 1000.0f, 0xFFFFFFFF)) {
+                if (hyst_batt_total_ah_[idx].check(batteries_[batt].total_ah, 0.5f, 0.0f, 1000.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/total_ah", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.1f", batteries_[batt].total_ah);
                     publish_raw(topic, payload);
                 }
-                if (hyst_batt_cycles_[idx].check(batteries_[batt].cycles, 1, 0, 100000, 0xFFFFFFFF)) {
+                if (hyst_batt_cycles_[idx].check(batteries_[batt].cycles, 1, 0, 100000, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/cycles", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%d", batteries_[batt].cycles);
                     publish_raw(topic, payload);
@@ -498,7 +498,7 @@ public:
             if (batteries_[batt].has_alarm) {
                 int idx = batt;
 
-                if (hyst_batt_balancing_count_[idx].check(batteries_[batt].balancing_count, 1, 0, 100, 0xFFFFFFFF) ||
+                if (hyst_batt_balancing_count_[idx].check(batteries_[batt].balancing_count, 1, 0, 100, 60000) ||
                     hyst_batt_balancing_cells_[idx].check(batteries_[batt].balancing_cells)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/balancing_count", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%d", batteries_[batt].balancing_count);
@@ -508,7 +508,7 @@ public:
                     snprintf(topic, sizeof(topic), "%s/battery%d/balancing_cells", mqtt_prefix_.c_str(), batt);
                     publish_raw(topic, batteries_[batt].balancing_cells.c_str());
                 }
-                if (hyst_batt_overvolt_count_[idx].check(batteries_[batt].overvolt_count, 1, 0, 100, 0xFFFFFFFF) ||
+                if (hyst_batt_overvolt_count_[idx].check(batteries_[batt].overvolt_count, 1, 0, 100, 60000) ||
                     hyst_batt_overvolt_cells_[idx].check(batteries_[batt].overvolt_cells)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/overvolt_count", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%d", batteries_[batt].overvolt_count);
@@ -556,7 +556,7 @@ public:
                     float v = batteries_[batt].cell_voltages[cell];
                     if (v > 0.1f) {
                         int cell_idx = batt * 16 + cell;
-                        if (hyst_cell_voltages_[cell_idx].check(v, 0.010f, 0.0f, 5.0f, 0xFFFFFFFF)) {
+                        if (hyst_cell_voltages_[cell_idx].check(v, 0.010f, 0.0f, 5.0f, 60000)) {
                             snprintf(topic, sizeof(topic), "%s/battery%d/cell%02d", mqtt_prefix_.c_str(), batt, cell + 1);
                             snprintf(payload, sizeof(payload), "%.3f", v);
                             publish_raw(topic, payload);
@@ -567,7 +567,7 @@ public:
                     float temp = batteries_[batt].cell_temps[t];
                     if (temp > -40.0f && temp < 100.0f) {
                         int temp_idx = batt * 6 + t;
-                        if (hyst_batt_temps_[temp_idx].check(temp, 0.2f, -40.0f, 100.0f, 0xFFFFFFFF)) {
+                        if (hyst_batt_temps_[temp_idx].check(temp, 0.2f, -40.0f, 100.0f, 60000)) {
                             snprintf(topic, sizeof(topic), "%s/battery%d/temp%d", mqtt_prefix_.c_str(), batt, t + 1);
                             snprintf(payload, sizeof(payload), "%.1f", temp);
                             publish_raw(topic, payload);
@@ -580,46 +580,46 @@ public:
         if (stack_cell_min < 99.0f && valid_batts > 0) {
             stack_voltage /= valid_batts;
 
-            if (hyst_stack_cell_min_.check(stack_cell_min, 0.005f, 0.0f, 5.0f, 0xFFFFFFFF)) {
+            if (hyst_stack_cell_min_.check(stack_cell_min, 0.005f, 0.0f, 5.0f, 60000)) {
                 snprintf(payload, sizeof(payload), "%.3f", stack_cell_min);
                 publish_raw((mqtt_prefix_ + "/stack/cell_min").c_str(), payload);
             }
-            if (hyst_stack_cell_max_.check(stack_cell_max, 0.005f, 0.0f, 5.0f, 0xFFFFFFFF)) {
+            if (hyst_stack_cell_max_.check(stack_cell_max, 0.005f, 0.0f, 5.0f, 60000)) {
                 snprintf(payload, sizeof(payload), "%.3f", stack_cell_max);
                 publish_raw((mqtt_prefix_ + "/stack/cell_max").c_str(), payload);
             }
             float stack_cell_delta = (stack_cell_max - stack_cell_min) * 1000.0f;
-            if (hyst_stack_cell_delta_.check(stack_cell_delta, 5.0f, 0.0f, 5000.0f, 0xFFFFFFFF)) {
+            if (hyst_stack_cell_delta_.check(stack_cell_delta, 5.0f, 0.0f, 5000.0f, 60000)) {
                 snprintf(payload, sizeof(payload), "%.1f", stack_cell_delta);
                 publish_raw((mqtt_prefix_ + "/stack/cell_delta_mv").c_str(), payload);
             }
-            if (hyst_stack_voltage_.check(stack_voltage, 0.1f, 0.0f, 100.0f, 0xFFFFFFFF)) {
+            if (hyst_stack_voltage_.check(stack_voltage, 0.1f, 0.0f, 100.0f, 60000)) {
                 snprintf(payload, sizeof(payload), "%.2f", stack_voltage);
                 publish_raw((mqtt_prefix_ + "/stack/voltage").c_str(), payload);
             }
-            if (hyst_stack_current_.check(stack_current, 0.05f, -500.0f, 500.0f, 0xFFFFFFFF)) {
+            if (hyst_stack_current_.check(stack_current, 0.05f, -500.0f, 500.0f, 60000)) {
                 snprintf(payload, sizeof(payload), "%.2f", stack_current);
                 publish_raw((mqtt_prefix_ + "/stack/current").c_str(), payload);
             }
             if (stack_temp_min < 99.0f) {
-                if (hyst_stack_temp_min_.check(stack_temp_min, 0.2f, -40.0f, 100.0f, 0xFFFFFFFF)) {
+                if (hyst_stack_temp_min_.check(stack_temp_min, 0.2f, -40.0f, 100.0f, 60000)) {
                     snprintf(payload, sizeof(payload), "%.1f", stack_temp_min);
                     publish_raw((mqtt_prefix_ + "/stack/temp_min").c_str(), payload);
                 }
-                if (hyst_stack_temp_max_.check(stack_temp_max, 0.2f, -40.0f, 100.0f, 0xFFFFFFFF)) {
+                if (hyst_stack_temp_max_.check(stack_temp_max, 0.2f, -40.0f, 100.0f, 60000)) {
                     snprintf(payload, sizeof(payload), "%.1f", stack_temp_max);
                     publish_raw((mqtt_prefix_ + "/stack/temp_max").c_str(), payload);
                 }
             }
             if (has_any_alarm_) {
-                if (hyst_stack_balancing_count_.check(stack_balancing_count_, 1, 0, 100, 0xFFFFFFFF) ||
+                if (hyst_stack_balancing_count_.check(stack_balancing_count_, 1, 0, 100, 60000) ||
                     hyst_stack_balancing_cells_.check(stack_balancing_cells_)) {
                     snprintf(payload, sizeof(payload), "%d", stack_balancing_count_);
                     publish_raw((mqtt_prefix_ + "/stack/balancing_count").c_str(), payload);
                     publish_raw((mqtt_prefix_ + "/stack/balancing_active").c_str(), stack_balancing_count_ > 0 ? "1" : "0");
                     publish_raw((mqtt_prefix_ + "/stack/balancing_cells").c_str(), stack_balancing_cells_.c_str());
                 }
-                if (hyst_stack_overvolt_count_.check(stack_overvolt_count_, 1, 0, 100, 0xFFFFFFFF) ||
+                if (hyst_stack_overvolt_count_.check(stack_overvolt_count_, 1, 0, 100, 60000) ||
                     hyst_stack_overvolt_cells_.check(stack_overvolt_cells_)) {
                     snprintf(payload, sizeof(payload), "%d", stack_overvolt_count_);
                     publish_raw((mqtt_prefix_ + "/stack/overvolt_count").c_str(), payload);
