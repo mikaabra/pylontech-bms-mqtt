@@ -311,16 +311,13 @@ public:
             {"bitflip_rate",            "Bitflip Rate",             "events/min", "",                      ""},
             {"data_quality_score",      "Data Quality Score",      "%",          "",                      ""},
             {"bitflip_window_total",    "Bitflip Window Total",    "events",     "",                      ""},
-            {"rs485_crc_errors",        "RS485 CRC Errors",        "",           "",                      ""},
-            {"rs485_timeout_errors",   "RS485 Timeout Errors",   "",           "",                      ""},
-            {"rs485_frame_errors",      "RS485 Frame Errors",     "",           "",                      ""},
             {"smartshunt_stale",        "SmartShunt Stale",       "",           "",                      ""},
             {"epever_stale",            "EPEVER Stale",           "",           "",                      ""},
             {"free_heap",               "Free Heap",              "bytes",      "",                      ""},
             {"wifi_signal",             "WiFi Signal",            "dBm",        "signal_strength",       ""},
             {"uptime",                  "Uptime",                 "s",          "duration",              ""},
         };
-        for (int i = 0; i < 11; i++) {
+        for (int i = 0; i < 8; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", diag_sensors[i][0]);
             char st[96], uid[64];
             snprintf(st, sizeof(st), "rack-solar/%s", diag_sensors[i][0]);

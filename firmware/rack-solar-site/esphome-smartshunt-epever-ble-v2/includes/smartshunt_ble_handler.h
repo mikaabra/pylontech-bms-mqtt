@@ -12,14 +12,17 @@
 // so no stability windows or text validation are needed.
 // HysteresisFloat/HysteresisInt from shared/hysteresis.h handle threshold +
 // heartbeat logic. AvailabilityTracker handles stale detection (30s).
+// Availability is driven by the raw on_ble_message() callback (Finding #7),
+// not the filtered sensor callbacks.
 
 class SmartShuntBLEHandler {
 public:
+    static constexpr uint32_t BLE_DEGRADED_MS = 3000;
+    static constexpr uint32_t BLE_DISCONNECTED_MS = 30000;
+
     SmartShuntBLEHandler() : availability_("rack-solar/smartshunt/status") {}
 
     void handle_battery_voltage(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (hys_volt_.check(x, 0.1f, 15.0f, 35.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.2f", x);
             publish_topic("battery_voltage", val);
@@ -27,8 +30,6 @@ public:
     }
 
     void handle_battery_current(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (hys_current_.check(x, 0.1f, -200.0f, 200.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.2f", x);
             publish_topic("battery_current", val);
@@ -36,8 +37,6 @@ public:
     }
 
     void handle_state_of_charge(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        availability_.mark_online(esphome::mqtt::global_mqtt_client);
         int val = (int)roundf(x);
         if (hys_soc_.check(val, 1, 0, 100)) {
             publish_topic("state_of_charge", std::to_string(val).c_str());
@@ -45,8 +44,6 @@ public:
     }
 
     void handle_instantaneous_power(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (hys_power_.check(x, 5.0f, -10000.0f, 10000.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.0f", x);
             publish_topic("instantaneous_power", val);
@@ -54,8 +51,6 @@ public:
     }
 
     void handle_consumed_amp_hours(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (hys_consumed_ah_.check(x, 1.0f, -999999.0f, 999999.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.1f", x);
             publish_topic("consumed_amp_hours", val);
@@ -63,18 +58,20 @@ public:
     }
 
     void handle_time_to_go(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        availability_.mark_online(esphome::mqtt::global_mqtt_client);
         int val = (int)roundf(x);
         if (hys_time_to_go_.check(val, 1)) {
             publish_topic("time_to_go", std::to_string(val).c_str());
         }
     }
 
-    // Called from victron_ble on_battery_monitor_message to track BLE connectivity
+    // Called from victron_ble on_battery_monitor_message to track BLE connectivity.
+    // This is the availability signal (Finding #7) — fires every ~1s, more
+    // responsive than the 5s/30s filtered sensor callbacks.
     void on_ble_message() {
         ble_message_count_++;
         ble_last_message_time_ = millis();
+        last_data_rx_ = millis();
+        availability_.mark_online(esphome::mqtt::global_mqtt_client);
     }
 
     uint32_t get_ble_message_count() const { return ble_message_count_; }
@@ -87,8 +84,8 @@ public:
     const char* get_ble_connection_status() const {
         if (ble_message_count_ == 0) return "INITIALIZING";
         uint32_t elapsed = safe_elapsed(millis(), ble_last_message_time_);
-        if (elapsed < 3000) return "CONNECTED";
-        if (elapsed < 30000) return "DEGRADED";
+        if (elapsed < BLE_DEGRADED_MS) return "CONNECTED";
+        if (elapsed < BLE_DISCONNECTED_MS) return "DEGRADED";
         return "DISCONNECTED";
     }
 
@@ -101,10 +98,9 @@ public:
         uint32_t elapsed = safe_elapsed(now, last_data_rx_);
         if (elapsed > 30000 && !availability_.stale) {
             availability_.mark_stale(esphome::mqtt::global_mqtt_client);
-            received_data_ = false;
             reset_hysteresis();
         } else if (elapsed <= 30000 && availability_.stale) {
-            // Data flowing again — mark_online will be called by next handler invocation
+            // Data flowing again — mark_online will be called by next on_ble_message
             // but also handle it here for the case where data resumed between callbacks
             availability_.mark_online(esphome::mqtt::global_mqtt_client);
         }
@@ -125,18 +121,15 @@ public:
         const char* diag_avail = R"("availability_topic":"rack-solar/status","payload_available":"online","payload_not_available":"offline")";
 
         const char* diag_sensors[][5] = {
-            {"rs485_crc_errors",      "RS485 CRC Errors",             "",     "",                  ""},
-            {"rs485_timeout_errors", "RS485 Timeout Errors",        "",     "",                  ""},
-            {"rs485_frame_errors",   "RS485 Frame Errors",          "",     "",                  ""},
             {"smartshunt_stale",     "SmartShunt Stale",            "",     "",                  ""},
             {"epever_stale",         "EPEVER Stale",                "",     "",                  ""},
             {"free_heap",            "Free Heap",                   "bytes","",                  ""},
             {"wifi_signal",          "WiFi Signal",                 "dBm",  "signal_strength",   ""},
             {"uptime",               "Uptime",                     "s",    "duration",          "total_increasing"},
-            {"ble_message_count",    "BLE Message Count",          "msgs", "",                  "measurement"},
+            {"ble_message_count",    "BLE Message Count",          "msgs", "",                  "total_increasing"},
             {"ble_time_since_last",  "BLE Time Since Last Message", "s",    "",                  "measurement"},
         };
-        for (int i = 0; i < 10; i++) {
+        for (int i = 0; i < 7; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", diag_sensors[i][0]);
             char st[96], uid[64];
             snprintf(st, sizeof(st), "rack-solar/%s", diag_sensors[i][0]);
@@ -187,7 +180,6 @@ public:
 private:
     AvailabilityTracker availability_;
     uint32_t last_data_rx_ = 0;
-    bool received_data_ = false;
 
     // BLE connectivity tracking
     uint32_t ble_message_count_ = 0;

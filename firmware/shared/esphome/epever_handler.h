@@ -12,8 +12,8 @@ public:
     EPEverHandler() : availability_("rack-solar/epever/status") {}
 
     void handle_solar_voltage(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        reset_failures_and_mark_online();
+        last_pv_rx_ = millis();
+        mark_online_if_stale();
         if (hys_solar_v_.check(x, 0.1f, 0.0f, 100.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.2f", x);
             publish_topic("solar_voltage", val);
@@ -21,8 +21,8 @@ public:
     }
 
     void handle_pv_current(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        reset_failures_and_mark_online();
+        last_pv_rx_ = millis();
+        mark_online_if_stale();
         if (hys_pv_current_.check(x, 0.1f, 0.0f, 100.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.2f", x);
             publish_topic("pv_current", val);
@@ -30,8 +30,8 @@ public:
     }
 
     void handle_solar_power(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        reset_failures_and_mark_online();
+        last_pv_rx_ = millis();
+        mark_online_if_stale();
         if (hys_solar_power_.check(x, 1.0f, 0.0f, 10000.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.1f", x);
             publish_topic("solar_power", val);
@@ -39,18 +39,18 @@ public:
     }
 
     void handle_battery_capacity(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        reset_failures_and_mark_online();
         int val = (int)roundf(x);
         if (val < 0 || val > 100) return;
+        last_controller_rx_ = millis();
+        mark_online_if_stale();
         if (hys_batt_cap_.check(val, 1, 0, 100)) {
             publish_topic("battery_capacity", std::to_string(val).c_str());
         }
     }
 
     void handle_device_temp(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        reset_failures_and_mark_online();
+        last_controller_rx_ = millis();
+        mark_online_if_stale();
         if (hys_device_temp_.check(x, 0.5f, -40.0f, 100.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.1f", x);
             publish_topic("device_temp", val);
@@ -58,8 +58,8 @@ public:
     }
 
     void handle_battery_voltage(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        reset_failures_and_mark_online();
+        last_battery_rx_ = millis();
+        mark_online_if_stale();
         if (hys_batt_v_.check(x, 0.1f, 15.0f, 30.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.2f", x);
             publish_topic("battery_voltage", val);
@@ -67,8 +67,8 @@ public:
     }
 
     void handle_battery_current(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        reset_failures_and_mark_online();
+        last_battery_rx_ = millis();
+        mark_online_if_stale();
         if (hys_batt_current_.check(x, 0.1f, -100.0f, 100.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.2f", x);
             publish_topic("battery_current", val);
@@ -76,8 +76,8 @@ public:
     }
 
     void handle_total_energy(float x) {
-        last_data_rx_ = millis(); received_data_ = true;
-        reset_failures_and_mark_online();
+        last_battery_rx_ = millis();
+        mark_online_if_stale();
         if (hys_total_energy_.check(x, 0.1f, 0.0f, 999999.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.2f", x);
             publish_topic("total_energy", val);
@@ -86,30 +86,27 @@ public:
 
     void check_stale() {
         uint32_t now = millis();
-        if (last_data_rx_ == 0) {
+        // Use the most recent of all three register group timestamps
+        uint32_t last_rx = last_pv_rx_;
+        if (last_controller_rx_ > last_rx) last_rx = last_controller_rx_;
+        if (last_battery_rx_ > last_rx) last_rx = last_battery_rx_;
+
+        if (last_rx == 0) {
             if (!availability_.stale) availability_.mark_stale(esphome::mqtt::global_mqtt_client);
             return;
         }
-        uint32_t elapsed = safe_elapsed(now, last_data_rx_);
-        if (elapsed < 30000) {
-            if (consecutive_failures_ > 0) consecutive_failures_ = 0;
-            if (availability_.stale) {
-                availability_.mark_online(esphome::mqtt::global_mqtt_client);
-            }
-        } else {
-            if (consecutive_failures_ < 3) consecutive_failures_++;
-            if (consecutive_failures_ >= 3 && !availability_.stale) {
-                availability_.mark_stale(esphome::mqtt::global_mqtt_client);
-                received_data_ = false;
-                reset_hysteresis();
-            }
+        uint32_t elapsed = safe_elapsed(now, last_rx);
+        if (elapsed > 90000 && !availability_.stale) {
+            availability_.mark_stale(esphome::mqtt::global_mqtt_client);
+            reset_hysteresis();
+        } else if (elapsed <= 90000 && availability_.stale) {
+            availability_.mark_online(esphome::mqtt::global_mqtt_client);
         }
     }
 
     void on_mqtt_connect() {
         availability_.on_connect(esphome::mqtt::global_mqtt_client);
         reset_hysteresis();
-        consecutive_failures_ = 0;
         publish_discovery();
     }
 
@@ -147,16 +144,16 @@ public:
 
 private:
     AvailabilityTracker availability_;
-    uint32_t last_data_rx_ = 0;
-    bool received_data_ = false;
-    int consecutive_failures_ = 0;
+    // Per-register-group timestamps (Finding #2): EPEVER stays online if any group is active
+    uint32_t last_pv_rx_ = 0;        // solar_voltage, pv_current, solar_power
+    uint32_t last_controller_rx_ = 0; // battery_capacity, device_temp
+    uint32_t last_battery_rx_ = 0;    // battery_voltage, battery_current, total_energy
 
     HysteresisFloat hys_solar_v_, hys_pv_current_, hys_solar_power_;
     HysteresisInt hys_batt_cap_;
     HysteresisFloat hys_device_temp_, hys_batt_v_, hys_batt_current_, hys_total_energy_;
 
-    void reset_failures_and_mark_online() {
-        consecutive_failures_ = 0;
+    void mark_online_if_stale() {
         if (availability_.stale) {
             availability_.mark_online(esphome::mqtt::global_mqtt_client);
         }
