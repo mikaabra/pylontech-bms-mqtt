@@ -127,18 +127,6 @@ globals:
   - id: logger_level
     type: std::string
     initial_value: '"INFO"'
-  - id: rs485_crc_errors
-    type: uint32_t
-    initial_value: '0'
-    restore_value: true
-  - id: rs485_timeout_errors
-    type: uint32_t
-    initial_value: '0'
-    restore_value: true
-  - id: rs485_frame_errors
-    type: uint32_t
-    initial_value: '0'
-    restore_value: true
   - id: discovery_published
     type: bool
     initial_value: 'false'
@@ -320,55 +308,6 @@ sensor:
               last_heap = current;
               if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
                 esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/free_heap"), to_string(current));
-            }
-
-  - platform: template
-    name: "RS485 CRC Errors"
-    id: rs485_crc_errors_sensor
-    state_topic: null
-    lambda: 'return (float)id(rs485_crc_errors);'
-    update_interval: 5s
-    entity_category: diagnostic
-    on_value:
-      then:
-        - lambda: |-
-            static int last_val = -1;
-            if ((int)x != last_val) {
-              last_val = (int)x;
-              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
-                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/rs485_crc_errors"), to_string((int)x));
-            }
-
-  - platform: template
-    name: "RS485 Timeout Errors"
-    state_topic: null
-    lambda: 'return (float)id(rs485_timeout_errors);'
-    update_interval: 5s
-    entity_category: diagnostic
-    on_value:
-      then:
-        - lambda: |-
-            static int last_val = -1;
-            if ((int)x != last_val) {
-              last_val = (int)x;
-              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
-                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/rs485_timeout_errors"), to_string((int)x));
-            }
-
-  - platform: template
-    name: "RS485 Frame Errors"
-    state_topic: null
-    lambda: 'return (float)id(rs485_frame_errors);'
-    update_interval: 5s
-    entity_category: diagnostic
-    on_value:
-      then:
-        - lambda: |-
-            static int last_val = -1;
-            if ((int)x != last_val) {
-              last_val = (int)x;
-              if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
-                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/rs485_frame_errors"), to_string((int)x));
             }
 
   - platform: template

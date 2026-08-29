@@ -20,10 +20,10 @@ public:
 
     void handle_0x351(const std::vector<uint8_t>& x) {
         frame_count_++;
-        last_can_rx_ = millis();
 
         if (x.size() < 8) { error_count_++; return; }
 
+        last_can_rx_ = millis();
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
 
         float v_charge_max = can_le_u16(x[0], x[1]) / 10.0f;
@@ -73,10 +73,10 @@ public:
 
     void handle_0x355(const std::vector<uint8_t>& x) {
         frame_count_++;
-        last_can_rx_ = millis();
 
         if (x.size() < 4) { error_count_++; return; }
 
+        last_can_rx_ = millis();
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
 
         uint16_t soc = can_le_u16(x[0], x[1]);
@@ -108,10 +108,10 @@ public:
 
     void handle_0x359(const std::vector<uint8_t>& x) {
         frame_count_++;
-        last_can_rx_ = millis();
 
         if (x.size() < 8) { error_count_++; return; }
 
+        last_can_rx_ = millis();
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         received_0x359_ = true;
 
@@ -160,10 +160,10 @@ public:
 
     void handle_0x35C(const std::vector<uint8_t>& x) {
         frame_count_++;
-        last_can_rx_ = millis();
 
         if (x.size() < 8) { error_count_++; return; }
 
+        last_can_rx_ = millis();
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         received_0x35C_ = true;
 
@@ -185,10 +185,10 @@ public:
 
     void handle_0x370(const std::vector<uint8_t>& x) {
         frame_count_++;
-        last_can_rx_ = millis();
 
         if (x.size() < 8) { error_count_++; return; }
 
+        last_can_rx_ = millis();
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
 
         float t1 = can_le_u16(x[0], x[1]) / 10.0f;

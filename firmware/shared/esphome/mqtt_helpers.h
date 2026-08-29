@@ -17,7 +17,6 @@ inline bool safe_snprintf(char* buf, size_t size, const char* fmt, ...) {
 struct PublishPacer {
     int count = 0;
     int yield_every = 20;
-    uint32_t delay_ms = 10;
 
     void pace() {
         count++;

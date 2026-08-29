@@ -311,16 +311,13 @@ public:
             {"bitflip_rate",            "Bitflip Rate",             "events/min", "",                      ""},
             {"data_quality_score",      "Data Quality Score",      "%",          "",                      ""},
             {"bitflip_window_total",    "Bitflip Window Total",    "events",     "",                      ""},
-            {"rs485_crc_errors",        "RS485 CRC Errors",        "",           "",                      ""},
-            {"rs485_timeout_errors",   "RS485 Timeout Errors",   "",           "",                      ""},
-            {"rs485_frame_errors",      "RS485 Frame Errors",     "",           "",                      ""},
             {"smartshunt_stale",        "SmartShunt Stale",       "",           "",                      ""},
             {"epever_stale",            "EPEVER Stale",           "",           "",                      ""},
             {"free_heap",               "Free Heap",              "bytes",      "",                      ""},
             {"wifi_signal",             "WiFi Signal",            "dBm",        "signal_strength",       ""},
             {"uptime",                  "Uptime",                 "s",          "duration",              ""},
         };
-        for (int i = 0; i < 11; i++) {
+        for (int i = 0; i < 8; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", diag_sensors[i][0]);
             char st[96], uid[64];
             snprintf(st, sizeof(st), "rack-solar/%s", diag_sensors[i][0]);
@@ -344,7 +341,7 @@ public:
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         char topic[160], payload[768];
         PublishPacer pacer;
-        pacer.yield_every = 10; pacer.delay_ms = 50;
+        pacer.yield_every = 10;
         const char* device_json = R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})";
         const char* avail = R"("availability_topic":"rack-solar/smartshunt/status","payload_available":"online","payload_not_available":"offline")";
 
