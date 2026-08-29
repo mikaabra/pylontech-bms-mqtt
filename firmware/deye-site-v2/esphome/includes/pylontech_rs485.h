@@ -280,18 +280,21 @@ public:
                     if (!error.empty()) {
                         ESP_LOGW("rs485", "Batt %d alarm poll failed: %s", batt, error.c_str());
                         handle_alarm_failure(batt);
-                    } else if (response.length() > 18) {
-                        if (batteries_[batt].alarm_poll_failures > 0 || batteries_[batt].alarm_poll_alarm) {
-                            batteries_[batt].alarm_poll_failures = 0;
-                            if (batteries_[batt].alarm_poll_alarm) {
-                                batteries_[batt].alarm_poll_alarm = false;
-                                publish_alarm_poll_alarm(batt, false);
-                            }
-                        }
-                        batteries_[batt].has_alarm = true;
-                        has_any_alarm_ = true;
+                    } else {
                         std::string data = response.substr(13, response.length() - 13 - 5);
-                        if (data.length() >= 40) {
+                        if (data.length() < 40) {
+                            ESP_LOGW("rs485", "Batt %d alarm response too short: %d bytes data", batt, data.length());
+                            handle_alarm_failure(batt);
+                        } else {
+                            if (batteries_[batt].alarm_poll_failures > 0 || batteries_[batt].alarm_poll_alarm) {
+                                batteries_[batt].alarm_poll_failures = 0;
+                                if (batteries_[batt].alarm_poll_alarm) {
+                                    batteries_[batt].alarm_poll_alarm = false;
+                                    publish_alarm_poll_alarm(batt, false);
+                                }
+                            }
+                            batteries_[batt].has_alarm = true;
+                            has_any_alarm_ = true;
                             parse_alarm_data(batt, data);
                         }
                     }
@@ -885,20 +888,28 @@ private:
     void compute_stack_totals() {
         int total_balancing = 0, total_overvolt = 0;
         for (int b = 0; b < num_batteries_; b++) {
+            if (!batteries_[b].has_alarm) continue;
             total_balancing += batteries_[b].balancing_count;
             total_overvolt += batteries_[b].overvolt_count;
         }
         stack_balancing_count_ = total_balancing;
         std::vector<std::string> cells_vec;
-        for (int b = 0; b < num_batteries_; b++) cells_vec.push_back(batteries_[b].balancing_cells);
+        for (int b = 0; b < num_batteries_; b++) {
+            if (!batteries_[b].has_alarm) { cells_vec.push_back(""); continue; }
+            cells_vec.push_back(batteries_[b].balancing_cells);
+        }
         stack_balancing_cells_ = build_stack_cells_string(cells_vec, num_batteries_);
         stack_overvolt_count_ = total_overvolt;
         std::vector<std::string> ov_vec;
-        for (int b = 0; b < num_batteries_; b++) ov_vec.push_back(batteries_[b].overvolt_cells);
+        for (int b = 0; b < num_batteries_; b++) {
+            if (!batteries_[b].has_alarm) { ov_vec.push_back(""); continue; }
+            ov_vec.push_back(batteries_[b].overvolt_cells);
+        }
         stack_overvolt_cells_ = build_stack_cells_string(ov_vec, num_batteries_);
 
         std::string stack_alarms_str;
         for (int b = 0; b < num_batteries_; b++) {
+            if (!batteries_[b].has_alarm) continue;
             if (!batteries_[b].alarms.empty()) {
                 if (!stack_alarms_str.empty()) stack_alarms_str += ",";
                 stack_alarms_str += batteries_[b].alarms;
