@@ -134,6 +134,7 @@ public:
                             }
                         }
                         last_analog_rx_ = now;
+                        has_analog_rx_ = true;
                         batteries_[batt].has_analog = true;
                         availability_.mark_online(esphome::mqtt::global_mqtt_client);
 
@@ -141,48 +142,104 @@ public:
                             std::string data = response.substr(13, response.length() - 13 - 5);
                             size_t idx = 4;
                             if (data.length() >= 6) {
-                                int num_cells = strtol(data.substr(idx, 2).c_str(), nullptr, 16);
+                                unsigned long hex_val;
+                                if (!parse_hex(data.substr(idx, 2), hex_val)) {
+                                    ESP_LOGW("rs485", "Batt %d analog: bad hex num_cells", batt);
+                                    handle_analog_failure(batt);
+                                    current_batt_ = (batt + 1) % num_batteries_;
+                                    last_analog_poll_ = now;
+                                    state_ = 0;
+                                    return;
+                                }
+                                int num_cells = (int)hex_val;
                                 idx += 2;
                                 int reported_cells = num_cells;
+
+                                bool parse_ok = true;
+                                float temp_cell_voltages[16] = {};
+                                float temp_cell_temps[6] = {-999.0f, -999.0f, -999.0f, -999.0f, -999.0f, -999.0f};
+                                float temp_current = 0.0f, temp_voltage = 0.0f;
+                                float temp_remain_ah = 0.0f, temp_total_ah = 0.0f;
+                                int temp_cycles = 0;
+
                                 for (int cell = 0; cell < num_cells && cell < 16 && data.length() >= idx + 4; cell++) {
-                                    int mv = strtol(data.substr(idx, 4).c_str(), nullptr, 16);
-                                    batteries_[batt].cell_voltages[cell] = mv / 1000.0f;
+                                    if (!parse_hex(data.substr(idx, 4), hex_val)) { parse_ok = false; break; }
+                                    temp_cell_voltages[cell] = hex_val / 1000.0f;
                                     idx += 4;
+                                }
+                                if (!parse_ok) {
+                                    ESP_LOGW("rs485", "Batt %d analog: bad hex cell voltage", batt);
+                                    handle_analog_failure(batt);
+                                    current_batt_ = (batt + 1) % num_batteries_;
+                                    last_analog_poll_ = now;
+                                    state_ = 0;
+                                    return;
                                 }
                                 idx += (reported_cells > 16) ? (reported_cells - 16) * 4 : 0;
                                 if (data.length() >= idx + 2) {
-                                    int num_temps = strtol(data.substr(idx, 2).c_str(), nullptr, 16);
-                                    idx += 2;
-                                    int reported_temps = num_temps;
-                                    for (int t = 0; t < num_temps && t < 6 && data.length() >= idx + 4; t++) {
-                                        int raw = strtol(data.substr(idx, 4).c_str(), nullptr, 16);
-                                        batteries_[batt].cell_temps[t] = (raw - 2731) / 10.0f;
+                                    if (!parse_hex(data.substr(idx, 2), hex_val)) { parse_ok = false; }
+                                    else {
+                                        int num_temps = (int)hex_val;
+                                        idx += 2;
+                                        int reported_temps = num_temps;
+                                        for (int t = 0; t < num_temps && t < 6 && data.length() >= idx + 4; t++) {
+                                            if (!parse_hex(data.substr(idx, 4), hex_val)) { parse_ok = false; break; }
+                                            temp_cell_temps[t] = (hex_val - 2731) / 10.0f;
+                                            idx += 4;
+                                        }
+                                        idx += (reported_temps > 6) ? (reported_temps - 6) * 4 : 0;
+                                    }
+                                }
+                                if (!parse_ok) {
+                                    ESP_LOGW("rs485", "Batt %d analog: bad hex temp data", batt);
+                                    handle_analog_failure(batt);
+                                    current_batt_ = (batt + 1) % num_batteries_;
+                                    last_analog_poll_ = now;
+                                    state_ = 0;
+                                    return;
+                                }
+                                if (data.length() >= idx + 4) {
+                                    if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
+                                    else {
+                                        int raw = (int)hex_val;
+                                        if (raw > 0x7FFF) raw -= 0x10000;
+                                        temp_current = raw / 100.0f;
                                         idx += 4;
                                     }
-                                    idx += (reported_temps > 6) ? (reported_temps - 6) * 4 : 0;
                                 }
-                                if (data.length() >= idx + 4) {
-                                    int raw = strtol(data.substr(idx, 4).c_str(), nullptr, 16);
-                                    if (raw > 0x7FFF) raw -= 0x10000;
-                                    batteries_[batt].current = raw / 100.0f;
-                                    idx += 4;
+                                if (parse_ok && data.length() >= idx + 4) {
+                                    if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
+                                    else { temp_voltage = hex_val / 100.0f; idx += 4; }
                                 }
-                                if (data.length() >= idx + 4) {
-                                    batteries_[batt].voltage = strtol(data.substr(idx, 4).c_str(), nullptr, 16) / 100.0f;
-                                    idx += 4;
+                                if (parse_ok && data.length() >= idx + 4) {
+                                    if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
+                                    else { temp_remain_ah = hex_val / 100.0f; idx += 4; }
                                 }
-                                if (data.length() >= idx + 4) {
-                                    batteries_[batt].remain_ah = strtol(data.substr(idx, 4).c_str(), nullptr, 16) / 100.0f;
-                                    idx += 4;
+                                if (parse_ok) idx += 2;
+                                if (parse_ok && data.length() >= idx + 4) {
+                                    if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
+                                    else { temp_total_ah = hex_val / 100.0f; idx += 4; }
                                 }
-                                idx += 2;
-                                if (data.length() >= idx + 4) {
-                                    batteries_[batt].total_ah = strtol(data.substr(idx, 4).c_str(), nullptr, 16) / 100.0f;
-                                    idx += 4;
+                                if (parse_ok && data.length() >= idx + 4) {
+                                    if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
+                                    else { temp_cycles = (int)hex_val; }
                                 }
-                                if (data.length() >= idx + 4) {
-                                    batteries_[batt].cycles = strtol(data.substr(idx, 4).c_str(), nullptr, 16);
+                                if (!parse_ok) {
+                                    ESP_LOGW("rs485", "Batt %d analog: bad hex in current/voltage/ah/cycles", batt);
+                                    handle_analog_failure(batt);
+                                    current_batt_ = (batt + 1) % num_batteries_;
+                                    last_analog_poll_ = now;
+                                    state_ = 0;
+                                    return;
                                 }
+
+                                memcpy(batteries_[batt].cell_voltages, temp_cell_voltages, sizeof(temp_cell_voltages));
+                                for (int t = 0; t < 6; t++) batteries_[batt].cell_temps[t] = temp_cell_temps[t];
+                                batteries_[batt].current = temp_current;
+                                batteries_[batt].voltage = temp_voltage;
+                                batteries_[batt].remain_ah = temp_remain_ah;
+                                batteries_[batt].total_ah = temp_total_ah;
+                                batteries_[batt].cycles = temp_cycles;
                                 if (batteries_[batt].total_ah > 0) {
                                     batteries_[batt].soc = (batteries_[batt].remain_ah / batteries_[batt].total_ah) * 100.0f;
                                 }
@@ -296,7 +353,11 @@ public:
                             }
                             batteries_[batt].has_alarm = true;
                             has_any_alarm_ = true;
-                            parse_alarm_data(batt, data);
+                            if (!parse_alarm_data(batt, data)) {
+                                ESP_LOGW("rs485", "Batt %d alarm hex parse failure", batt);
+                                batteries_[batt].has_alarm = false;
+                                handle_alarm_failure(batt);
+                            }
                         }
                     }
 
@@ -576,7 +637,7 @@ public:
 
     void check_stale() {
         uint32_t now = millis();
-        if (last_analog_rx_ == 0) {
+        if (!has_analog_rx_) {
             if (!availability_.stale) availability_.mark_stale(esphome::mqtt::global_mqtt_client);
             return;
         }
@@ -788,6 +849,7 @@ private:
     uint32_t last_alarm_poll_ = 0;
     uint32_t last_heartbeat_ = 0;
     uint32_t last_analog_rx_ = 0;
+    bool has_analog_rx_ = false;
     bool has_any_alarm_ = false;
 
     std::vector<BatteryData> batteries_;
@@ -924,15 +986,20 @@ private:
         }
     }
 
-    void parse_alarm_data(int batt, const std::string& data) {
-        int num_cells = strtol(data.substr(4, 2).c_str(), nullptr, 16);
+    bool parse_alarm_data(int batt, const std::string& data) {
+        bool parse_ok = true;
+        unsigned long hex_val;
+
+        if (!parse_hex(data.substr(4, 2), hex_val)) return false;
+        int num_cells = (int)hex_val;
         int overvolt_count = 0;
         std::string ov_cells_str;
 
         for (int c = 0; c < num_cells && c < 16; c++) {
             int pos = 6 + c * 2;
             if (pos + 2 <= (int)data.length()) {
-                int status = strtol(data.substr(pos, 2).c_str(), nullptr, 16);
+                if (!parse_hex(data.substr(pos, 2), hex_val)) { parse_ok = false; break; }
+                int status = (int)hex_val;
                 if (status == 0x02) {
                     overvolt_count++;
                     if (!ov_cells_str.empty()) ov_cells_str += ",";
@@ -940,106 +1007,137 @@ private:
                 }
             }
         }
-        batteries_[batt].overvolt_count = overvolt_count;
-        batteries_[batt].overvolt_cells = ov_cells_str;
 
-        int temp_pos = 6 + num_cells * 2;
-        if (temp_pos + 2 <= (int)data.length()) {
-            int num_temps = strtol(data.substr(temp_pos, 2).c_str(), nullptr, 16);
-            int status_pos = temp_pos + 2 + num_temps * 2;
-            int ext_bit_start = status_pos + 6;
+        int balancing = 0;
+        std::string bal_cells_str;
+        bool discharge_mosfet = false, charge_mosfet = false, lmcharge_mosfet = false;
+        std::string warnings_str, alarms_str, state_str;
+        bool cw_active = false;
+        std::string cw_cells_str;
 
-            bool balance_on = false;
-            if (ext_bit_start + 2 <= (int)data.length()) {
-                int balance_status = strtol(data.substr(ext_bit_start, 2).c_str(), nullptr, 16);
-                balance_on = (balance_status & 0x01) != 0;
-            }
+        if (parse_ok) {
+            int temp_pos = 6 + num_cells * 2;
+            if (temp_pos + 2 <= (int)data.length()) {
+                if (!parse_hex(data.substr(temp_pos, 2), hex_val)) parse_ok = false;
+                else {
+                    int num_temps = (int)hex_val;
+                    int status_pos = temp_pos + 2 + num_temps * 2;
+                    int ext_bit_start = status_pos + 6;
 
-            int balancing = 0;
-            std::string bal_cells_str;
-            if (balance_on && ext_bit_start + 22 <= (int)data.length()) {
-                int balance1_8 = strtol(data.substr(ext_bit_start + 18, 2).c_str(), nullptr, 16);
-                int balance9_16 = strtol(data.substr(ext_bit_start + 20, 2).c_str(), nullptr, 16);
-                for (int bit = 0; bit < 8; bit++) {
-                    if (balance1_8 & (1 << bit)) {
-                        balancing++;
-                        if (!bal_cells_str.empty()) bal_cells_str += ",";
-                        bal_cells_str += std::to_string(bit + 1);
+                    bool balance_on = false;
+                    if (ext_bit_start + 2 <= (int)data.length()) {
+                        if (!parse_hex(data.substr(ext_bit_start, 2), hex_val)) parse_ok = false;
+                        else balance_on = (hex_val & 0x01) != 0;
                     }
-                    if (balance9_16 & (1 << bit)) {
-                        balancing++;
-                        if (!bal_cells_str.empty()) bal_cells_str += ",";
-                        bal_cells_str += std::to_string(bit + 9);
+
+                    if (parse_ok && balance_on && ext_bit_start + 22 <= (int)data.length()) {
+                        unsigned long b1, b2;
+                        if (!parse_hex(data.substr(ext_bit_start + 18, 2), b1) ||
+                            !parse_hex(data.substr(ext_bit_start + 20, 2), b2)) {
+                            parse_ok = false;
+                        } else {
+                            for (int bit = 0; bit < 8; bit++) {
+                                if (b1 & (1 << bit)) {
+                                    balancing++;
+                                    if (!bal_cells_str.empty()) bal_cells_str += ",";
+                                    bal_cells_str += std::to_string(bit + 1);
+                                }
+                                if (b2 & (1 << bit)) {
+                                    balancing++;
+                                    if (!bal_cells_str.empty()) bal_cells_str += ",";
+                                    bal_cells_str += std::to_string(bit + 9);
+                                }
+                            }
+                        }
+                    }
+
+                    if (parse_ok && ext_bit_start + 18 <= (int)data.length()) {
+                        if (!parse_hex(data.substr(ext_bit_start + 16, 2), hex_val)) parse_ok = false;
+                        else {
+                            discharge_mosfet = (hex_val & 0x01) != 0;
+                            charge_mosfet = (hex_val & 0x02) != 0;
+                            lmcharge_mosfet = (hex_val & 0x04) != 0;
+                        }
+                    }
+
+                    if (parse_ok && ext_bit_start + 10 <= (int)data.length()) {
+                        if (!parse_hex(data.substr(ext_bit_start + 8, 2), hex_val)) parse_ok = false;
+                        else {
+                            int voltage_status = (int)hex_val;
+                            if (voltage_status & 0x01) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "cell_overvolt_alarm"; }
+                            if (voltage_status & 0x02) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "cell_overvolt_protect"; }
+                            if (voltage_status & 0x04) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "cell_undervolt_alarm"; }
+                            if (voltage_status & 0x08) { if (!alarms_str.empty()) alarms_str += ","; alarms_str += "cell_undervolt_protect"; }
+                            if (voltage_status & 0x10) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "pack_overvolt_alarm"; }
+                            if (voltage_status & 0x20) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "pack_overvolt_protect"; }
+                            if (voltage_status & 0x40) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "pack_undervolt_alarm"; }
+                            if (voltage_status & 0x80) { if (!alarms_str.empty()) alarms_str += ","; alarms_str += "pack_undervolt_protect"; }
+                        }
+                    }
+
+                    if (parse_ok && status_pos + 2 <= (int)data.length()) {
+                        if (!parse_hex(data.substr(status_pos, 2), hex_val)) parse_ok = false;
+                        else if (hex_val == 0x02) { if (!alarms_str.empty()) alarms_str += ","; alarms_str += "charge_overcurrent"; }
+                    }
+                    if (parse_ok && status_pos + 4 <= (int)data.length()) {
+                        if (!parse_hex(data.substr(status_pos + 2, 2), hex_val)) parse_ok = false;
+                        else {
+                            int module_voltage_status = (int)hex_val;
+                            if (module_voltage_status == 0x01) { if (!alarms_str.empty()) alarms_str += ","; alarms_str += "pack_undervolt"; }
+                            else if (module_voltage_status == 0x02) { if (!alarms_str.empty()) alarms_str += ","; alarms_str += "pack_overvolt"; }
+                        }
+                    }
+
+                    if (parse_ok && status_pos + 22 <= (int)data.length()) {
+                        unsigned long cw1, cw2;
+                        if (!parse_hex(data.substr(status_pos + 18, 2), cw1) ||
+                            !parse_hex(data.substr(status_pos + 20, 2), cw2)) {
+                            parse_ok = false;
+                        } else {
+                            cw_active = (cw1 != 0) || (cw2 != 0);
+                            for (int bit = 0; bit < 8; bit++) {
+                                if (cw1 & (1 << bit)) {
+                                    if (!cw_cells_str.empty()) cw_cells_str += ",";
+                                    cw_cells_str += std::to_string(bit + 1);
+                                }
+                                if (cw2 & (1 << bit)) {
+                                    if (!cw_cells_str.empty()) cw_cells_str += ",";
+                                    cw_cells_str += std::to_string(bit + 9);
+                                }
+                            }
+                        }
+                    }
+
+                    if (parse_ok && data.length() >= 2) {
+                        if (!parse_hex(data.substr(data.length() - 2, 2), hex_val)) parse_ok = false;
+                        else {
+                            int last_byte = (int)hex_val;
+                            if (last_byte & 0x01) state_str += "Discharge";
+                            if (last_byte & 0x02) { if (!state_str.empty()) state_str += ","; state_str += "Charge"; }
+                            if (last_byte & 0x04) { if (!state_str.empty()) state_str += ","; state_str += "Float"; }
+                            if (last_byte & 0x08) { if (!state_str.empty()) state_str += ","; state_str += "Full"; }
+                            if (last_byte & 0x10) { if (!state_str.empty()) state_str += ","; state_str += "Standby"; }
+                        }
                     }
                 }
-            }
-            batteries_[batt].balancing_count = balancing;
-            batteries_[batt].balancing_cells = bal_cells_str;
-
-            if (ext_bit_start + 18 <= (int)data.length()) {
-                int mosfet_status = strtol(data.substr(ext_bit_start + 16, 2).c_str(), nullptr, 16);
-                batteries_[batt].discharge_mosfet = (mosfet_status & 0x01) != 0;
-                batteries_[batt].charge_mosfet = (mosfet_status & 0x02) != 0;
-                batteries_[batt].lmcharge_mosfet = (mosfet_status & 0x04) != 0;
-            }
-
-            std::string warnings_str;
-            std::string alarms_str;
-            if (ext_bit_start + 10 <= (int)data.length()) {
-                int voltage_status = strtol(data.substr(ext_bit_start + 8, 2).c_str(), nullptr, 16);
-                if (voltage_status & 0x01) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "cell_overvolt_alarm"; }
-                if (voltage_status & 0x02) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "cell_overvolt_protect"; }
-                if (voltage_status & 0x04) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "cell_undervolt_alarm"; }
-                if (voltage_status & 0x08) { if (!alarms_str.empty()) alarms_str += ","; alarms_str += "cell_undervolt_protect"; }
-                if (voltage_status & 0x10) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "pack_overvolt_alarm"; }
-                if (voltage_status & 0x20) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "pack_overvolt_protect"; }
-                if (voltage_status & 0x40) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "pack_undervolt_alarm"; }
-                if (voltage_status & 0x80) { if (!alarms_str.empty()) alarms_str += ","; alarms_str += "pack_undervolt_protect"; }
-            }
-
-            if (status_pos + 2 <= (int)data.length()) {
-                int charge_current_status = strtol(data.substr(status_pos, 2).c_str(), nullptr, 16);
-                if (charge_current_status == 0x02) { if (!alarms_str.empty()) alarms_str += ","; alarms_str += "charge_overcurrent"; }
-            }
-            if (status_pos + 4 <= (int)data.length()) {
-                int module_voltage_status = strtol(data.substr(status_pos + 2, 2).c_str(), nullptr, 16);
-                if (module_voltage_status == 0x01) { if (!alarms_str.empty()) alarms_str += ","; alarms_str += "pack_undervolt"; }
-                else if (module_voltage_status == 0x02) { if (!alarms_str.empty()) alarms_str += ","; alarms_str += "pack_overvolt"; }
-            }
-
-            batteries_[batt].warnings = warnings_str;
-            batteries_[batt].alarms = alarms_str;
-
-            if (status_pos + 22 <= (int)data.length()) {
-                int cw_byte1 = strtol(data.substr(status_pos + 18, 2).c_str(), nullptr, 16);
-                int cw_byte2 = strtol(data.substr(status_pos + 20, 2).c_str(), nullptr, 16);
-                bool cw_active = (cw_byte1 != 0) || (cw_byte2 != 0);
-                std::string cw_cells_str;
-                for (int bit = 0; bit < 8; bit++) {
-                    if (cw_byte1 & (1 << bit)) {
-                        if (!cw_cells_str.empty()) cw_cells_str += ",";
-                        cw_cells_str += std::to_string(bit + 1);
-                    }
-                    if (cw_byte2 & (1 << bit)) {
-                        if (!cw_cells_str.empty()) cw_cells_str += ",";
-                        cw_cells_str += std::to_string(bit + 9);
-                    }
-                }
-                batteries_[batt].cw_active = cw_active;
-                batteries_[batt].cw_cells = cw_cells_str;
-            }
-
-            if (data.length() >= 2) {
-                int last_byte = strtol(data.substr(data.length() - 2, 2).c_str(), nullptr, 16);
-                std::string state_str;
-                if (last_byte & 0x01) state_str += "Discharge";
-                if (last_byte & 0x02) { if (!state_str.empty()) state_str += ","; state_str += "Charge"; }
-                if (last_byte & 0x04) { if (!state_str.empty()) state_str += ","; state_str += "Float"; }
-                if (last_byte & 0x08) { if (!state_str.empty()) state_str += ","; state_str += "Full"; }
-                if (last_byte & 0x10) { if (!state_str.empty()) state_str += ","; state_str += "Standby"; }
-                batteries_[batt].state = state_str.empty() ? "Idle" : state_str;
             }
         }
+
+        if (!parse_ok) return false;
+
+        batteries_[batt].overvolt_count = overvolt_count;
+        batteries_[batt].overvolt_cells = ov_cells_str;
+        batteries_[batt].balancing_count = balancing;
+        batteries_[batt].balancing_cells = bal_cells_str;
+        batteries_[batt].discharge_mosfet = discharge_mosfet;
+        batteries_[batt].charge_mosfet = charge_mosfet;
+        batteries_[batt].lmcharge_mosfet = lmcharge_mosfet;
+        batteries_[batt].warnings = warnings_str;
+        batteries_[batt].alarms = alarms_str;
+        batteries_[batt].cw_active = cw_active;
+        batteries_[batt].cw_cells = cw_cells_str;
+        batteries_[batt].state = state_str.empty() ? "Idle" : state_str;
+        return true;
     }
 };
 
