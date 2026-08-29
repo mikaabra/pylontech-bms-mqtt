@@ -425,7 +425,9 @@ sensor:
     unit_of_measurement: "V"
     device_class: voltage
     state_class: measurement
-    filters: [multiply: 0.01]
+    filters:
+      - lambda: 'if (x == 65535.0f) return NAN; return x;'
+      - multiply: 0.01
     on_value:
       then:
         - lambda: |-
@@ -443,7 +445,9 @@ sensor:
     unit_of_measurement: "A"
     device_class: current
     state_class: measurement
-    filters: [multiply: 0.01]
+    filters:
+      - lambda: 'if (x == 65535.0f) return NAN; return x;'
+      - multiply: 0.01
     on_value:
       then:
         - lambda: |-
@@ -479,6 +483,8 @@ sensor:
     unit_of_measurement: "%"
     device_class: battery
     state_class: measurement
+    filters:
+      - lambda: 'if (x == 65535.0f) return NAN; return x;'
     on_value:
       then:
         - lambda: |-
@@ -496,7 +502,9 @@ sensor:
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
-    filters: [multiply: 0.01]
+    filters:
+      - lambda: 'if (x >= 32767.0f || x <= -32768.0f) return NAN; return x;'
+      - multiply: 0.01
     on_value:
       then:
         - lambda: |-
@@ -514,7 +522,9 @@ sensor:
     unit_of_measurement: "V"
     device_class: voltage
     state_class: measurement
-    filters: [multiply: 0.01]
+    filters:
+      - lambda: 'if (x == 65535.0f) return NAN; return x;'
+      - multiply: 0.01
     on_value:
       then:
         - lambda: |-
@@ -532,7 +542,9 @@ sensor:
     unit_of_measurement: "A"
     device_class: current
     state_class: measurement
-    filters: [multiply: 0.01]
+    filters:
+      - lambda: 'if (x == 65535.0f) return NAN; return x;'
+      - multiply: 0.01
     on_value:
       then:
         - lambda: |-

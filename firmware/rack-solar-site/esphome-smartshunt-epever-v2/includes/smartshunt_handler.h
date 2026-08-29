@@ -13,8 +13,8 @@ public:
     SmartShuntHandler() : availability_("rack-solar/smartshunt/status") {}
 
     void handle_battery_voltage(float x) {
-        last_data_rx_ = millis();
-        received_data_ = true;
+        if (!std::isfinite(x)) return;
+        last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (check_threshold_float_stable(x, last_volt_, last_volt_pub_, volt_window_, 0.1f, 0.5f, 15.0f, 30.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.2f", last_volt_);
@@ -23,6 +23,7 @@ public:
     }
 
     void handle_battery_current(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (check_threshold_float_stable(x, last_current_, last_current_pub_, current_window_, 0.1f, 1.0f, -500.0f, 500.0f)) {
@@ -32,6 +33,7 @@ public:
     }
 
     void handle_state_of_charge(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         int val = (int)roundf(x);
@@ -41,6 +43,7 @@ public:
     }
 
     void handle_instantaneous_power(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (check_threshold_float_stable(x, last_power_, last_power_pub_, power_window_, 5.0f, 50.0f, -10000.0f, 10000.0f)) {
@@ -50,6 +53,7 @@ public:
     }
 
     void handle_battery_temperature(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (check_threshold_float_stable(x, last_temp_, last_temp_pub_, temp_window_, 0.5f, 2.0f, -40.0f, 100.0f)) {
@@ -59,6 +63,7 @@ public:
     }
 
     void handle_consumed_amp_hours(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (hys_consumed_ah_.check(x, 1.0f, -999999.0f, 999999.0f)) {
@@ -68,6 +73,7 @@ public:
     }
 
     void handle_time_to_go(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         int val = (int)roundf(x);
@@ -77,6 +83,7 @@ public:
     }
 
     void handle_depth_deepest_discharge(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (hys_depth_deepest_.check(x, 0.1f, 0.0f, 999999.0f)) {
@@ -86,6 +93,7 @@ public:
     }
 
     void handle_depth_last_discharge(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (hys_depth_last_.check(x, 0.1f, 0.0f, 999999.0f)) {
@@ -95,6 +103,7 @@ public:
     }
 
     void handle_depth_average_discharge(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (hys_depth_avg_.check(x, 1.0f, 0.0f, 999999.0f, 300000)) {
@@ -104,6 +113,7 @@ public:
     }
 
     void handle_number_charge_cycles(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         int val = (int)roundf(x);
@@ -114,6 +124,7 @@ public:
     }
 
     void handle_number_full_discharges(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         int val = (int)roundf(x);
@@ -124,6 +135,7 @@ public:
     }
 
     void handle_cumulative_amp_hours(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (hys_cumulative_ah_.check(x, 1.0f, 0.0f, 999999.0f)) {
@@ -133,6 +145,7 @@ public:
     }
 
     void handle_min_battery_voltage(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (hys_min_v_.check(x, 0.5f, 15.0f, 30.0f, 300000)) {
@@ -142,6 +155,7 @@ public:
     }
 
     void handle_max_battery_voltage(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (hys_max_v_.check(x, 0.5f, 15.0f, 30.0f, 300000)) {
@@ -151,6 +165,7 @@ public:
     }
 
     void handle_last_full_charge(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         int val = (int)roundf(x);
@@ -160,6 +175,7 @@ public:
     }
 
     void handle_amount_discharged_energy(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (check_threshold_float_robust(x, last_discharged_energy_, last_discharged_energy_pub_, 10.0f, 1000.0f, 0.0f, 999999.0f)) {
@@ -169,6 +185,7 @@ public:
     }
 
     void handle_amount_charged_energy(float x) {
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (check_threshold_float_robust(x, last_charged_energy_, last_charged_energy_pub_, 10.0f, 1000.0f, 0.0f, 999999.0f)) {
@@ -259,6 +276,7 @@ public:
 
     void handle_relay_state(bool x) {
         relay_state_ = x;
+        if (!std::isfinite(x)) return;
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         if (relay_first_) {
@@ -273,7 +291,7 @@ public:
 
     void check_stale() {
         uint32_t now = millis();
-        if (last_data_rx_ == 0) {
+        if (!received_data_) {
             if (!availability_.stale) availability_.mark_stale(esphome::mqtt::global_mqtt_client);
             return;
         }

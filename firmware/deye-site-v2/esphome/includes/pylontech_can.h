@@ -23,7 +23,7 @@ public:
 
         if (x.size() < 8) { error_count_++; return; }
 
-        last_can_rx_ = millis();
+        last_can_rx_ = millis(); has_can_rx_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
 
         float v_charge_max = can_le_u16(x[0], x[1]) / 10.0f;
@@ -76,7 +76,7 @@ public:
 
         if (x.size() < 4) { error_count_++; return; }
 
-        last_can_rx_ = millis();
+        last_can_rx_ = millis(); has_can_rx_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
 
         uint16_t soc = can_le_u16(x[0], x[1]);
@@ -111,7 +111,7 @@ public:
 
         if (x.size() < 8) { error_count_++; return; }
 
-        last_can_rx_ = millis();
+        last_can_rx_ = millis(); has_can_rx_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         received_0x359_ = true;
 
@@ -163,7 +163,7 @@ public:
 
         if (x.size() < 8) { error_count_++; return; }
 
-        last_can_rx_ = millis();
+        last_can_rx_ = millis(); has_can_rx_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
         received_0x35C_ = true;
 
@@ -188,7 +188,7 @@ public:
 
         if (x.size() < 8) { error_count_++; return; }
 
-        last_can_rx_ = millis();
+        last_can_rx_ = millis(); has_can_rx_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
 
         float t1 = can_le_u16(x[0], x[1]) / 10.0f;
@@ -262,7 +262,7 @@ public:
     void check_stale() {
         uint32_t now = millis();
 
-        if (last_can_rx_ == 0) {
+        if (!has_can_rx_) {
             if (!availability_.stale) availability_.mark_stale(esphome::mqtt::global_mqtt_client);
             return;
         }
@@ -568,6 +568,7 @@ private:
     AvailabilityTracker availability_;
 
     uint32_t last_can_rx_ = 0;
+    bool has_can_rx_ = false;
     int frame_count_ = 0;
     int error_count_ = 0;
     uint32_t last_status_heartbeat_ = 0;

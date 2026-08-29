@@ -3,6 +3,26 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <cerrno>
+#include <cstdlib>
+
+// Strict hex parsing with full validation.
+// Returns false if the string is empty, contains non-hex characters,
+// or causes overflow. Unlike strtol(..., nullptr, 16), this distinguishes
+// "ZZ" (invalid) from "00" (valid zero) by checking the endptr.
+// Also rejects strtoul's acceptance of leading whitespace and signs
+// by requiring every character to be [0-9A-Fa-f] before parsing.
+inline bool parse_hex(const std::string& s, unsigned long& out) {
+    if (s.empty()) return false;
+    for (char c : s) {
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
+    char* end = nullptr;
+    errno = 0;
+    out = strtoul(s.c_str(), &end, 16);
+    return errno == 0 && static_cast<size_t>(end - s.c_str()) == s.size();
+}
 
 // Pylontech CAN frame IDs
 static const uint32_t CAN_ID_351 = 0x351;
@@ -64,7 +84,11 @@ inline std::string rs485_validate_response(const std::string& response, int expe
                  response.length() >= 9 ? response.substr(7, 2).c_str() : "?", (int)response.length());
         return std::string(msg);
     }
-    int resp_addr = strtol(response.substr(3, 2).c_str(), nullptr, 16);
+    unsigned long resp_addr_ul;
+    if (!parse_hex(response.substr(3, 2), resp_addr_ul)) {
+        return std::string("address parse error");
+    }
+    int resp_addr = (int)resp_addr_ul;
     if (resp_addr != expected_addr) {
         snprintf(msg, sizeof(msg), "address mismatch (expected %d, got %d)", expected_addr, resp_addr);
         return std::string(msg);
