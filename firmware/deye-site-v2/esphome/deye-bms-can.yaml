@@ -63,11 +63,11 @@ mqtt:
   password: !secret mqtt_password
 
   birth_message:
-    topic: ${can_prefix}/status
+    topic: ${device_name}/status
     payload: "online"
     retain: true
   will_message:
-    topic: ${can_prefix}/status
+    topic: ${device_name}/status
     payload: "offline"
     retain: true
 

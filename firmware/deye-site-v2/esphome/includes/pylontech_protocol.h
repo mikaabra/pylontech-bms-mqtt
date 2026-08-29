@@ -122,6 +122,8 @@ struct BatteryData {
     std::string cw_cells;
     bool has_analog = false;
     bool has_alarm = false;
-    int poll_failures = 0;
-    bool poll_alarm = false;
+    int analog_poll_failures = 0;
+    bool analog_poll_alarm = false;
+    int alarm_poll_failures = 0;
+    bool alarm_poll_alarm = false;
 };

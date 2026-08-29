@@ -155,7 +155,7 @@ public:
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         char topic[160], payload[768];
         PublishPacer pacer;
-        pacer.yield_every = 10; pacer.delay_ms = 50;
+        pacer.yield_every = 10;
         const char* device_json = R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})";
         const char* avail = R"("availability_topic":"rack-solar/smartshunt/status","payload_available":"online","payload_not_available":"offline")";
 

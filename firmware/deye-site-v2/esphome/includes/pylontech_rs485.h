@@ -98,7 +98,7 @@ public:
                 if (response_buf_.length() >= MAX_BUFFER_SIZE) {
                     int batt = current_batt_;
                     ESP_LOGW("rs485", "Batt %d buffer overflow, draining UART", batt);
-                    handle_poll_failure(batt);
+                    handle_analog_failure(batt);
                     response_buf_.clear();
                     for (int drain = 0; drain < 256 && uart_->available(); drain++) {
                         uint8_t c; uart_->read_byte(&c);
@@ -124,16 +124,16 @@ public:
                     std::string error = rs485_validate_response(response, pylontech_addr_);
                     if (!error.empty()) {
                         ESP_LOGW("rs485", "Batt %d analog poll failed: %s", batt, error.c_str());
-                        handle_poll_failure(batt);
+                        handle_analog_failure(batt);
                     } else {
-                        if (batteries_[batt].poll_failures > 0 || batteries_[batt].poll_alarm) {
-                            batteries_[batt].poll_failures = 0;
-                            if (batteries_[batt].poll_alarm) {
-                                batteries_[batt].poll_alarm = false;
+                        if (batteries_[batt].analog_poll_failures > 0 || batteries_[batt].analog_poll_alarm) {
+                            batteries_[batt].analog_poll_failures = 0;
+                            if (batteries_[batt].analog_poll_alarm) {
+                                batteries_[batt].analog_poll_alarm = false;
                                 publish_poll_alarm(batt, false);
                             }
                         }
-                        last_rx_ = now;
+                        last_analog_rx_ = now;
                         batteries_[batt].has_analog = true;
                         availability_.mark_online(esphome::mqtt::global_mqtt_client);
 
@@ -143,19 +143,23 @@ public:
                             if (data.length() >= 6) {
                                 int num_cells = strtol(data.substr(idx, 2).c_str(), nullptr, 16);
                                 idx += 2;
+                                int reported_cells = num_cells;
                                 for (int cell = 0; cell < num_cells && cell < 16 && data.length() >= idx + 4; cell++) {
                                     int mv = strtol(data.substr(idx, 4).c_str(), nullptr, 16);
                                     batteries_[batt].cell_voltages[cell] = mv / 1000.0f;
                                     idx += 4;
                                 }
+                                idx += (reported_cells > 16) ? (reported_cells - 16) * 4 : 0;
                                 if (data.length() >= idx + 2) {
                                     int num_temps = strtol(data.substr(idx, 2).c_str(), nullptr, 16);
                                     idx += 2;
+                                    int reported_temps = num_temps;
                                     for (int t = 0; t < num_temps && t < 6 && data.length() >= idx + 4; t++) {
                                         int raw = strtol(data.substr(idx, 4).c_str(), nullptr, 16);
                                         batteries_[batt].cell_temps[t] = (raw - 2731) / 10.0f;
                                         idx += 4;
                                     }
+                                    idx += (reported_temps > 6) ? (reported_temps - 6) * 4 : 0;
                                 }
                                 if (data.length() >= idx + 4) {
                                     int raw = strtol(data.substr(idx, 4).c_str(), nullptr, 16);
@@ -196,7 +200,7 @@ public:
             if (now - tx_time_ > 1500) {
                 int batt = current_batt_;
                 ESP_LOGW("rs485", "Batt %d analog timeout (rx=%d bytes)", batt, response_buf_.length());
-                handle_poll_failure(batt);
+                handle_analog_failure(batt);
                 current_batt_ = (batt + 1) % num_batteries_;
                 last_analog_poll_ = now;
                 state_ = 0;
@@ -245,7 +249,7 @@ public:
                 if (response_buf_.length() >= MAX_BUFFER_SIZE) {
                     int batt = alarm_batt_;
                     ESP_LOGW("rs485", "Batt %d alarm buffer overflow, draining UART", batt);
-                    handle_poll_failure(batt);
+                    handle_alarm_failure(batt);
                     response_buf_.clear();
                     for (int drain = 0; drain < 256 && uart_->available(); drain++) {
                         uint8_t c; uart_->read_byte(&c);
@@ -273,7 +277,17 @@ public:
                     ESP_LOGD("rs485", "RX alarm len=%d", response.length());
 
                     std::string error = rs485_validate_response(response, pylontech_addr_);
-                    if (error.empty() && response.length() > 18) {
+                    if (!error.empty()) {
+                        ESP_LOGW("rs485", "Batt %d alarm poll failed: %s", batt, error.c_str());
+                        handle_alarm_failure(batt);
+                    } else if (response.length() > 18) {
+                        if (batteries_[batt].alarm_poll_failures > 0 || batteries_[batt].alarm_poll_alarm) {
+                            batteries_[batt].alarm_poll_failures = 0;
+                            if (batteries_[batt].alarm_poll_alarm) {
+                                batteries_[batt].alarm_poll_alarm = false;
+                                publish_alarm_poll_alarm(batt, false);
+                            }
+                        }
                         batteries_[batt].has_alarm = true;
                         has_any_alarm_ = true;
                         std::string data = response.substr(13, response.length() - 13 - 5);
@@ -297,7 +311,7 @@ public:
             if (now - tx_time_ > 1500) {
                 int batt = alarm_batt_;
                 ESP_LOGW("rs485", "Batt %d alarm timeout", batt);
-                handle_poll_failure(batt);
+                handle_alarm_failure(batt);
                 alarm_batt_++;
                 if (alarm_batt_ >= num_batteries_) {
                     last_alarm_poll_ = now;
@@ -557,11 +571,11 @@ public:
 
     void check_stale() {
         uint32_t now = millis();
-        if (last_rx_ == 0) {
+        if (last_analog_rx_ == 0) {
             if (!availability_.stale) availability_.mark_stale(esphome::mqtt::global_mqtt_client);
             return;
         }
-        uint32_t elapsed = now - last_rx_;
+        uint32_t elapsed = now - last_analog_rx_;
         if (elapsed > 90000 && !availability_.stale) {
             availability_.mark_stale(esphome::mqtt::global_mqtt_client);
         }
@@ -592,9 +606,9 @@ public:
             {"stack_current", "Stack Current", "A", "current", "measurement"},
             {"stack_temp_min", "Stack Temp Min", "°C", "temperature", "measurement"},
             {"stack_temp_max", "Stack Temp Max", "°C", "temperature", "measurement"},
-            {"stack_balancing_count", "Stack Balancing Cells", "", "", "total_increasing"},
+            {"stack_balancing_count", "Stack Balancing Cells", "", "", "measurement"},
             {"stack_balancing_cells", "Stack Balancing Cells List", "", "", ""},
-            {"stack_overvolt_count", "Stack Overvolt Cells", "", "", "total_increasing"},
+            {"stack_overvolt_count", "Stack Overvolt Cells", "", "", "measurement"},
             {"stack_overvolt_cells", "Stack Overvolt Cells List", "", "", ""},
             {"stack_alarms", "Stack Alarms", "", "", ""},
         };
@@ -734,6 +748,20 @@ public:
                     pacer.pace();
                 }
             }
+
+            {
+                char obj_id[32], name[48], st[64], uid[64];
+                snprintf(obj_id, sizeof(obj_id), "%s_alarm_poll_alarm", prefix);
+                snprintf(name, sizeof(name), "Battery %d Alarm Poll Alarm", batt);
+                snprintf(st, sizeof(st), "%s/alarm_poll_alarm", state_prefix);
+                snprintf(uid, sizeof(uid), "pylontech_rs485_%s", obj_id);
+
+                snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", obj_id);
+                if (build_ha_binary_sensor_payload(payload, sizeof(payload), name, st, uid, "problem", "mdi:lan-disconnect", "ON", "OFF", avail_str.c_str(), device_json.c_str())) {
+                    esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                    pacer.pace();
+                }
+            }
         }
     }
 
@@ -754,7 +782,7 @@ private:
     uint32_t last_analog_poll_ = 0;
     uint32_t last_alarm_poll_ = 0;
     uint32_t last_heartbeat_ = 0;
-    uint32_t last_rx_ = 0;
+    uint32_t last_analog_rx_ = 0;
     bool has_any_alarm_ = false;
 
     std::vector<BatteryData> batteries_;
@@ -792,13 +820,27 @@ private:
         esphome::mqtt::global_mqtt_client->publish(std::string(topic), alarm ? "ON" : "OFF", (uint8_t)0, true);
     }
 
-    void handle_poll_failure(int batt) {
-        batteries_[batt].poll_failures++;
-        if (batteries_[batt].poll_failures >= 10 && !batteries_[batt].poll_alarm) {
-            batteries_[batt].poll_alarm = true;
+    void publish_alarm_poll_alarm(int batt, bool alarm) {
+        char topic[80];
+        snprintf(topic, sizeof(topic), "%s/battery%d/alarm_poll_alarm", mqtt_prefix_.c_str(), batt);
+        esphome::mqtt::global_mqtt_client->publish(std::string(topic), alarm ? "ON" : "OFF", (uint8_t)0, true);
+    }
+
+    void handle_analog_failure(int batt) {
+        batteries_[batt].analog_poll_failures++;
+        if (batteries_[batt].analog_poll_failures >= 10 && !batteries_[batt].analog_poll_alarm) {
+            batteries_[batt].analog_poll_alarm = true;
             batteries_[batt].has_analog = false;
-            batteries_[batt].has_alarm = false;
             publish_poll_alarm(batt, true);
+        }
+    }
+
+    void handle_alarm_failure(int batt) {
+        batteries_[batt].alarm_poll_failures++;
+        if (batteries_[batt].alarm_poll_failures >= 10 && !batteries_[batt].alarm_poll_alarm) {
+            batteries_[batt].alarm_poll_alarm = true;
+            batteries_[batt].has_alarm = false;
+            publish_alarm_poll_alarm(batt, true);
         }
     }
 
