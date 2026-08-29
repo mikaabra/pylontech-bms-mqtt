@@ -34,6 +34,7 @@ public:
     void handle_state_of_charge(float x) {
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
+        if (!std::isfinite(x)) return;
         int val = (int)roundf(x);
         if (check_threshold_int_stable(val, last_soc_, last_soc_pub_, soc_window_, 1, 5, 0, 100, 60000)) {
             publish_topic("state_of_charge", std::to_string(last_soc_).c_str());
@@ -70,6 +71,7 @@ public:
     void handle_time_to_go(float x) {
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
+        if (!std::isfinite(x)) return;
         int val = (int)roundf(x);
         if (hys_time_to_go_.check(val, 1)) {
             publish_topic("time_to_go", std::to_string(val).c_str());
@@ -106,6 +108,7 @@ public:
     void handle_number_charge_cycles(float x) {
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
+        if (!std::isfinite(x)) return;
         int val = (int)roundf(x);
         if (val < 0 || val > 999999) return;
         if (hys_charge_cycles_.check(val, 1, 0, 999999)) {
@@ -116,6 +119,7 @@ public:
     void handle_number_full_discharges(float x) {
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
+        if (!std::isfinite(x)) return;
         int val = (int)roundf(x);
         if (val < 0 || val > 999999) return;
         if (hys_full_discharges_.check(val, 1, 0, 999999)) {
@@ -153,6 +157,7 @@ public:
     void handle_last_full_charge(float x) {
         last_data_rx_ = millis(); received_data_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
+        if (!std::isfinite(x)) return;
         int val = (int)roundf(x);
         if (hys_last_full_charge_.check(val, 1)) {
             publish_topic("last_full_charge", std::to_string(val).c_str());
@@ -273,7 +278,7 @@ public:
 
     void check_stale() {
         uint32_t now = millis();
-        if (last_data_rx_ == 0) {
+        if (!received_data_) {
             if (!availability_.stale) availability_.mark_stale(esphome::mqtt::global_mqtt_client);
             return;
         }

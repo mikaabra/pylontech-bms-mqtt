@@ -18,7 +18,7 @@ public:
 
     void handle_solar_voltage(float x) {
         if (!std::isfinite(x) || x < 0.0f || x > 100.0f) return;
-        last_pv_rx_ = millis();
+        last_pv_rx_ = millis(); has_pv_rx_ = true;
         pv_avail_.mark_online(esphome::mqtt::global_mqtt_client);
         refresh_overall();
         if (hys_solar_v_.check(x, 0.1f, 0.0f, 100.0f)) {
@@ -29,7 +29,7 @@ public:
 
     void handle_pv_current(float x) {
         if (!std::isfinite(x) || x < 0.0f || x > 100.0f) return;
-        last_pv_rx_ = millis();
+        last_pv_rx_ = millis(); has_pv_rx_ = true;
         pv_avail_.mark_online(esphome::mqtt::global_mqtt_client);
         refresh_overall();
         if (hys_pv_current_.check(x, 0.1f, 0.0f, 100.0f)) {
@@ -40,7 +40,7 @@ public:
 
     void handle_solar_power(float x) {
         if (!std::isfinite(x) || x < 0.0f || x > 10000.0f) return;
-        last_pv_rx_ = millis();
+        last_pv_rx_ = millis(); has_pv_rx_ = true;
         pv_avail_.mark_online(esphome::mqtt::global_mqtt_client);
         refresh_overall();
         if (hys_solar_power_.check(x, 1.0f, 0.0f, 10000.0f)) {
@@ -50,9 +50,10 @@ public:
     }
 
     void handle_battery_capacity(float x) {
+        if (!std::isfinite(x)) return;
         int val = (int)roundf(x);
         if (val < 0 || val > 100) return;
-        last_controller_rx_ = millis();
+        last_controller_rx_ = millis(); has_controller_rx_ = true;
         controller_avail_.mark_online(esphome::mqtt::global_mqtt_client);
         refresh_overall();
         if (hys_batt_cap_.check(val, 1, 0, 100)) {
@@ -62,7 +63,7 @@ public:
 
     void handle_device_temp(float x) {
         if (!std::isfinite(x) || x < -40.0f || x > 100.0f) return;
-        last_controller_rx_ = millis();
+        last_controller_rx_ = millis(); has_controller_rx_ = true;
         controller_avail_.mark_online(esphome::mqtt::global_mqtt_client);
         refresh_overall();
         if (hys_device_temp_.check(x, 0.5f, -40.0f, 100.0f)) {
@@ -73,7 +74,7 @@ public:
 
     void handle_battery_voltage(float x) {
         if (!std::isfinite(x) || x < 15.0f || x > 30.0f) return;
-        last_battery_rx_ = millis();
+        last_battery_rx_ = millis(); has_battery_rx_ = true;
         battery_avail_.mark_online(esphome::mqtt::global_mqtt_client);
         refresh_overall();
         if (hys_batt_v_.check(x, 0.1f, 15.0f, 30.0f)) {
@@ -84,7 +85,7 @@ public:
 
     void handle_battery_current(float x) {
         if (!std::isfinite(x) || x < -100.0f || x > 100.0f) return;
-        last_battery_rx_ = millis();
+        last_battery_rx_ = millis(); has_battery_rx_ = true;
         battery_avail_.mark_online(esphome::mqtt::global_mqtt_client);
         refresh_overall();
         if (hys_batt_current_.check(x, 0.1f, -100.0f, 100.0f)) {
@@ -95,7 +96,7 @@ public:
 
     void handle_total_energy(float x) {
         if (!std::isfinite(x) || x < 0.0f || x > 999999.0f) return;
-        last_battery_rx_ = millis();
+        last_battery_rx_ = millis(); has_battery_rx_ = true;
         battery_avail_.mark_online(esphome::mqtt::global_mqtt_client);
         refresh_overall();
         if (hys_total_energy_.check(x, 0.1f, 0.0f, 999999.0f)) {
@@ -106,9 +107,9 @@ public:
 
     void check_stale() {
         uint32_t now = millis();
-        check_group_stale(pv_avail_, last_pv_rx_, now);
-        check_group_stale(controller_avail_, last_controller_rx_, now);
-        check_group_stale(battery_avail_, last_battery_rx_, now);
+        check_group_stale(pv_avail_, last_pv_rx_, has_pv_rx_, now);
+        check_group_stale(controller_avail_, last_controller_rx_, has_controller_rx_, now);
+        check_group_stale(battery_avail_, last_battery_rx_, has_battery_rx_, now);
         refresh_overall();
     }
 
@@ -166,6 +167,9 @@ private:
     uint32_t last_pv_rx_ = 0;
     uint32_t last_controller_rx_ = 0;
     uint32_t last_battery_rx_ = 0;
+    bool has_pv_rx_ = false;
+    bool has_controller_rx_ = false;
+    bool has_battery_rx_ = false;
 
     HysteresisFloat hys_solar_v_, hys_pv_current_, hys_solar_power_;
     HysteresisInt hys_batt_cap_;
@@ -180,8 +184,8 @@ private:
         }
     }
 
-    void check_group_stale(AvailabilityTracker& avail, uint32_t last_rx, uint32_t now) {
-        if (last_rx == 0) {
+    void check_group_stale(AvailabilityTracker& avail, uint32_t last_rx, bool has_rx, uint32_t now) {
+        if (!has_rx) {
             if (!avail.stale) avail.mark_stale(esphome::mqtt::global_mqtt_client);
             return;
         }

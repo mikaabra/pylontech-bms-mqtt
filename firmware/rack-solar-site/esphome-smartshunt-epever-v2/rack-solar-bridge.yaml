@@ -491,7 +491,9 @@ sensor:
     unit_of_measurement: "V"
     device_class: voltage
     state_class: measurement
-    filters: [multiply: 0.01]
+    filters:
+      - lambda: 'if (x == 65535.0f) return NAN; return x;'
+      - multiply: 0.01
     on_value:
       then:
         - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_solar_voltage(x);'
@@ -507,7 +509,9 @@ sensor:
     unit_of_measurement: "A"
     device_class: current
     state_class: measurement
-    filters: [multiply: 0.01]
+    filters:
+      - lambda: 'if (x == 65535.0f) return NAN; return x;'
+      - multiply: 0.01
     on_value:
       then:
         - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_pv_current(x);'
@@ -523,7 +527,9 @@ sensor:
     unit_of_measurement: "W"
     device_class: power
     state_class: measurement
-    filters: [multiply: 0.01]
+    filters:
+      - lambda: 'if (x == 65535.0f || x >= 4294901760.0f) return NAN; return x;'
+      - multiply: 0.01
     on_value:
       then:
         - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_solar_power(x);'
@@ -539,6 +545,8 @@ sensor:
     unit_of_measurement: "%"
     device_class: battery
     state_class: measurement
+    filters:
+      - lambda: 'if (x == 65535.0f) return NAN; return x;'
     on_value:
       then:
         - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_battery_capacity(x);'
@@ -554,7 +562,9 @@ sensor:
     unit_of_measurement: "°C"
     device_class: temperature
     state_class: measurement
-    filters: [multiply: 0.01]
+    filters:
+      - lambda: 'if (x >= 32767.0f || x <= -32768.0f) return NAN; return x;'
+      - multiply: 0.01
     on_value:
       then:
         - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_device_temp(x);'
@@ -570,7 +580,9 @@ sensor:
     unit_of_measurement: "V"
     device_class: voltage
     state_class: measurement
-    filters: [multiply: 0.01]
+    filters:
+      - lambda: 'if (x == 65535.0f) return NAN; return x;'
+      - multiply: 0.01
     on_value:
       then:
         - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_battery_voltage(x);'
@@ -586,7 +598,9 @@ sensor:
     unit_of_measurement: "A"
     device_class: current
     state_class: measurement
-    filters: [multiply: 0.01]
+    filters:
+      - lambda: 'if (x == 65535.0f) return NAN; return x;'
+      - multiply: 0.01
     on_value:
       then:
         - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_battery_current(x);'
@@ -602,7 +616,9 @@ sensor:
     unit_of_measurement: "kWh"
     device_class: energy
     state_class: total_increasing
-    filters: [multiply: 0.01]
+    filters:
+      - lambda: 'if (x == 65535.0f || x >= 4294901760.0f) return NAN; return x;'
+      - multiply: 0.01
     on_value:
       then:
         - lambda: 'if (!id(handler_ep)) return; ((EPEverHandler*)id(handler_ep))->handle_total_energy(x);'
