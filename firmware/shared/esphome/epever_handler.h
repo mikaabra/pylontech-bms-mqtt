@@ -172,10 +172,10 @@ private:
     HysteresisFloat hys_device_temp_, hys_batt_v_, hys_batt_current_, hys_total_energy_;
 
     void refresh_overall() {
-        bool any_stale = pv_avail_.stale && controller_avail_.stale && battery_avail_.stale;
-        if (any_stale && !overall_avail_.stale) {
+        bool all_stale = pv_avail_.stale && controller_avail_.stale && battery_avail_.stale;
+        if (all_stale && !overall_avail_.stale) {
             overall_avail_.mark_stale(esphome::mqtt::global_mqtt_client);
-        } else if (!any_stale && overall_avail_.stale) {
+        } else if (!all_stale && overall_avail_.stale) {
             overall_avail_.mark_online(esphome::mqtt::global_mqtt_client);
         }
     }

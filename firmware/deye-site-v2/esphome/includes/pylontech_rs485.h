@@ -257,6 +257,7 @@ public:
                     discard_until_tilde_ = true;
                     alarm_batt_++;
                     if (alarm_batt_ >= num_batteries_) {
+                        compute_stack_totals();
                         last_alarm_poll_ = now;
                         state_ = 0;
                     } else {
@@ -317,6 +318,7 @@ public:
                 handle_alarm_failure(batt);
                 alarm_batt_++;
                 if (alarm_batt_ >= num_batteries_) {
+                    compute_stack_totals();
                     last_alarm_poll_ = now;
                     state_ = 0;
                 } else {
