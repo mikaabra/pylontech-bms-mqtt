@@ -465,9 +465,7 @@ sensor:
     unit_of_measurement: "W"
     device_class: power
     state_class: measurement
-    filters:
-      - lambda: 'if (x == 65535.0f || x >= 4294901760.0f) return NAN; return x;'
-      - multiply: 0.01
+    filters: [multiply: 0.01]
     on_value:
       then:
         - lambda: |-
@@ -564,9 +562,7 @@ sensor:
     unit_of_measurement: "kWh"
     device_class: energy
     state_class: total_increasing
-    filters:
-      - lambda: 'if (x == 65535.0f || x >= 4294901760.0f) return NAN; return x;'
-      - multiply: 0.01
+    filters: [multiply: 0.01]
     on_value:
       then:
         - lambda: |-
