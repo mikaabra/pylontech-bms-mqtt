@@ -10,8 +10,14 @@
 // Returns false if the string is empty, contains non-hex characters,
 // or causes overflow. Unlike strtol(..., nullptr, 16), this distinguishes
 // "ZZ" (invalid) from "00" (valid zero) by checking the endptr.
+// Also rejects strtoul's acceptance of leading whitespace and signs
+// by requiring every character to be [0-9A-Fa-f] before parsing.
 inline bool parse_hex(const std::string& s, unsigned long& out) {
     if (s.empty()) return false;
+    for (char c : s) {
+        if (!((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F') || (c >= 'a' && c <= 'f')))
+            return false;
+    }
     char* end = nullptr;
     errno = 0;
     out = strtoul(s.c_str(), &end, 16);
