@@ -379,6 +379,7 @@ sensor:
     unit_of_measurement: "V"
     device_class: voltage
     state_class: measurement
+    state_topic: null
     filters:
       - throttle_average: 5s
     on_value:
@@ -395,6 +396,7 @@ sensor:
     unit_of_measurement: "A"
     device_class: current
     state_class: measurement
+    state_topic: null
     filters:
       - throttle_average: 5s
     on_value:
@@ -411,6 +413,7 @@ sensor:
     unit_of_measurement: "%"
     device_class: battery
     state_class: measurement
+    state_topic: null
     filters:
       - throttle_average: 5s
     on_value:
@@ -427,6 +430,7 @@ sensor:
     unit_of_measurement: "W"
     device_class: power
     state_class: measurement
+    state_topic: null
     filters:
       - throttle_average: 5s
     on_value:
@@ -442,6 +446,7 @@ sensor:
     type: CONSUMED_AH
     unit_of_measurement: "Ah"
     state_class: measurement
+    state_topic: null
     filters:
       - throttle_average: 30s
     on_value:
@@ -457,6 +462,7 @@ sensor:
     type: TIME_TO_GO
     unit_of_measurement: "min"
     state_class: measurement
+    state_topic: null
     filters:
       - throttle_average: 30s
     on_value:
