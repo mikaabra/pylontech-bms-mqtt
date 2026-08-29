@@ -37,6 +37,7 @@ public:
     }
 
     void handle_state_of_charge(float x) {
+        if (!std::isfinite(x)) return;
         int val = (int)roundf(x);
         if (hys_soc_.check(val, 1, 0, 100)) {
             publish_topic("state_of_charge", std::to_string(val).c_str());
@@ -58,6 +59,7 @@ public:
     }
 
     void handle_time_to_go(float x) {
+        if (!std::isfinite(x)) return;
         int val = (int)roundf(x);
         if (hys_time_to_go_.check(val, 1)) {
             publish_topic("time_to_go", std::to_string(val).c_str());
@@ -71,6 +73,7 @@ public:
         ble_message_count_++;
         ble_last_message_time_ = millis();
         last_data_rx_ = millis();
+        has_data_rx_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
     }
 
@@ -91,7 +94,7 @@ public:
 
     void check_stale() {
         uint32_t now = millis();
-        if (last_data_rx_ == 0) {
+        if (!has_data_rx_) {
             if (!availability_.stale) availability_.mark_stale(esphome::mqtt::global_mqtt_client);
             return;
         }
@@ -128,8 +131,9 @@ public:
             {"uptime",               "Uptime",                     "s",    "duration",          "total_increasing"},
             {"ble_message_count",    "BLE Message Count",          "msgs", "",                  "total_increasing"},
             {"ble_time_since_last",  "BLE Time Since Last Message", "s",    "",                  "measurement"},
+            {"ble_connection_status","BLE Connection Status",       "",     "",                  ""},
         };
-        for (int i = 0; i < 7; i++) {
+        for (int i = 0; i < 8; i++) {
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", diag_sensors[i][0]);
             char st[96], uid[64];
             snprintf(st, sizeof(st), "rack-solar/%s", diag_sensors[i][0]);
@@ -180,6 +184,7 @@ public:
 private:
     AvailabilityTracker availability_;
     uint32_t last_data_rx_ = 0;
+    bool has_data_rx_ = false;
 
     // BLE connectivity tracking
     uint32_t ble_message_count_ = 0;
