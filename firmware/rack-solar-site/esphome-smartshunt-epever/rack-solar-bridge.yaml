@@ -13,7 +13,7 @@ substitutions:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
-  min_version: 2026.1.0
+  min_version: "2026.8.1"
   includes:
     - includes/solar_helpers.h
   on_boot:
@@ -648,12 +648,12 @@ binary_sensor:
 modbus:
   id: modbus1
   uart_id: rs485_uart
+  turnaround_time: 0ms
 
 modbus_controller:
   - id: epever
     address: 0x1
     modbus_id: modbus1
-    command_throttle: 0ms
     update_interval: 30s
 
 # =============================================================================
