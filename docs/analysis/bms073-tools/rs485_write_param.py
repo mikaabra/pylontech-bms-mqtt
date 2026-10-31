@@ -33,7 +33,6 @@ import bms073
 import linkbus
 
 ALLOWED_PARAMS = {0x4C: ("Start Balance Voltage", 3400, 3500)}   # index: (name, min mV, max mV)
-PACK_RANGE = range(1, 5)           # observed slave addresses 01-04
 
 
 def parse_args(argv):
@@ -51,9 +50,9 @@ def validate(args) -> tuple[int, int, int]:
         pack = int(args.pack, 16)
     except ValueError:
         sys.exit(f"--pack must be hex: {args.pack!r}")
-    if pack not in PACK_RANGE:
-        sys.exit(f"--pack must be 01-04 (observed Link addresses); "
-                 f"{args.pack!r} is broadcast/self-address territory")
+    if pack not in bms073.LINK_SLAVE_PACKS:
+        sys.exit(f"--pack must be 01-04 (observed Link addresses, shared with "
+                 f"rs485_verify_write.py); {args.pack!r} is broadcast/self-address territory")
     try:
         param = int(args.param, 16)
     except ValueError:

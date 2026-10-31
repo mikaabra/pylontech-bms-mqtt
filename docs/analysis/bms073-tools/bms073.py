@@ -30,10 +30,20 @@ HEX_DIGITS = frozenset("0123456789ABCDEFabcdef")
 HEADER_CHARS = 12        # VER+ADR+CID1+CID2 (8) + LENID (4) before INFO
 
 # Empirically-signed int parameters: the XML does not declare signedness, so
-# it is maintained per field. Evidence: index 0x32 (Over Discharge Current
-# Alarm) carries 0xFF97 at rest, which is -105 A signed and nonsense as the
-# unsigned 65431 A.
-SIGNED_PARAMS = frozenset({0x32})
+# it is maintained per field. Signed set (high bit set, negative is the only
+# plausible reading): the discharge-current alarm/protect family 0x31/0x32/
+# 0x37/0x39/0x3B (-100/-105/-110/-120/-412 A at rest) and the PCS fields
+# 0x5C/0x79 (which carry the 0xD8F0 unset-marker pattern). Explicitly
+# unsigned despite a high raw: 0x59/0x5A, the PCS charge/discharge cut-off
+# voltages 55.5 V / 44.5 V. test_bms073 walks every raw >= 0x8000 against
+# this classification so a newly-high index cannot pass unclassified.
+SIGNED_PARAMS = frozenset({0x31, 0x32, 0x37, 0x39, 0x3B, 0x5C, 0x79})
+
+# Observed slave pack addresses on the Link bus (master polls 01-04; it never
+# polls itself, battery numbering has the master at 0). FF is the broadcast
+# address the vendor tool uses for identity probes and 00 is the standalone
+# self-address, so neither is a valid write/read target on the live bus.
+LINK_SLAVE_PACKS = range(1, 5)
 
 
 class FrameError(ValueError):

@@ -327,5 +327,101 @@ class TestWriteGates(unittest.TestCase):
                 self.validate(self.args(param=param, mv=None, raw="0D66"))
 
 
+class TestSignedClassification(unittest.TestCase):
+    """Every index whose raw value has the high bit set must be explicitly
+    classified as signed (SIGNED_PARAMS) or known-unsigned-high. Guards
+    against a new high-bit index passing unclassified."""
+
+    KNOWN_UNSIGNED_HIGH = {0x59, 0x5A}   # PCS cut-off voltages 55.5 V / 44.5 V
+
+    def test_discharge_family_reads_negative(self):
+        block = ParameterBlock.from_frame(standalone_frames()[0])
+        for idx, want in ((0x31, -100.0), (0x32, -105.0), (0x37, -110.0),
+                          (0x39, -120.0), (0x3B, -412.0)):
+            self.assertEqual(block.scaled(idx), want, f"{idx:#04x} {block.name(idx)}")
+
+    def test_pcs_cutoffs_stay_unsigned(self):
+        block = ParameterBlock.from_frame(standalone_frames()[0])
+        self.assertEqual(block.name(0x59), "PCS charging cut-off voltage")
+        self.assertAlmostEqual(block.scaled(0x59), 55.5, places=6)
+        self.assertEqual(block.name(0x5A), "PCS discharge cut-off voltage")
+        self.assertAlmostEqual(block.scaled(0x5A), 44.5, places=6)
+
+    def test_every_high_bit_index_is_classified(self):
+        block = ParameterBlock.from_frame(standalone_frames()[0])
+        for idx in range(0x7D):
+            raw = block.raw(idx)
+            if raw >= 0x8000:
+                self.assertIn(idx, bms073.SIGNED_PARAMS | self.KNOWN_UNSIGNED_HIGH,
+                              f"{idx:#04x} ({block.name(idx)}) reads {raw:#06x} "
+                              f"- classify it as signed or known-unsigned")
+
+
+class TestVerifySemantics(unittest.TestCase):
+    """rs485_verify_write.py: --pack validation and the evidence-graded
+    exit codes, including the two crash shapes from external-review round 3
+    (EOI lost with garbage at the cut; damage before the parameter region
+    with a passing reconstruction)."""
+
+    @classmethod
+    def setUpClass(cls):
+        import rs485_verify_write
+        cls.tool = rs485_verify_write
+        cls.sa = standalone_frames()[0]
+        cls.dmg = next(f for f in parse_stream(DAMAGED_D547) if f.lenid_valid)
+        cls.ref = cls.sa.info_text
+
+    def test_pack_validation(self):
+        for bad in ("FF", "00", "05", "zz"):
+            with self.assertRaises(SystemExit):
+                self.tool.parse_args(["--pack", bad, "--expect", "0D66"])
+        args = self.tool.parse_args(["--pack", "01", "--expect", "0D66"])
+        self.assertEqual(args.pack, 1)
+
+    def test_clean_frame_exits_zero(self):
+        lines, code = self.tool.evaluate(self.sa, 0, 3420, self.ref)
+        self.assertEqual(code, 0)
+        self.assertTrue(any("value matches" in ln for ln in lines))
+
+    def test_wrong_value_exits_five(self):
+        lines, code = self.tool.evaluate(self.sa, 0, 3429, self.ref)
+        self.assertEqual(code, 5)
+
+    def test_wrong_battery_exits_four(self):
+        lines, code = self.tool.evaluate(self.dmg, 2, 0x0D66, self.ref)
+        self.assertEqual(code, 4)
+
+    def test_damage_after_parameter_with_proof_exits_zero(self):
+        lines, code = self.tool.evaluate(self.dmg, 1, 0x0D66, self.ref)
+        self.assertEqual(code, 0)
+
+    def test_eoi_lost_with_garbage_cut_is_inconclusive_not_crash(self):
+        craft = self.sa.raw[:400] + b"\xff\xff\xff\xff" + b"~8050D544E00203FD18\r"
+        frames = list(parse_stream(craft))
+        self.assertTrue(frames)                       # salvaged at all
+        lines, code = self.tool.evaluate(frames[0], 1, 0x0D66, self.ref)
+        self.assertEqual(code, 6)
+
+    def test_damage_before_parameter_with_proof_is_inconclusive_not_crash(self):
+        info_chars = list(self.sa.info_text)
+        for i in range(200, 240):
+            info_chars[i] = "\xff"
+        text = self.sa.raw.decode("latin-1")
+        tampered = ("~" + text[1:13] + "".join(info_chars) + text[-5:]).encode("latin-1")
+        f = Frame.parse(tampered)                     # parses; checksum now stale
+        self.assertFalse(f.checksum_valid)
+        span = f.damage_span()
+        self.assertEqual(span, (200, 239))            # before the 0x4C region
+        lines, code = self.tool.evaluate(f, 0, 3420, self.ref)
+        self.assertEqual(code, 6)
+        self.assertTrue(any("unreadable" in ln for ln in lines))
+
+    def test_clean_truncation_is_hex_corrupt_exit(self):
+        craft = self.sa.raw[:400] + b"~8000D547E00200FD1D\r"
+        frames = list(parse_stream(craft))
+        lines, code = self.tool.evaluate(frames[0], 1, 0x0D66, self.ref)
+        self.assertEqual(code, 7)
+
+
 if __name__ == "__main__":
     unittest.main()
