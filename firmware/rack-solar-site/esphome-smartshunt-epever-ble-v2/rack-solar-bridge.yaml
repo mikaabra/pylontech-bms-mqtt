@@ -654,10 +654,10 @@ interval:
       - lambda: |-
           if (!id(handler_sm) || !id(handler_ep)) return;
           if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected()) {
-            if (!((SmartShuntBLEHandler*)id(handler_sm))->is_stale())
-              esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/smartshunt/status"), std::string("online"), 0, true);
-            if (!((EPEverHandler*)id(handler_ep))->is_stale())
-              esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/epever/status"), std::string("online"), 0, true);
+            // refreshes every retained status topic the HA availability lists
+            // reference (channel + group topics), not just the old two
+            ((SmartShuntBLEHandler*)id(handler_sm))->heartbeat_status();
+            ((EPEverHandler*)id(handler_ep))->heartbeat_status();
           }
 
 button:

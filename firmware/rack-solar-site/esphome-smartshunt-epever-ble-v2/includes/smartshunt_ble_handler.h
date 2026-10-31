@@ -125,6 +125,11 @@ public:
         reset_hysteresis();
     }
 
+    // refresh the retained status topic; heartbeat() no-ops while stale
+    void heartbeat_status() {
+        availability_.heartbeat(esphome::mqtt::global_mqtt_client);
+    }
+
     void publish_diagnostic_discovery() {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         ESP_LOGI("mqtt", "Publishing diagnostic discovery...");

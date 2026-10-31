@@ -134,6 +134,14 @@ public:
         reset_hysteresis();
     }
 
+    // refresh all retained group status topics; heartbeat() no-ops while stale
+    void heartbeat_status() {
+        pv_avail_.heartbeat(esphome::mqtt::global_mqtt_client);
+        controller_avail_.heartbeat(esphome::mqtt::global_mqtt_client);
+        battery_avail_.heartbeat(esphome::mqtt::global_mqtt_client);
+        overall_avail_.heartbeat(esphome::mqtt::global_mqtt_client);
+    }
+
     void publish_discovery() {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         char topic[160], payload[768];
