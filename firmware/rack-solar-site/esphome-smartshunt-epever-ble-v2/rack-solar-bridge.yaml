@@ -22,6 +22,10 @@ esphome:
       - lambda: |-
           id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_INFO);
           id(logger_level) = "INFO";
+          // text_sensor has update_interval: never; without this its state
+          // stays blank until someone presses the toggle
+          id(debug_level_sensor).publish_state(id(logger_level));
+      - lambda: |-
           id(handler_sm) = (void*) new SmartShuntBLEHandler();
           id(handler_ep) = (void*) new EPEverHandler();
 
