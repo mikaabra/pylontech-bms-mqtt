@@ -890,9 +890,14 @@ private:
     std::vector<HysteresisBool> hyst_batt_charge_mosfet_, hyst_batt_discharge_mosfet_, hyst_batt_lmcharge_mosfet_;
     std::vector<HysteresisBool> hyst_batt_cw_active_;
 
+    // paces publish_raw bursts (e.g. the 5-minute forced heartbeat sweep,
+    // ~200 messages) so blocking publishes cannot starve the watchdog
+    PublishPacer raw_pacer_;
+
     void publish_raw(const char* topic, const char* value) {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(value));
+        raw_pacer_.pace();
     }
 
     void publish_poll_alarm(int batt, bool alarm) {
