@@ -268,7 +268,7 @@ canbus:
               id(can_prot_discharge_overcurrent) = (prot0 & 0x80) != 0;  // bit 7
 
               id(can_prot_charge_overcurrent) = (prot1 & 0x01) != 0; // bit 0
-              id(can_prot_system_error) = (prot1 & 0x80) != 0;       // bit 7
+              id(can_prot_system_error) = (prot1 & 0x08) != 0;       // bit 3 (Pylontech V1.2 Table 2)
 
               // Decode warning flags (bytes 2-3)
               uint8_t warn2 = x[2];
@@ -280,7 +280,7 @@ canbus:
               id(can_warn_high_discharge_current) = (warn2 & 0x80) != 0;  // bit 7
 
               id(can_warn_high_charge_current) = (warn3 & 0x01) != 0;  // bit 0
-              id(can_warn_comms_fail) = (warn3 & 0x80) != 0;           // bit 7
+              id(can_warn_comms_fail) = (warn3 & 0x08) != 0;            // bit 3 (Pylontech V1.2 Table 4)
 
               // Module count and status byte
               id(can_module_count) = x[4];

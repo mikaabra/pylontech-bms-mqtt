@@ -129,7 +129,8 @@ public:
 
         uint8_t prot1 = x[1];
         prot_charge_overcurrent_ = (prot1 & 0x01) != 0;
-        prot_system_error_ = (prot1 & 0x80) != 0;
+        // Pylontech CAN V1.2 Table 2: system error is bit 3, not bit 7
+        prot_system_error_ = (prot1 & 0x08) != 0;
 
         uint8_t warn2 = x[2];
         warn_high_voltage_ = (warn2 & 0x02) != 0;
@@ -140,7 +141,8 @@ public:
 
         uint8_t warn3 = x[3];
         warn_high_charge_current_ = (warn3 & 0x01) != 0;
-        warn_comms_fail_ = (warn3 & 0x80) != 0;
+        // Pylontech CAN V1.2 Table 4: internal comms fail is bit 3, not bit 7
+        warn_comms_fail_ = (warn3 & 0x08) != 0;
 
         module_count_ = x[4];
         status_byte7_ = x[7];
