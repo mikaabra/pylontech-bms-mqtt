@@ -61,7 +61,6 @@ public:
 
         case 1: {
             int batt = current_batt_;
-            discard_until_tilde_ = false;
             for (int drain = 0; drain < 256 && uart_->available(); drain++) {
                 uint8_t c; uart_->read_byte(&c);
             }
@@ -80,21 +79,6 @@ public:
             const size_t MAX_BUFFER_SIZE = 1024;
             int bytes_read = 0;
 
-            if (discard_until_tilde_) {
-                while (uart_->available() && bytes_read < MAX_BYTES_PER_TICK) {
-                    uint8_t c;
-                    uart_->read_byte(&c);
-                    bytes_read++;
-                    if (c == '~') {
-                        discard_until_tilde_ = false;
-                        response_buf_ = "~";
-                        tx_time_ = now;
-                        break;
-                    }
-                }
-                if (discard_until_tilde_) return;
-            }
-
             while (uart_->available() && bytes_read < MAX_BYTES_PER_TICK) {
                 if (response_buf_.length() >= MAX_BUFFER_SIZE) {
                     int batt = current_batt_;
@@ -104,7 +88,6 @@ public:
                     for (int drain = 0; drain < 256 && uart_->available(); drain++) {
                         uint8_t c; uart_->read_byte(&c);
                     }
-                    discard_until_tilde_ = true;
                     current_batt_ = (batt + 1) % num_batteries_;
                     last_analog_poll_ = now;
                     state_ = 0;
@@ -273,7 +256,6 @@ public:
 
         case 3: {
             int batt = alarm_batt_;
-            discard_until_tilde_ = false;
             for (int drain = 0; drain < 256 && uart_->available(); drain++) {
                 uint8_t c; uart_->read_byte(&c);
             }
@@ -293,21 +275,6 @@ public:
             const size_t MAX_BUFFER_SIZE = 1024;
             int bytes_read = 0;
 
-            if (discard_until_tilde_) {
-                while (uart_->available() && bytes_read < MAX_BYTES_PER_TICK) {
-                    uint8_t c;
-                    uart_->read_byte(&c);
-                    bytes_read++;
-                    if (c == '~') {
-                        discard_until_tilde_ = false;
-                        response_buf_ = "~";
-                        tx_time_ = now;
-                        break;
-                    }
-                }
-                if (discard_until_tilde_) return;
-            }
-
             while (uart_->available() && bytes_read < MAX_BYTES_PER_TICK) {
                 if (response_buf_.length() >= MAX_BUFFER_SIZE) {
                     int batt = alarm_batt_;
@@ -317,7 +284,6 @@ public:
                     for (int drain = 0; drain < 256 && uart_->available(); drain++) {
                         uint8_t c; uart_->read_byte(&c);
                     }
-                    discard_until_tilde_ = true;
                     alarm_batt_++;
                     if (alarm_batt_ >= num_batteries_) {
                         compute_stack_totals();
@@ -868,7 +834,6 @@ private:
 
     enum State : int { IDLE = 0, SEND_ANALOG = 1, WAIT_ANALOG = 2, SEND_ALARM = 3, WAIT_ALARM_RX = 4 };
     int state_ = 0;
-    bool discard_until_tilde_ = false;
     uint32_t tx_time_ = 0;
     int current_batt_ = 0;
     int alarm_batt_ = 0;
