@@ -1,110 +1,76 @@
-#!/usr/env/bin python3
-"""Single best-effort D547 read of pack 01 to verify the written balance voltage.
-Accepts a possible one-slot collision with the master's next poll (the stack's
-normal double-slot behavior). Exactly one frame transmitted."""
-import os, time, termios, binascii
+#!/usr/bin/env python3
+"""Single best-effort D547 read of one pack to verify a written balance voltage.
 
-DEV = "/dev/tty.usbserial-A10N5EG8"
-B = termios.B9600
-LOG = f"/tmp/opencode/linkbus_verify_{time.strftime('%H%M%S')}.log"
+Accepts a possible one-slot collision with the master's next poll (the block
+read overruns the ~445 ms idle window by ~180 ms at 9600 - accepted once,
+NOT routine). Exactly one frame transmitted.
 
-def cksum(body):
-    return f"{(0x10000 - sum(body.encode())) & 0xFFFF:04X}"
+The 2026-10-31 read-back of pack 01 (after writing 0x4C = 0x0D66) was
+collision-damaged: the previous version of this script printed only
+"inconclusive" because its whole-frame checksum gate failed on the damaged
+bytes. The verdict documented in docs/PROTOCOL_REFERENCE.md was produced by
+reassembling the logged bytes - which this script now does natively:
 
-def build(cid2, info):
-    n = len(info)
-    length = f"{n:03X}"
-    lchk = (~sum(int(c, 16) for c in length) + 1) & 0xF
-    body = f"8000D5{cid2}{lchk:X}{length}{info}"
-    return f"~{body}{cksum(body)}\r".encode()
+  - whole-frame CHKSUM verdict (as received, damage included)
+  - 0x4C read from the undamaged prefix via the shared parameter layout
+  - transmission-completeness proof: splice a clean reference INFO (from the
+    committed standalone capture) over the damaged window and test the
+    stored trailing CHKSUM against it
+"""
+from __future__ import annotations
 
-def parse(frame_b):
-    txt = frame_b.decode("ascii", "replace")
-    body, chk = txt[1:-5], txt[-5:-1]
-    return {"ok": f"{(0x10000 - sum(body.encode())) & 0xFFFF:04X}" == chk, "raw": txt,
-            "lenid": body[8:12], "info": body[12:]}
-
-logf = open(LOG, "a")
-fd = os.open(DEV, os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-a = termios.tcgetattr(fd)
-iflag, oflag, cflag, lflag, _, _, cc = a
-iflag &= ~(termios.IGNBRK | termios.BRKINT | termios.ISTRIP | termios.INLCR | termios.IGNCR | termios.ICRNL | termios.IXON)
-lflag &= ~(termios.ECHO | termios.ECHONL | termios.ICANON | termios.ISIG | termios.IEXTEN)
-cflag &= ~(termios.CSIZE | termios.PARENB | termios.CSTOPB | termios.CRTSCTS)
-cflag |= termios.CS8 | termios.CREAD | termios.CLOCAL
-cc[termios.VMIN] = 0; cc[termios.VTIME] = 0
-termios.tcsetattr(fd, termios.TCSANOW, [iflag, oflag, cflag, lflag, B, B, cc])
-termios.tcflush(fd, termios.TCIFLUSH)
-
-req = build("47", "01")
-print(f"frame: {req.decode()!r}")
-
-# warmup 2s, then inject at first >=150ms gap
-t_start = time.time()
-last_rx = time.time()
-sent = False
-buf = bytearray()
-t_send = None
-while time.time() - t_start < 12 and not sent:
-    try: c = os.read(fd, 4096)
-    except BlockingIOError: c = b""
-    now = time.time()
-    if c:
-        logf.write(f"{now:.6f} RX {binascii.hexlify(c).decode()}\n"); last_rx = now
-    if now - t_start > 2.0 and now - last_rx >= 0.150:
-        os.write(fd, req); termios.tcdrain(fd)
-        logf.write(f"{now:.6f} TX {binascii.hexlify(req).decode()}\n")
-        print(f"TX after {(now - last_rx)*1000:.0f}ms idle")
-        t_send = now; sent = True
-    time.sleep(0.002)
-
-# collect 1.5s
-data = bytearray()
-end = time.time() + 1.5
-while time.time() < end:
-    try: c = os.read(fd, 4096)
-    except BlockingIOError: c = b""
-    if c: data.extend(c); logf.write(f"{time.time():.6f} RX {binascii.hexlify(c).decode()}\n")
-    time.sleep(0.002)
-
-txt = data.decode("ascii", "replace")
-frames = []
-rest = txt
-while "~" in rest:
-    s = rest.index("~")
-    e = rest.find("\r", s)
-    if e == -1: break
-    frames.append(parse(rest[s:e+1].encode()))
-    rest = rest[e+1:]
-print(f"\n{len(frames)} frames in response window")
-for f in frames:
-    print(f"  ok={f['ok']} lenid={f['lenid']} len={len(f['info'])} start={f['info'][:24]}")
-
-longs = [f for f in frames if f["ok"] and len(f["info"]) > 200]
-if longs:
-    info = longs[0]["info"]
-    print(f"\nlong response INFO ({len(info)} chars):")
-    print(f"  head: {info[:26]}")
-    pos = info.find("0D66")
-    old = info.find("0D5C")
-    print(f"  '0D66' at char {pos} (previous value 0D5C at {old})")
-    if pos != -1:
-        print(f"  context: ...{info[max(0,pos-20):pos+24]}...")
-        print("\n>>> VERIFIED: Start Balance Voltage = 0x0D66 (3.430 V) stored in pack 01")
-else:
-    print("\nno valid long response - read-back inconclusive (ack-level verification only)")
-
-# health: 15s passive
-data2 = bytearray()
-end = time.time() + 15
-while time.time() < end:
-    try: c = os.read(fd, 4096)
-    except BlockingIOError: c = b""
-    if c: data2.extend(c); logf.write(f"{time.time():.6f} RX {binascii.hexlify(c).decode()}\n")
-    time.sleep(0.002)
-t2 = data2.decode("ascii", "replace")
 import re
-n_req = len(re.findall(r"~8050D5[0-9A-F]{2}E002", t2))
-n_resp = t2.count("~8000D500B07E") + t2.count("~8000D5009052")
-n_bad = 0
-print(f"\npost-read health: master requests={n_req}, slave responses={n_resp}")
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import bms073
+import linkbus
+
+HERE = Path(__file__).resolve().parent
+PACK = "01"
+
+
+def reference_info_text() -> str:
+    with (HERE / "transcript.txt").open(errors="replace") as fh:
+        for line in fh:
+            m = re.search(r"(~[0-9A-F]+)\\x0d", line)
+            if m and "A222" in m.group(1):
+                return bms073.Frame.parse(m.group(1).encode() + b"\r").info_text
+    raise SystemExit("no standalone D547 frame found in transcript.txt")
+
+
+def main() -> int:
+    req = bms073.build(cid2=0x47, info=PACK)
+    print(f"read frame: {req.decode().strip()!r}")
+    fd, logf = linkbus.open_serial()
+    if linkbus.inject_after_gap(fd, req, logf, need_gap=0.150, warmup=2.0, timeout=8.0) is None:
+        return 2
+    window = linkbus.collect(fd, 1.5, logf)
+    blocks = [f for f in bms073.parse_stream(window)
+              if f.lenid_valid and len(f.info_text) > 200]
+    if not blocks:
+        print("no parameter block in window - read-back inconclusive")
+        print("  " + linkbus.health_report(fd, logf))
+        return 3
+    f = blocks[0]
+    print(f"  whole-frame CHKSUM: {'VALID' if f.checksum_valid else 'INVALID'}"
+          f" (stored {f.stored_checksum:04X})")
+    block = bms073.ParameterBlock.from_frame(f)
+    print(f"  battery number: {block.battery_number:02X}")
+    raw = block.raw(0x4C)
+    print(f"  0x4C = {raw:#06x} ({raw * 0.001:.3f} V); old 0x0D5C present: "
+          f"{'0D5C' in f.info_text}")
+    span = f.damage_span()
+    if span is not None:
+        print(f"  collision damage: INFO chars {span[0]}..{span[1]} "
+              f"({span[1] - span[0] + 1} chars, after the balance region)")
+        proof = f.verify_stored_checksum_against(reference_info_text())
+        print(f"  transmission-completeness proof (stored CHKSUM over "
+              f"collision-free reconstruction): {proof}")
+    print("  " + linkbus.health_report(fd, logf))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,4 +1,4 @@
-#!/usr/env/bin python3
+#!/usr/bin/env python3
 """Passive RS485 Link-bus sniffer (read-only, never transmits).
 
 Reads /dev/tty.usbserial-* raw with termios, groups bytes into frames by
@@ -14,6 +14,7 @@ import time
 import termios
 import fcntl
 import binascii
+from pathlib import Path
 
 DEV = sys.argv[1] if len(sys.argv) > 1 else None
 BAUD = int(sys.argv[2]) if len(sys.argv) > 2 else 9600
@@ -42,7 +43,9 @@ cc[termios.VTIME] = 1  # 100ms inter-byte timeout (tenths of a second)
 termios.tcsetattr(fd, termios.TCSANOW, [iflag, oflag, cflag, lflag, BAUDMAP[BAUD], BAUDMAP[BAUD], cc])
 termios.tcflush(fd, termios.TCIFLUSH)
 
-LOG = f"/tmp/opencode/linkbus_{time.strftime('%Y%m%d_%H%M%S')}.log"
+LOG_DIR = Path(__file__).resolve().parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG = LOG_DIR / f"linkbus_{time.strftime('%Y%m%d_%H%M%S')}.log"
 logf = open(LOG, "a")
 
 def render(b):
