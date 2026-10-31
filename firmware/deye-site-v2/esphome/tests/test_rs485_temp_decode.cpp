@@ -1,21 +1,20 @@
-// Host-only oracle for the RS485 temperature decode in
-// ../includes/pylontech_rs485.h: values arrive as 0.1K units and must
-// be subtracted from the 273.1K offset in SIGNED arithmetic, or sub-zero
-// values wrap in 32-bit unsigned math (~4.29e8) and get dropped by the
-// -40..100C range filter. This file cannot include the firmware header
-// (it needs the full ESPHome build environment), so it mirrors the
-// expression - if you change one, change the other.
+// Host oracle for the RS485 temperature decode, pinned to the REAL
+// firmware code: it includes ../includes/pylontech_protocol.h and calls
+// rs485_temp_to_celsius() - the same function pylontech_rs485.h uses -
+// so breaking the firmware decode breaks this test.
+//
+// Values arrive as 0.1K units; an unsigned subtraction would wrap
+// sub-zero raws (e.g. 2631 = -10.0C) to ~4.29e8, and the -40..100C
+// range filters would drop the reading.
 //
 // Build & run (any host compiler, any platform):
-//   clang++ -std=gnu++20 -o /tmp/rs485_temp_test tests/test_rs485_temp_decode.cpp
+//   cd firmware/deye-site-v2/esphome
+//   clang++ -std=gnu++20 -Iincludes -o /tmp/rs485_temp_test tests/test_rs485_temp_decode.cpp
 //   /tmp/rs485_temp_test ; echo "exit=$?"   (exit 0 = pass)
 
 #include <cstdio>
 #include <cstdint>
-
-static float decode(uint32_t raw) {
-    return ((int32_t)raw - 2731) / 10.0f;
-}
+#include "pylontech_protocol.h"
 
 int main() {
     struct Case { uint32_t raw; float want_c; };
@@ -26,7 +25,7 @@ int main() {
         { 2500, -23.1f },  // deep freeze
     };
     for (const auto& c : cases) {
-        float got = decode(c.raw);
+        float got = rs485_temp_to_celsius(c.raw);
         if (got < c.want_c - 0.05f || got > c.want_c + 0.05f) {
             printf("FAIL raw=%u got=%.2fC want=%.2fC\n", c.raw, got, c.want_c);
             return 1;
