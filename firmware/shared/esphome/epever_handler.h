@@ -73,11 +73,13 @@ public:
     }
 
     void handle_battery_voltage(float x) {
-        if (!std::isfinite(x) || x < 15.0f || x > 30.0f) return;
+        // reject only impossible values; a deep-discharge collapse below the
+        // nominal window is a real fault the dashboards must see, not garbage
+        if (!std::isfinite(x) || x < 0.0f || x > 75.0f) return;
         last_battery_rx_ = millis(); has_battery_rx_ = true;
         battery_avail_.mark_online(esphome::mqtt::global_mqtt_client);
         refresh_overall();
-        if (hys_batt_v_.check(x, 0.1f, 15.0f, 30.0f)) {
+        if (hys_batt_v_.check(x, 0.1f, 0.0f, 75.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.2f", x);
             publish_topic("battery_voltage", val);
         }
@@ -122,6 +124,25 @@ public:
         publish_discovery();
     }
 
+    // short MQTT gap (< 6s debounce): discovery survives (retained), but
+    // value updates lost during the outage must be re-sent
+    void on_short_reconnect() {
+        pv_avail_.on_connect(esphome::mqtt::global_mqtt_client);
+        controller_avail_.on_connect(esphome::mqtt::global_mqtt_client);
+        battery_avail_.on_connect(esphome::mqtt::global_mqtt_client);
+        overall_avail_.on_connect(esphome::mqtt::global_mqtt_client);
+        reset_hysteresis();
+    }
+
+    // refresh all retained group status topics with the current state,
+    // online or offline - repairs an offline lost during a short disconnect
+    void heartbeat_status() {
+        pv_avail_.heartbeat(esphome::mqtt::global_mqtt_client);
+        controller_avail_.heartbeat(esphome::mqtt::global_mqtt_client);
+        battery_avail_.heartbeat(esphome::mqtt::global_mqtt_client);
+        overall_avail_.heartbeat(esphome::mqtt::global_mqtt_client);
+    }
+
     void publish_discovery() {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         char topic[160], payload[768];
@@ -129,20 +150,28 @@ public:
         pacer.yield_every = 10;
         const char* device_json = R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})";
 
-        const char* pv_avail = R"("availability_topic":"rack-solar/epever/pv/status","payload_available":"online","payload_not_available":"offline")";
-        const char* controller_avail = R"("availability_topic":"rack-solar/epever/controller/status","payload_available":"online","payload_not_available":"offline")";
-        const char* battery_avail = R"("availability_topic":"rack-solar/epever/battery/status","payload_available":"online","payload_not_available":"offline")";
+        // data entities gate on BOTH the client last-will topic (device death)
+        // and their channel-group availability topic (data gone stale)
+        auto make_avail_list = [](const char* group_topic) -> std::string {
+            return std::string(R"("availability":[{"topic":"rack-solar/status",)") +
+                   R"("payload_available":"online","payload_not_available":"offline"},{"topic":")" +
+                   std::string(group_topic) +
+                   R"(","payload_available":"online","payload_not_available":"offline"}],"availability_mode":"all")";
+        };
+        const std::string pv_avail = make_avail_list("rack-solar/epever/pv/status");
+        const std::string controller_avail = make_avail_list("rack-solar/epever/controller/status");
+        const std::string battery_avail = make_avail_list("rack-solar/epever/battery/status");
 
         struct SensorDef { const char* id; const char* name; const char* unit; const char* dc; const char* sc; const char* avail; };
         const SensorDef sensors[] = {
-            {"epever_solar_voltage",   "EPEVER Solar Voltage",      "V",   "voltage",     "measurement",      pv_avail},
-            {"epever_pv_current",      "EPEVER PV Current",         "A",   "current",     "measurement",      pv_avail},
-            {"epever_solar_power",     "EPEVER Solar Power",        "W",   "power",       "measurement",      pv_avail},
-            {"epever_battery_capacity","EPEVER Battery Capacity",   "%",   "battery",     "measurement",      controller_avail},
-            {"epever_device_temp",     "EPEVER Device Temperature", "°C",  "temperature", "measurement",      controller_avail},
-            {"epever_battery_voltage", "EPEVER Battery Voltage",   "V",   "voltage",     "measurement",      battery_avail},
-            {"epever_battery_current", "EPEVER Battery Current",   "A",   "current",     "measurement",      battery_avail},
-            {"epever_total_energy",    "EPEVER Total Energy",      "kWh", "energy",      "total_increasing", battery_avail},
+            {"epever_solar_voltage",   "EPEVER Solar Voltage",      "V",   "voltage",     "measurement",      pv_avail.c_str()},
+            {"epever_pv_current",      "EPEVER PV Current",         "A",   "current",     "measurement",      pv_avail.c_str()},
+            {"epever_solar_power",     "EPEVER Solar Power",        "W",   "power",       "measurement",      pv_avail.c_str()},
+            {"epever_battery_capacity","EPEVER Battery Capacity",   "%",   "battery",     "measurement",      controller_avail.c_str()},
+            {"epever_device_temp",     "EPEVER Device Temperature", "°C",  "temperature", "measurement",      controller_avail.c_str()},
+            {"epever_battery_voltage", "EPEVER Battery Voltage",   "V",   "voltage",     "measurement",      battery_avail.c_str()},
+            {"epever_battery_current", "EPEVER Battery Current",   "A",   "current",     "measurement",      battery_avail.c_str()},
+            {"epever_total_energy",    "EPEVER Total Energy",      "kWh", "energy",      "total_increasing", battery_avail.c_str()},
         };
         for (int i = 0; i < 8; i++) {
             char uid[64], st[96];

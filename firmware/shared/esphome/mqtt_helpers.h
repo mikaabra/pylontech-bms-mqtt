@@ -30,6 +30,14 @@ struct PublishPacer {
     }
 };
 
+// Force-republish window after an MQTT reconnect edge: diagnostics that
+// publish only on change lose updates sent during an outage, and retained
+// ones need a re-send when the value changed during the gap. Unsigned
+// math is wrap-safe across the 49.7-day millis() rollover.
+inline bool force_after_reconnect(bool reconnected, uint32_t reconnect_ms, uint32_t now) {
+    return reconnected && (now - reconnect_ms) < 6000;
+}
+
 inline bool build_ha_sensor_payload(
     char* buf, size_t buf_size,
     const char* name, const char* state_topic, const char* unique_id,

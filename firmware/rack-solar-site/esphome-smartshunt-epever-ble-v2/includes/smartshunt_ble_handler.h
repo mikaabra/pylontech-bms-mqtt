@@ -23,7 +23,9 @@ public:
     SmartShuntBLEHandler() : availability_("rack-solar/smartshunt/status") {}
 
     void handle_battery_voltage(float x) {
-        if (hys_volt_.check(x, 0.1f, 15.0f, 35.0f)) {
+        // reject only impossible values; a deep-discharge collapse below the
+        // nominal window is a real fault the dashboards must see, not garbage
+        if (hys_volt_.check(x, 0.1f, 0.0f, 100.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.2f", x);
             publish_topic("battery_voltage", val);
         }
@@ -116,11 +118,28 @@ public:
         publish_diagnostic_discovery();
     }
 
+    // short MQTT gap (< 6s debounce): discovery survives (retained), but
+    // value updates lost during the outage must be re-sent
+    void on_short_reconnect() {
+        availability_.on_connect(esphome::mqtt::global_mqtt_client);
+        reset_hysteresis();
+    }
+
+    // refresh the retained status topic with the current state, online or
+    // offline - repairs an offline lost during a short disconnect
+    void heartbeat_status() {
+        availability_.heartbeat(esphome::mqtt::global_mqtt_client);
+    }
+
     void publish_diagnostic_discovery() {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         ESP_LOGI("mqtt", "Publishing diagnostic discovery...");
         char topic[160], payload[768];
+        PublishPacer pacer;
         const char* device_json = R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})";
+        // diagnostics report channel state as their VALUE (STALE/OK, DISCONNECTED...):
+        // gating their availability on the channel topic would hide exactly that
+        // message, so they watch the device last-will topic only
         const char* diag_avail = R"("availability_topic":"rack-solar/status","payload_available":"online","payload_not_available":"offline")";
 
         const char* diag_sensors[][5] = {
@@ -142,8 +161,8 @@ public:
                                         diag_sensors[i][2], diag_sensors[i][3], diag_sensors[i][4],
                                         diag_avail, device_json, "", "diagnostic")) {
                 esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                pacer.pace();
             }
-            if (i % 5 == 4) yield();
         }
         ESP_LOGI("mqtt", "Diagnostic discovery published");
     }
@@ -154,7 +173,11 @@ public:
         PublishPacer pacer;
         pacer.yield_every = 10;
         const char* device_json = R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})";
-        const char* avail = R"("availability_topic":"rack-solar/smartshunt/status","payload_available":"online","payload_not_available":"offline")";
+        // both the client last-will topic (device death) and the channel
+        // availability topic (BLE data gone stale) gate HA availability
+        std::string avail = std::string(R"("availability":[{"topic":"rack-solar/status",)") +
+            R"("payload_available":"online","payload_not_available":"offline"},{"topic":"rack-solar/smartshunt/status",)" +
+            R"("payload_available":"online","payload_not_available":"offline"}],"availability_mode":"all")";
 
         // 6 SmartShunt BLE sensors
         const char* sensors[][5] = {
@@ -172,7 +195,7 @@ public:
             snprintf(st, sizeof(st), "rack-solar/smartshunt/%s", sensors[i][0] + 3);
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", sensors[i][0]);
             if (build_ha_sensor_payload(payload, sizeof(payload), sensors[i][1], st, uid,
-                                         sensors[i][2], sensors[i][3], sensors[i][4], avail, device_json)) {
+                                         sensors[i][2], sensors[i][3], sensors[i][4], avail.c_str(), device_json)) {
                 esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
                 pacer.pace();
             }
@@ -191,7 +214,7 @@ private:
     uint32_t ble_last_message_time_ = 0;
 
     // Hysteresis for 6 BLE sensors
-    HysteresisFloat hys_volt_;         // battery_voltage: 0.1V, 15-35V
+    HysteresisFloat hys_volt_;         // battery_voltage: 0.1V, 0-100V (impossible-only gate)
     HysteresisFloat hys_current_;       // battery_current: 0.1A, -200 to 200A
     HysteresisInt   hys_soc_;           // state_of_charge: 1%, 0-100
     HysteresisFloat hys_power_;         // instantaneous_power: 5W, -10000 to 10000W

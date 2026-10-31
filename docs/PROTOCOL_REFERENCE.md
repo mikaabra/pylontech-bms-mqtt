@@ -364,6 +364,7 @@ The UPower-HI series is a hybrid inverter/charger that supports lithium battery 
 | 0x3101 | 12545 | PV Array Current | A | ÷100 |
 | 0x3102-3 | 12546-7 | PV Array Power | W | ÷100 (32-bit) |
 | 0x331A | 13082 | Battery Voltage | V | ÷100 |
+| 0x331B | 13083 | Battery Current | A | ÷100, **signed** (charge +, discharge −). Possibly the low half of a signed 32-bit value at 0x331B/0x331C (unconfirmed); a 16-bit signed read of the low half is identical below ±327 A, far beyond any current this system sees |
 | 0x3110 | 12560 | Battery Temperature | °C | - |
 | 0x311A | 12570 | Battery SOC | % | - |
 
