@@ -108,6 +108,9 @@ public:
             // Data flowing again — mark_online will be called by next on_ble_message
             // but also handle it here for the case where data resumed between callbacks
             availability_.mark_online(esphome::mqtt::global_mqtt_client);
+            // values may have changed while stale; reset so the next reading
+            // republishes instead of waiting for a 60s heartbeat
+            reset_hysteresis();
         }
     }
 

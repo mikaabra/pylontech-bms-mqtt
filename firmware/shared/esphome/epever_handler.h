@@ -107,13 +107,20 @@ public:
 
     void check_stale() {
         uint32_t now = millis();
-        check_group_stale(pv_avail_, last_pv_rx_, has_pv_rx_, now);
-        check_group_stale(controller_avail_, last_controller_rx_, has_controller_rx_, now);
-        check_group_stale(battery_avail_, last_battery_rx_, has_battery_rx_, now);
+        // values may have changed while a group was stale; resetting its
+        // hysteresis makes the next reading republish immediately instead
+        // of waiting for a 60s heartbeat
+        if (check_group_stale(pv_avail_, last_pv_rx_, has_pv_rx_, now)) {
+            hys_solar_v_.reset(); hys_pv_current_.reset(); hys_solar_power_.reset();
+        }
+        if (check_group_stale(controller_avail_, last_controller_rx_, has_controller_rx_, now)) {
+            hys_batt_cap_.reset(); hys_device_temp_.reset();
+        }
+        if (check_group_stale(battery_avail_, last_battery_rx_, has_battery_rx_, now)) {
+            hys_batt_v_.reset(); hys_batt_current_.reset(); hys_total_energy_.reset();
+        }
         refresh_overall();
-    }
-
-    void on_mqtt_connect() {
+    }    void on_mqtt_connect() {
         pv_avail_.on_connect(esphome::mqtt::global_mqtt_client);
         controller_avail_.on_connect(esphome::mqtt::global_mqtt_client);
         battery_avail_.on_connect(esphome::mqtt::global_mqtt_client);
@@ -202,17 +209,22 @@ private:
         }
     }
 
-    void check_group_stale(AvailabilityTracker& avail, uint32_t last_rx, bool has_rx, uint32_t now) {
+    // returns true if the group just recovered from staleness
+    bool check_group_stale(AvailabilityTracker& avail, uint32_t last_rx, bool has_rx, uint32_t now) {
         if (!has_rx) {
             if (!avail.stale) avail.mark_stale(esphome::mqtt::global_mqtt_client);
-            return;
+            return false;
         }
         uint32_t elapsed = safe_elapsed(now, last_rx);
         if (elapsed > 90000 && !avail.stale) {
             avail.mark_stale(esphome::mqtt::global_mqtt_client);
-        } else if (elapsed <= 90000 && avail.stale) {
-            avail.mark_online(esphome::mqtt::global_mqtt_client);
+            return false;
         }
+        if (elapsed <= 90000 && avail.stale) {
+            avail.mark_online(esphome::mqtt::global_mqtt_client);
+            return true;
+        }
+        return false;
     }
 
     void publish_topic(const char* suffix, const char* value) {
