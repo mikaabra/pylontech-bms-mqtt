@@ -43,7 +43,9 @@ esp32:
     type: esp-idf
 
 logger:
-  level: WARN
+  # compile-time level is a ceiling for set_log_level; DEBUG here so the
+  # Toggle Debug Logging button can raise the runtime level from boot-time WARN
+  level: DEBUG
   id: logger_level_global
 
 wifi:
