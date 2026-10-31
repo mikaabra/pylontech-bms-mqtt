@@ -9,7 +9,7 @@ substitutions:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
-  min_version: "2026.8.1"
+  min_version: "2026.9.1"
   includes:
     - ../../shared/esphome/mqtt_helpers.h
     - ../../shared/esphome/hysteresis.h
@@ -70,10 +70,13 @@ mqtt:
 
 api:
   reboot_timeout: 0s
+  encryption:
+    key: !secret ota_encryption_key
 
 ota:
   - platform: esphome
-    password: !secret ota_password
+    encryption:
+      key: !secret ota_encryption_key
 
 # BLE tracker for Victron SmartShunt
 esp32_ble_tracker:
