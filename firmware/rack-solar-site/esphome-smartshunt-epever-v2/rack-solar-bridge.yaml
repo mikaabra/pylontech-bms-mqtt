@@ -109,12 +109,12 @@ victron:
 modbus:
   id: modbus1
   uart_id: rs485_uart
+  turnaround_time: 0ms
 
 modbus_controller:
   - id: epever
     address: 0x1
     modbus_id: modbus1
-    command_throttle: 0ms
     update_interval: 30s
 
 globals:

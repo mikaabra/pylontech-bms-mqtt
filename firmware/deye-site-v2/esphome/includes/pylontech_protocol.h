@@ -24,6 +24,15 @@ inline bool parse_hex(const std::string& s, unsigned long& out) {
     return errno == 0 && static_cast<size_t>(end - s.c_str()) == s.size();
 }
 
+// Decode a Pylontech RS485 temperature field (0.1K units) to Celsius.
+// The subtraction must be signed: in 32-bit unsigned arithmetic a
+// sub-zero raw value (e.g. 2631 = -10.0C) wraps to ~4.29e8 and the
+// -40..100C range filters then drop the reading. Shared with the host
+// oracle in ../tests/test_rs485_temp_decode.cpp - change them together.
+inline float rs485_temp_to_celsius(unsigned long raw) {
+    return ((int32_t)raw - 2731) / 10.0f;
+}
+
 // Pylontech CAN frame IDs
 static const uint32_t CAN_ID_351 = 0x351;
 static const uint32_t CAN_ID_355 = 0x355;

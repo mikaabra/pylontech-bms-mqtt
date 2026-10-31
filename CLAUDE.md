@@ -10,6 +10,17 @@ ESPHome firmware for solar battery monitoring on ESP32-S3 hardware:
 
 All data published to MQTT with Home Assistant auto-discovery.
 
+## Active Deployments (verified 2026-10-16)
+
+| Device | Firmware | Status |
+|--------|----------|--------|
+| `deye-bms-can.local` | `firmware/deye-site-v2/esphome/deye-bms-can.yaml` | **ACTIVE** — production, ESPHome 2026.9.1, encrypted OTA |
+| `rack-solar-bridge.local` | `firmware/rack-solar-site/esphome-smartshunt-epever-ble-v2/rack-solar-bridge.yaml` | **ACTIVE** — production (BLE SmartShunt + EPEVER) |
+| — | `firmware/rack-solar-site/esphome-smartshunt-epever-v2/` | **NOT DEPLOYED** — VE.Direct variant, not in use (user confirmed). Do not flash. |
+| — | `firmware/rack-solar-site/esphome-smartshunt-epever/` | **LEGACY v1** — superseded |
+
+Do not flash the VE.Direct variant: it targets the same device name (`rack-solar-bridge.local`) and would overwrite the BLE firmware. Both variants build for `rack-solar-bridge`; only the BLE v2 firmware is running. Verified via MQTT topic set (`rack-solar/smartshunt/#` carries the BLE variant's 6-topic set; the VE.Direct variant publishes 18 topics incl. `battery_temperature`, `depth_*`).
+
 ## Coding Guidelines
 
 When adding functionality that's similar to existing code, always propose consolidation first. Don't duplicate - extend or refactor. Before writing new code, search for existing similar patterns and reuse them. If you find yourself about to copy-paste logic for a third time, stop and refactor into a shared helper first.
@@ -27,7 +38,7 @@ cd firmware/rack-solar-site/esphome-smartshunt-epever-ble-v2
 esphome compile rack-solar-bridge.yaml
 esphome upload rack-solar-bridge.yaml --device rack-solar-bridge.local
 
-# Rack solar (VE.Direct — alternative)
+# Rack solar (VE.Direct — NOT DEPLOYED, do not flash; would overwrite BLE firmware on same device)
 cd firmware/rack-solar-site/esphome-smartshunt-epever-v2
 esphome compile rack-solar-bridge.yaml
 esphome upload rack-solar-bridge.yaml --device rack-solar-bridge.local

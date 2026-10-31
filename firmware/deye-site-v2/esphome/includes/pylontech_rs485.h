@@ -11,11 +11,12 @@
 
 class PylontechRS485 {
 public:
-    PylontechRS485(esphome::uart::UARTComponent* uart, const char* mqtt_prefix, int num_batteries, int pylontech_addr)
+    PylontechRS485(esphome::uart::UARTComponent* uart, const char* mqtt_prefix, int num_batteries, int pylontech_addr, const char* device_status_topic)
         : uart_(uart)
         , mqtt_prefix_(mqtt_prefix)
         , num_batteries_(num_batteries)
         , pylontech_addr_(pylontech_addr)
+        , device_status_topic_(device_status_topic)
         , batteries_(num_batteries)
         , availability_((std::string(mqtt_prefix) + "/status").c_str())
         , hyst_cell_voltages_(16 * num_batteries)
@@ -60,7 +61,6 @@ public:
 
         case 1: {
             int batt = current_batt_;
-            discard_until_tilde_ = false;
             for (int drain = 0; drain < 256 && uart_->available(); drain++) {
                 uint8_t c; uart_->read_byte(&c);
             }
@@ -79,21 +79,6 @@ public:
             const size_t MAX_BUFFER_SIZE = 1024;
             int bytes_read = 0;
 
-            if (discard_until_tilde_) {
-                while (uart_->available() && bytes_read < MAX_BYTES_PER_TICK) {
-                    uint8_t c;
-                    uart_->read_byte(&c);
-                    bytes_read++;
-                    if (c == '~') {
-                        discard_until_tilde_ = false;
-                        response_buf_ = "~";
-                        tx_time_ = now;
-                        break;
-                    }
-                }
-                if (discard_until_tilde_) return;
-            }
-
             while (uart_->available() && bytes_read < MAX_BYTES_PER_TICK) {
                 if (response_buf_.length() >= MAX_BUFFER_SIZE) {
                     int batt = current_batt_;
@@ -103,7 +88,6 @@ public:
                     for (int drain = 0; drain < 256 && uart_->available(); drain++) {
                         uint8_t c; uart_->read_byte(&c);
                     }
-                    discard_until_tilde_ = true;
                     current_batt_ = (batt + 1) % num_batteries_;
                     last_analog_poll_ = now;
                     state_ = 0;
@@ -126,16 +110,8 @@ public:
                         ESP_LOGW("rs485", "Batt %d analog poll failed: %s", batt, error.c_str());
                         handle_analog_failure(batt);
                     } else {
-                        if (batteries_[batt].analog_poll_failures > 0 || batteries_[batt].analog_poll_alarm) {
-                            batteries_[batt].analog_poll_failures = 0;
-                            if (batteries_[batt].analog_poll_alarm) {
-                                batteries_[batt].analog_poll_alarm = false;
-                                publish_poll_alarm(batt, false);
-                            }
-                        }
                         last_analog_rx_ = now;
                         has_analog_rx_ = true;
-                        batteries_[batt].has_analog = true;
                         availability_.mark_online(esphome::mqtt::global_mqtt_client);
 
                         if (response.length() > 18) {
@@ -161,11 +137,18 @@ public:
                                 float temp_current = 0.0f, temp_voltage = 0.0f;
                                 float temp_remain_ah = 0.0f, temp_total_ah = 0.0f;
                                 int temp_cycles = 0;
+                                // completeness tracking: a truncated frame must not be committed,
+                                // or missing fields overwrite good values with zeros
+                                int cells_read = 0, temps_read = 0;
+                                int num_temps = 0;
+                                bool temp_count_read = false;
+                                bool current_read = false, voltage_read = false, remain_read = false, total_read = false, cycles_read = false;
 
                                 for (int cell = 0; cell < num_cells && cell < 16 && data.length() >= idx + 4; cell++) {
                                     if (!parse_hex(data.substr(idx, 4), hex_val)) { parse_ok = false; break; }
                                     temp_cell_voltages[cell] = hex_val / 1000.0f;
                                     idx += 4;
+                                    cells_read++;
                                 }
                                 if (!parse_ok) {
                                     ESP_LOGW("rs485", "Batt %d analog: bad hex cell voltage", batt);
@@ -179,13 +162,15 @@ public:
                                 if (data.length() >= idx + 2) {
                                     if (!parse_hex(data.substr(idx, 2), hex_val)) { parse_ok = false; }
                                     else {
-                                        int num_temps = (int)hex_val;
+                                        num_temps = (int)hex_val;
                                         idx += 2;
+                                        temp_count_read = true;
                                         int reported_temps = num_temps;
                                         for (int t = 0; t < num_temps && t < 6 && data.length() >= idx + 4; t++) {
                                             if (!parse_hex(data.substr(idx, 4), hex_val)) { parse_ok = false; break; }
-                                            temp_cell_temps[t] = (hex_val - 2731) / 10.0f;
+                                            temp_cell_temps[t] = rs485_temp_to_celsius(hex_val);
                                             idx += 4;
+                                            temps_read++;
                                         }
                                         idx += (reported_temps > 6) ? (reported_temps - 6) * 4 : 0;
                                     }
@@ -205,27 +190,50 @@ public:
                                         if (raw > 0x7FFF) raw -= 0x10000;
                                         temp_current = raw / 100.0f;
                                         idx += 4;
+                                        current_read = true;
                                     }
                                 }
                                 if (parse_ok && data.length() >= idx + 4) {
                                     if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
-                                    else { temp_voltage = hex_val / 100.0f; idx += 4; }
+                                    else { temp_voltage = hex_val / 100.0f; idx += 4; voltage_read = true; }
                                 }
                                 if (parse_ok && data.length() >= idx + 4) {
                                     if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
-                                    else { temp_remain_ah = hex_val / 100.0f; idx += 4; }
+                                    else { temp_remain_ah = hex_val / 100.0f; idx += 4; remain_read = true; }
                                 }
-                                if (parse_ok) idx += 2;
+                                if (parse_ok && remain_read) idx += 2;
                                 if (parse_ok && data.length() >= idx + 4) {
                                     if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
-                                    else { temp_total_ah = hex_val / 100.0f; idx += 4; }
+                                    else { temp_total_ah = hex_val / 100.0f; idx += 4; total_read = true; }
                                 }
                                 if (parse_ok && data.length() >= idx + 4) {
                                     if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
-                                    else { temp_cycles = (int)hex_val; }
+                                    else { temp_cycles = (int)hex_val; cycles_read = true; }
                                 }
                                 if (!parse_ok) {
                                     ESP_LOGW("rs485", "Batt %d analog: bad hex in current/voltage/ah/cycles", batt);
+                                    handle_analog_failure(batt);
+                                    current_batt_ = (batt + 1) % num_batteries_;
+                                    last_analog_poll_ = now;
+                                    state_ = 0;
+                                    return;
+                                }
+
+                                // all reported sections must have been read before committing;
+                                // a truncated frame would otherwise zero out live values and
+                                // clear an active poll alarm
+                                bool frame_complete = parse_ok
+                                    && cells_read == (num_cells < 16 ? num_cells : 16)
+                                    && temp_count_read
+                                    && temps_read == (num_temps < 6 ? num_temps : 6)
+                                    && current_read && voltage_read && remain_read
+                                    && total_read && cycles_read;
+                                if (!frame_complete) {
+                                    ESP_LOGW("rs485", "Batt %d analog frame truncated: %d/%d cells, %d/%d temps, cur=%d v=%d rem=%d tot=%d cyc=%d",
+                                             batt, cells_read, num_cells, temps_read, num_temps,
+                                             current_read ? 1 : 0, voltage_read ? 1 : 0,
+                                             remain_read ? 1 : 0, total_read ? 1 : 0,
+                                             cycles_read ? 1 : 0);
                                     handle_analog_failure(batt);
                                     current_batt_ = (batt + 1) % num_batteries_;
                                     last_analog_poll_ = now;
@@ -243,8 +251,27 @@ public:
                                 if (batteries_[batt].total_ah > 0) {
                                     batteries_[batt].soc = (batteries_[batt].remain_ah / batteries_[batt].total_ah) * 100.0f;
                                 }
+                                batteries_[batt].has_analog = true;
+                                // reset the failure counter only once the data is
+                                // fully parsed, or "valid frame, bad data" retries
+                                // never accumulate to the alarm threshold
+                                if (batteries_[batt].analog_poll_failures > 0 || batteries_[batt].analog_poll_alarm) {
+                                    batteries_[batt].analog_poll_failures = 0;
+                                    if (batteries_[batt].analog_poll_alarm) {
+                                        batteries_[batt].analog_poll_alarm = false;
+                                        publish_poll_alarm(batt, false);
+                                    }
+                                }
                                 ESP_LOGI("rs485", "Batt %d: %.3fV %.2fA SOC=%.0f%%", batt, batteries_[batt].voltage, batteries_[batt].current, batteries_[batt].soc);
+                            } else {
+                                // checksum-valid frame without a data section: still a failed poll
+                                ESP_LOGW("rs485", "Batt %d analog response data too short: %d bytes", batt, (int)data.length());
+                                handle_analog_failure(batt);
                             }
+                        } else {
+                            // length <= 18 passes validation but carries no data: still a failed poll
+                            ESP_LOGW("rs485", "Batt %d analog response too short: %d bytes", batt, (int)response.length());
+                            handle_analog_failure(batt);
                         }
                     }
                     current_batt_ = (batt + 1) % num_batteries_;
@@ -267,7 +294,6 @@ public:
 
         case 3: {
             int batt = alarm_batt_;
-            discard_until_tilde_ = false;
             for (int drain = 0; drain < 256 && uart_->available(); drain++) {
                 uint8_t c; uart_->read_byte(&c);
             }
@@ -287,21 +313,6 @@ public:
             const size_t MAX_BUFFER_SIZE = 1024;
             int bytes_read = 0;
 
-            if (discard_until_tilde_) {
-                while (uart_->available() && bytes_read < MAX_BYTES_PER_TICK) {
-                    uint8_t c;
-                    uart_->read_byte(&c);
-                    bytes_read++;
-                    if (c == '~') {
-                        discard_until_tilde_ = false;
-                        response_buf_ = "~";
-                        tx_time_ = now;
-                        break;
-                    }
-                }
-                if (discard_until_tilde_) return;
-            }
-
             while (uart_->available() && bytes_read < MAX_BYTES_PER_TICK) {
                 if (response_buf_.length() >= MAX_BUFFER_SIZE) {
                     int batt = alarm_batt_;
@@ -311,7 +322,6 @@ public:
                     for (int drain = 0; drain < 256 && uart_->available(); drain++) {
                         uint8_t c; uart_->read_byte(&c);
                     }
-                    discard_until_tilde_ = true;
                     alarm_batt_++;
                     if (alarm_batt_ >= num_batteries_) {
                         compute_stack_totals();
@@ -344,19 +354,19 @@ public:
                             ESP_LOGW("rs485", "Batt %d alarm response too short: %d bytes data", batt, data.length());
                             handle_alarm_failure(batt);
                         } else {
-                            if (batteries_[batt].alarm_poll_failures > 0 || batteries_[batt].alarm_poll_alarm) {
-                                batteries_[batt].alarm_poll_failures = 0;
-                                if (batteries_[batt].alarm_poll_alarm) {
-                                    batteries_[batt].alarm_poll_alarm = false;
-                                    publish_alarm_poll_alarm(batt, false);
-                                }
-                            }
                             batteries_[batt].has_alarm = true;
                             has_any_alarm_ = true;
                             if (!parse_alarm_data(batt, data)) {
                                 ESP_LOGW("rs485", "Batt %d alarm hex parse failure", batt);
                                 batteries_[batt].has_alarm = false;
                                 handle_alarm_failure(batt);
+                            } else if (batteries_[batt].alarm_poll_failures > 0 || batteries_[batt].alarm_poll_alarm) {
+                                // reset only after a fully parsed response (see analog path)
+                                batteries_[batt].alarm_poll_failures = 0;
+                                if (batteries_[batt].alarm_poll_alarm) {
+                                    batteries_[batt].alarm_poll_alarm = false;
+                                    publish_alarm_poll_alarm(batt, false);
+                                }
                             }
                         }
                     }
@@ -404,7 +414,7 @@ public:
             last_heartbeat_ = now;
             ESP_LOGI("mqtt", "RS485 heartbeat: forcing republish of all values");
             if (!availability_.stale) {
-                availability_.mark_online(esphome::mqtt::global_mqtt_client);
+                availability_.heartbeat(esphome::mqtt::global_mqtt_client);
             }
             reset_all_hysteresis();
         }
@@ -418,29 +428,34 @@ public:
         for (int batt = 0; batt < num_batteries_; batt++) {
             float batt_min = 99.0f, batt_max = 0.0f;
 
-            for (int cell = 0; cell < 16; cell++) {
-                float v = batteries_[batt].cell_voltages[cell];
-                if (v > 0.1f) {
-                    if (v < batt_min) batt_min = v;
-                    if (v > batt_max) batt_max = v;
-                    if (v < stack_cell_min) stack_cell_min = v;
-                    if (v > stack_cell_max) stack_cell_max = v;
-                }
-            }
-
-            for (int t = 0; t < 6; t++) {
-                float temp = batteries_[batt].cell_temps[t];
-                if (temp > -40.0f && temp < 100.0f) {
-                    if (temp < stack_temp_min) stack_temp_min = temp;
-                    if (temp > stack_temp_max) stack_temp_max = temp;
-                }
-            }
-
-            if (batteries_[batt].voltage > 0.1f) {
-                stack_voltage += batteries_[batt].voltage;
-                valid_batts++;
-            }
             if (batteries_[batt].has_analog) {
+                // Residuals accepted by design: totals can still include up to 10
+                // stale polls (~8 min) before the alarm clears a dead battery's
+                // data, and that battery's own HA entities keep their last values
+                // (they gate on the shared channel availability topic, so
+                // battery%d/poll_alarm is the visible sign of the failure).
+                for (int cell = 0; cell < 16; cell++) {
+                    float v = batteries_[batt].cell_voltages[cell];
+                    if (v > 0.1f) {
+                        if (v < batt_min) batt_min = v;
+                        if (v > batt_max) batt_max = v;
+                        if (v < stack_cell_min) stack_cell_min = v;
+                        if (v > stack_cell_max) stack_cell_max = v;
+                    }
+                }
+
+                for (int t = 0; t < 6; t++) {
+                    float temp = batteries_[batt].cell_temps[t];
+                    if (temp > -40.0f && temp < 100.0f) {
+                        if (temp < stack_temp_min) stack_temp_min = temp;
+                        if (temp > stack_temp_max) stack_temp_max = temp;
+                    }
+                }
+
+                if (batteries_[batt].voltage > 0.1f) {
+                    stack_voltage += batteries_[batt].voltage;
+                    valid_batts++;
+                }
                 stack_current += batteries_[batt].current;
             }
 
@@ -651,7 +666,24 @@ public:
         availability_.on_connect(esphome::mqtt::global_mqtt_client);
         reset_all_hysteresis();
         has_any_alarm_ = false;
+        for (int batt = 0; batt < num_batteries_; batt++) {
+            // alarms are published on change only; republish the retained
+            // state so a broker restart or missed change doesn't leave HA stale
+            publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm);
+            publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm);
+        }
         publish_discovery();
+    }
+
+    // short MQTT gap (< 6s debounce): discovery survives (retained), but
+    // value updates lost during the outage must be re-sent
+    void on_short_reconnect() {
+        availability_.on_connect(esphome::mqtt::global_mqtt_client);
+        reset_all_hysteresis();
+        for (int batt = 0; batt < num_batteries_; batt++) {
+            publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm);
+            publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm);
+        }
     }
 
     void publish_discovery() {
@@ -662,7 +694,11 @@ public:
         PublishPacer pacer;
 
         std::string device_json = R"("device":{"identifiers":["pylontech_rs485"],"name":"Pylontech RS485","manufacturer":"Pylontech","model":"BMS RS485"})";
-        std::string avail_str = std::string(R"("availability_topic":")") + mqtt_prefix_ + R"(/status","payload_available":"online","payload_not_available":"offline")";
+        // both the client last-will topic (device death) and the channel
+        // availability topic (RS485 data gone stale) gate HA availability
+        std::string avail_str = std::string(R"("availability":[{"topic":")") + device_status_topic_ +
+            R"(","payload_available":"online","payload_not_available":"offline"},{"topic":")" +
+            mqtt_prefix_ + R"(/status","payload_available":"online","payload_not_available":"offline"}],"availability_mode":"all")";
 
         const char* stack_sensors[][5] = {
             {"stack_cell_min", "Stack Cell Min", "V", "voltage", "measurement"},
@@ -724,9 +760,9 @@ public:
                 {"remain_ah", "Remaining Capacity", "Ah", "", "measurement"},
                 {"total_ah", "Total Capacity", "Ah", "", "measurement"},
                 {"cycles", "Cycles", "", "", "total_increasing"},
-                {"balancing_count", "Balancing Cells", "", "", "total_increasing"},
+                {"balancing_count", "Balancing Cells", "", "", "measurement"},
                 {"balancing_cells", "Balancing Cells List", "", "", ""},
-                {"overvolt_count", "Overvolt Cells", "", "", "total_increasing"},
+                {"overvolt_count", "Overvolt Cells", "", "", "measurement"},
                 {"overvolt_cells", "Overvolt Cells List", "", "", ""},
                 {"state", "State", "", "", ""},
                 {"warnings", "Warnings", "", "", ""},
@@ -836,11 +872,11 @@ private:
     std::string mqtt_prefix_;
     int num_batteries_;
     int pylontech_addr_;
+    std::string device_status_topic_;
     AvailabilityTracker availability_;
 
     enum State : int { IDLE = 0, SEND_ANALOG = 1, WAIT_ANALOG = 2, SEND_ALARM = 3, WAIT_ALARM_RX = 4 };
     int state_ = 0;
-    bool discard_until_tilde_ = false;
     uint32_t tx_time_ = 0;
     int current_batt_ = 0;
     int alarm_batt_ = 0;
@@ -876,21 +912,31 @@ private:
     std::vector<HysteresisBool> hyst_batt_charge_mosfet_, hyst_batt_discharge_mosfet_, hyst_batt_lmcharge_mosfet_;
     std::vector<HysteresisBool> hyst_batt_cw_active_;
 
+    // paces publish_raw bursts (e.g. the 5-minute forced heartbeat sweep,
+    // ~200 messages). App.feed_wdt() in the pacer keeps the 5s task
+    // watchdog fed across a burst; a single publish blocking longer than
+    // that (network timeout, up to ~10s on a stalled broker) can still
+    // reset the device until the deferred restructure.
+    PublishPacer raw_pacer_;
+
     void publish_raw(const char* topic, const char* value) {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(value));
+        raw_pacer_.pace();
     }
 
     void publish_poll_alarm(int batt, bool alarm) {
         char topic[80];
         snprintf(topic, sizeof(topic), "%s/battery%d/poll_alarm", mqtt_prefix_.c_str(), batt);
-        esphome::mqtt::global_mqtt_client->publish(std::string(topic), alarm ? "ON" : "OFF", (uint8_t)0, true);
+        // std::string payload is required: a const char* literal here is
+        // ambiguous and GCC silently binds it as payload_length (qos=1, no retain).
+        esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(alarm ? "ON" : "OFF"), (uint8_t)0, true);
     }
 
     void publish_alarm_poll_alarm(int batt, bool alarm) {
         char topic[80];
         snprintf(topic, sizeof(topic), "%s/battery%d/alarm_poll_alarm", mqtt_prefix_.c_str(), batt);
-        esphome::mqtt::global_mqtt_client->publish(std::string(topic), alarm ? "ON" : "OFF", (uint8_t)0, true);
+        esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(alarm ? "ON" : "OFF"), (uint8_t)0, true);
     }
 
     void handle_analog_failure(int batt) {
@@ -898,6 +944,15 @@ private:
         if (batteries_[batt].analog_poll_failures >= 10 && !batteries_[batt].analog_poll_alarm) {
             batteries_[batt].analog_poll_alarm = true;
             batteries_[batt].has_analog = false;
+            // clear frozen values so the dead battery stops feeding
+            // stack cell/temp/voltage/current totals
+            memset(batteries_[batt].cell_voltages, 0, sizeof(batteries_[batt].cell_voltages));
+            for (int t = 0; t < 6; t++) batteries_[batt].cell_temps[t] = -999.0f;
+            batteries_[batt].voltage = 0.0f;
+            batteries_[batt].current = 0.0f;
+            batteries_[batt].soc = 0.0f;
+            batteries_[batt].remain_ah = 0.0f;
+            batteries_[batt].total_ah = 0.0f;
             publish_poll_alarm(batt, true);
         }
     }
@@ -1064,6 +1119,8 @@ private:
                         if (!parse_hex(data.substr(ext_bit_start + 8, 2), hex_val)) parse_ok = false;
                         else {
                             int voltage_status = (int)hex_val;
+                            // asymmetry is deliberate: overvolt protects fire routinely at full
+                            // charge (informational per the Python prototype), undervolt are alarms
                             if (voltage_status & 0x01) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "cell_overvolt_alarm"; }
                             if (voltage_status & 0x02) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "cell_overvolt_protect"; }
                             if (voltage_status & 0x04) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "cell_undervolt_alarm"; }

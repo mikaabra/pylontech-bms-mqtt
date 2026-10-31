@@ -11,9 +11,10 @@
 
 class PylontechCAN {
 public:
-    PylontechCAN(const char* mqtt_prefix, int num_batteries)
+    PylontechCAN(const char* mqtt_prefix, int num_batteries, const char* device_status_topic)
         : can_prefix_(mqtt_prefix)
         , num_batteries_(num_batteries)
+        , device_status_topic_(device_status_topic)
         , availability_((std::string(mqtt_prefix) + "/status").c_str())
     {
     }
@@ -129,7 +130,9 @@ public:
 
         uint8_t prot1 = x[1];
         prot_charge_overcurrent_ = (prot1 & 0x01) != 0;
-        prot_system_error_ = (prot1 & 0x80) != 0;
+        // Pylontech CAN V1.2 Table 2: system error is bit 3, not bit 7.
+        // Unverified on Shoto packs - see PROTOCOL_REFERENCE.md; raw /flags is ground truth
+        prot_system_error_ = (prot1 & 0x08) != 0;
 
         uint8_t warn2 = x[2];
         warn_high_voltage_ = (warn2 & 0x02) != 0;
@@ -140,7 +143,9 @@ public:
 
         uint8_t warn3 = x[3];
         warn_high_charge_current_ = (warn3 & 0x01) != 0;
-        warn_comms_fail_ = (warn3 & 0x80) != 0;
+        // Pylontech CAN V1.2 Table 4: internal comms fail is bit 3, not bit 7.
+        // Unverified on Shoto packs - see PROTOCOL_REFERENCE.md; raw /flags is ground truth
+        warn_comms_fail_ = (warn3 & 0x08) != 0;
 
         module_count_ = x[4];
         status_byte7_ = x[7];
@@ -191,8 +196,13 @@ public:
         last_can_rx_ = millis(); has_can_rx_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
 
-        float t1 = can_le_u16(x[0], x[1]) / 10.0f;
-        float t2 = can_le_u16(x[2], x[3]) / 10.0f;
+        // 0x370 temperatures are int16 0.1C, two's complement like the signed
+        // 0x356 fields in the Pylontech V1.2 spec; decode signed so sub-zero
+        // values don't wrap to ~6500C and trip the sanity gate. Signedness is
+        // an assumption - untestable without a real fault/sub-zero weather;
+        // positive readings are identical either way.
+        float t1 = ((int16_t)can_le_u16(x[0], x[1])) / 10.0f;
+        float t2 = ((int16_t)can_le_u16(x[2], x[3])) / 10.0f;
         float tmin = (t1 <= t2) ? t1 : t2;
         float tmax = (t1 > t2) ? t1 : t2;
 
@@ -200,15 +210,17 @@ public:
         float v2 = can_le_u16(x[6], x[7]) / 1000.0f;
 
         uint32_t now = millis();
-        bool heartbeat = (now - last_extremes_publish_ >= 60000);
+        bool temp_heartbeat = (now - last_temp_publish_ >= 60000);
+        bool cell_heartbeat = (now - last_cell_publish_ >= 60000);
         char val[16];
-        bool any_published = false;
 
-        if (tmin >= -10.0f && tmax <= 50.0f) {
+        // -40..100C sanity gate matches the RS485 handler; readings outside it
+        // indicates a broken sensor, not an extreme battery - filter silently
+        if (tmin >= -40.0f && tmax <= 100.0f) {
             bool temp_changed = hys_temp_min_.first ||
                                 (fabs(tmin - hys_temp_min_.last_val) >= 0.5f) ||
                                 (fabs(tmax - hys_temp_max_.last_val) >= 0.5f);
-            if (temp_changed || heartbeat) {
+            if (temp_changed || temp_heartbeat) {
                 snprintf(val, sizeof(val), "%.1f", tmin);
                 publish_topic("/ext/temp_min", val);
                 snprintf(val, sizeof(val), "%.1f", tmax);
@@ -217,7 +229,7 @@ public:
                 hys_temp_min_.first = false;
                 hys_temp_max_.last_val = tmax;
                 hys_temp_max_.first = false;
-                any_published = true;
+                last_temp_publish_ = now;
             }
         }
 
@@ -238,7 +250,7 @@ public:
             bool cell_changed = hys_cell_v_min_.first ||
                                 (fabs(vmin - hys_cell_v_min_.last_val) >= 0.005f) ||
                                 (fabs(vmax - hys_cell_v_max_.last_val) >= 0.005f);
-            if (cell_changed || heartbeat) {
+            if (cell_changed || cell_heartbeat) {
                 float delta = vmax - vmin;
                 snprintf(val, sizeof(val), "%.3f", vmin);
                 publish_topic("/ext/cell_v_min", val);
@@ -250,12 +262,8 @@ public:
                 hys_cell_v_min_.first = false;
                 hys_cell_v_max_.last_val = vmax;
                 hys_cell_v_max_.first = false;
-                any_published = true;
+                last_cell_publish_ = now;
             }
-        }
-
-        if (any_published) {
-            last_extremes_publish_ = now;
         }
     }
 
@@ -367,32 +375,20 @@ public:
 
     void on_mqtt_connect() {
         availability_.on_connect(esphome::mqtt::global_mqtt_client);
-
-        hys_v_charge_max_.reset();
-        hys_v_low_.reset();
-        hys_i_charge_.reset();
-        hys_i_discharge_.reset();
-        hys_soc_.reset();
-        hys_soh_.reset();
-        hys_temp_min_.reset();
-        hys_temp_max_.reset();
-        hys_cell_v_min_.reset();
-        hys_cell_v_max_.reset();
-
-        last_flags_value_ = 0;
-        last_flags_publish_ = 0;
-        last_soc_publish_ = 0;
-        last_extremes_publish_ = 0;
-        last_charge_state_ = 0xFF;
-        last_charge_publish_ = 0;
-        last_decoded_state_ = 0;
-        last_decoded_publish_ = 0;
+        reset_value_hysteresis();
         last_diag_publish_ = 0;
         last_status_heartbeat_ = 0;
         received_0x359_ = false;
         received_0x35C_ = false;
 
         publish_discovery();
+    }
+
+    // short MQTT gap (< 6s debounce): discovery survives (retained), but
+    // value updates lost during the outage must be re-sent
+    void on_short_reconnect() {
+        availability_.on_connect(esphome::mqtt::global_mqtt_client);
+        reset_value_hysteresis();
     }
 
     void publish_discovery() {
@@ -403,8 +399,11 @@ public:
         PublishPacer pacer;
 
         const char* device_json = R"("device":{"identifiers":["deye_bms_can"],"name":"Deye BMS CAN","manufacturer":"Pylontech","model":"BMS CAN"})";
-        const char* avail_json = R"("availability_topic":")";
-        std::string avail_str = std::string(R"("availability_topic":")") + can_prefix_ + R"(/status","payload_available":"online","payload_not_available":"offline")";
+        // both the client last-will topic (device death) and the channel
+        // availability topic (BMS data gone stale) gate HA availability
+        std::string avail_str = std::string(R"("availability":[{"topic":")") + device_status_topic_ +
+            R"(","payload_available":"online","payload_not_available":"offline"},{"topic":")" +
+            can_prefix_ + R"(/status","payload_available":"online","payload_not_available":"offline"}],"availability_mode":"all")";
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soc/config");
         if (build_ha_sensor_payload(payload, sizeof(payload), "BMS SOC", (can_prefix_ + "/soc").c_str(), "deye_bms_can_soc", "%", "battery", "measurement", avail_str.c_str(), device_json)) {
@@ -565,6 +564,7 @@ public:
 private:
     std::string can_prefix_;
     int num_batteries_;
+    std::string device_status_topic_;
     AvailabilityTracker availability_;
 
     uint32_t last_can_rx_ = 0;
@@ -597,7 +597,8 @@ private:
     HysteresisFloat hys_temp_max_;
     HysteresisFloat hys_cell_v_min_;
     HysteresisFloat hys_cell_v_max_;
-    uint32_t last_extremes_publish_ = 0;
+    uint32_t last_temp_publish_ = 0;
+    uint32_t last_cell_publish_ = 0;
 
     bool prot_overvolt_ = false;
     bool prot_undervolt_ = false;
@@ -623,6 +624,29 @@ private:
     void publish_topic(const char* suffix, const char* value) {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         esphome::mqtt::global_mqtt_client->publish(can_prefix_ + suffix, std::string(value));
+    }
+
+    void reset_value_hysteresis() {
+        hys_v_charge_max_.reset();
+        hys_v_low_.reset();
+        hys_i_charge_.reset();
+        hys_i_discharge_.reset();
+        hys_soc_.reset();
+        hys_soh_.reset();
+        hys_temp_min_.reset();
+        hys_temp_max_.reset();
+        hys_cell_v_min_.reset();
+        hys_cell_v_max_.reset();
+
+        last_flags_value_ = 0;
+        last_flags_publish_ = 0;
+        last_soc_publish_ = 0;
+        last_temp_publish_ = 0;
+        last_cell_publish_ = 0;
+        last_charge_state_ = 0xFF;
+        last_charge_publish_ = 0;
+        last_decoded_state_ = 0;
+        last_decoded_publish_ = 0;
     }
 
     void publish_mqtt_bool(const char* suffix, bool value) {

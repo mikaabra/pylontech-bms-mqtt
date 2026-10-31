@@ -9,7 +9,7 @@ substitutions:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
-  min_version: "2026.8.1"
+  min_version: "2026.9.1"
   includes:
     - ../../shared/esphome/mqtt_helpers.h
     - ../../shared/esphome/hysteresis.h
@@ -70,16 +70,22 @@ mqtt:
 
 api:
   reboot_timeout: 0s
+  encryption:
+    key: !secret ota_encryption_key
 
 ota:
   - platform: esphome
-    password: !secret ota_password
+    encryption:
+      key: !secret ota_encryption_key
 
 # BLE tracker for Victron SmartShunt
 esp32_ble_tracker:
   scan_parameters:
     interval: 1100ms
-    window: 1100ms
+    # window omitted: on ESP-IDF 5.5.5+ with WiFi coexistence, window now
+    # defaults to interval (fixes the 9.4% listen time bug). Since our previous
+    # explicit window was equal to interval, removing it uses the new default
+    # which is identical and avoids the deprecated explicit override.
     active: true
 
 # RS485 for EPEVER MPPT
@@ -104,12 +110,12 @@ external_components:
 modbus:
   id: modbus1
   uart_id: rs485_uart
+  turnaround_time: 0ms
 
 modbus_controller:
   - id: epever
     address: 0x1
     modbus_id: modbus1
-    command_throttle: 0ms
     update_interval: 30s
 
 victron_ble:

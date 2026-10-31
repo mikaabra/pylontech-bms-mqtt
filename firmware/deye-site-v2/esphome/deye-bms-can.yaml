@@ -18,7 +18,7 @@ substitutions:
 esphome:
   name: ${device_name}
   friendly_name: ${friendly_name}
-  min_version: "2026.8.1"
+  min_version: "2026.9.1"
   includes:
     - ../../shared/esphome/mqtt_helpers.h
     - ../../shared/esphome/hysteresis.h
@@ -30,12 +30,12 @@ esphome:
     priority: -100
     then:
       - lambda: |-
-          id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_WARN);
-          id(logger_level) = "WARN";
-          id(debug_level_sensor).publish_state("WARN");
+          // text_sensor has update_interval: never; without this its state
+          // stays blank until someone presses the toggle
+          id(debug_level_sensor).publish_state(id(logger_level));
       - lambda: |-
-          id(pylontech_can) = (void*) new PylontechCAN("${can_prefix}", ${num_batteries});
-          id(pylontech_rs485) = (void*) new PylontechRS485(id(rs485_uart), "${rs485_prefix}", ${num_batteries}, ${pylontech_addr});
+          id(pylontech_can) = (void*) new PylontechCAN("${can_prefix}", ${num_batteries}, "${device_name}/status");
+          id(pylontech_rs485) = (void*) new PylontechRS485(id(rs485_uart), "${rs485_prefix}", ${num_batteries}, ${pylontech_addr}, "${device_name}/status");
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -43,7 +43,11 @@ esp32:
     type: esp-idf
 
 logger:
-  level: WARN
+  # level is the compile-time ceiling; using initial_level instead of an
+  # on_boot downshift, the device boots at WARN with DEBUG compiled in,
+  # which the Toggle Debug Logging button can raise at runtime
+  level: DEBUG
+  initial_level: WARN
   id: logger_level_global
 
 wifi:
@@ -79,13 +83,19 @@ mqtt:
 
 api:
   reboot_timeout: 0s
+  encryption:
+    key: !secret ota_encryption_key
 
 ota:
   - platform: esphome
-    password: !secret ota_password
+    encryption:
+      key: !secret ota_encryption_key
 
 web_server:
   port: 80
+  auth:
+    username: !secret web_server_username
+    password: !secret web_server_password
 
 uart:
   id: rs485_uart
@@ -159,7 +169,16 @@ interval:
       - lambda: |-
           if (!id(pylontech_can) || !id(pylontech_rs485)) return;
           bool connected = id(mqtt_client).is_connected();
+          // Note: this poll runs every 3s, so a disconnect shorter than one
+          // poll period is invisible here - values lost in such a gap wait
+          // for the change/hysteresis heartbeats (60s numerics, 5min strings).
           if (connected) {
+            if (id(mqtt_was_connected) && id(mqtt_disconnect_count) > 0) {
+              // Short gap (below the 6s debounce): discovery survives retained,
+              // but value updates lost during the outage must be re-sent.
+              ((PylontechCAN*)id(pylontech_can))->on_short_reconnect();
+              ((PylontechRS485*)id(pylontech_rs485))->on_short_reconnect();
+            }
             id(mqtt_was_connected) = true;
             id(mqtt_disconnect_count) = 0;
           } else if (id(mqtt_was_connected)) {
