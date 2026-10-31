@@ -166,5 +166,166 @@ class TestGuardRails(unittest.TestCase):
             block.raw(0x5E)
 
 
+class TestStreamTolerance(unittest.TestCase):
+    """Crafted collision shapes the single real capture does not contain
+    (external-review round 2): an embedded SOI inside a damaged frame, and a
+    non-hex checksum field from an end-of-frame collision."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.standalone = standalone_frames()[0]
+
+    def test_embedded_soi_resumes_parsing(self):
+        # response whose EOI was destroyed; the colliding master poll (~...)
+        # appears before any CR, then a clean frame follows after the poll's CR
+        craft = (self.standalone.raw[:100]          # block head, no EOI
+                 + b"~8050D544E00203FD18\r"         # colliding poll, clean
+                 + b"~8000D547E00200FD1D\r")        # clean short frame
+        out = list(parse_stream(craft))
+        self.assertEqual(len(out), 3)
+        self.assertTrue(out[0].truncated)
+        self.assertTrue(out[0].lenid_valid)
+        self.assertEqual(out[1].adr, 0x50)
+        self.assertTrue(out[1].checksum_valid)
+        self.assertEqual(out[2].adr, 0x00)
+        self.assertTrue(out[2].checksum_valid)
+
+    def test_nonhex_checksum_does_not_crash(self):
+        craft = b"~8000D5000000" + b"\xff\xff\xff\xff" + b"\r"
+        self.assertEqual(list(parse_stream(craft)), [])   # skipped, no ValueError
+        with self.assertRaises(bms073.FrameError):
+            Frame.parse(craft)
+
+    def test_lenid_requires_exact_length(self):
+        text = self.standalone.raw.decode("latin-1")[1:-1]
+        two_chars_short = ("~" + text[:-2] + "\r").encode()
+        self.assertFalse(Frame._from_candidate(two_chars_short).lenid_valid)
+        self.assertTrue(Frame._from_candidate(self.standalone.raw).lenid_valid)
+
+
+class TestHexShapedCorruption(unittest.TestCase):
+    """A tampered value that still looks like valid hex: the block reports
+    damaged=False and the tampered value, but the whole-frame checksum fails -
+    rs485_verify_write.py treats checksum-invalid-without-damage as
+    untrustworthy (exit 7), which is the protection for this case."""
+
+    def test_hex_only_tamper_detected_only_by_checksum(self):
+        sa = standalone_frames()[0]
+        assert sa.info_text.count("0D5C") == 1
+        tampered = sa.raw.replace(b"0D5C", b"0D99")
+        self.assertNotEqual(tampered, sa.raw)
+        f = Frame.parse(tampered)
+        self.assertFalse(f.checksum_valid)
+        self.assertFalse(f.damaged)
+        self.assertEqual(ParameterBlock.from_frame(f).raw(0x4C), 0x0D99)
+
+
+class TestDocAnchorsRoundTwo(unittest.TestCase):
+    """Pins the numbers corrected in external-review round 2."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.sa = standalone_frames()[0]
+        cls.dmg = next(f for f in parse_stream(DAMAGED_D547) if f.lenid_valid)
+
+    def test_uniform_layout_reads_2_573v(self):
+        # without the stray 0x76 byte, the balance region reads at char 306
+        self.assertEqual(self.sa.info_text[306:310], "0A0D")
+        self.assertAlmostEqual(int(self.sa.info_text[306:310], 16) * 0.001,
+                               2.573, places=6)
+
+    def test_damage_span_is_19_chars(self):
+        start, end = self.dmg.damage_span()
+        self.assertEqual((start, end), (319, 337))
+        self.assertEqual(end - start + 1, 19)
+
+    def test_comparable_chars_527_match_521(self):
+        sa_info = self.sa.info_text
+        clean = (self.dmg.info_text[:319] + sa_info[319:338]
+                 + self.dmg.info_text[338:])
+        comparable = [(i, a, b) for i, (a, b) in enumerate(zip(clean, sa_info))
+                      if not 319 <= i <= 337]
+        self.assertEqual(len(comparable), 527)
+        self.assertEqual(sum(1 for _, a, b in comparable if a == b), 521)
+        self.assertEqual([i for i, a, b in comparable if a != b],
+                         [1, 281, 282, 283, 310, 311])
+
+    def test_instack_stray_byte_is_also_0x76(self):
+        block = ParameterBlock.from_frame(self.dmg)
+        self.assertEqual(block.stray_byte, 0x76)
+
+    def test_bit_flags_match_both_frames(self):
+        sa_block = ParameterBlock.from_frame(self.sa)
+        self.assertEqual(sa_block.bit_bytes.hex().upper(), "0AFFFF9FFF06FB0B0200")
+        flags = {(5, 1): 1, (5, 2): 1, (5, 3): 0, (5, 7): 0,
+                 (3, 5): 0, (3, 6): 0}
+        for (byte, bit), want in flags.items():
+            self.assertEqual(sa_block.bit(byte, bit), want, f"{byte}.{bit}")
+        # in-stack pack 01: bit region is outside the damage window, readable
+        # via the reconstruction the stored checksum proves complete
+        self.assertTrue(self.dmg.verify_stored_checksum_against(self.sa.info_text))
+        bit_chars = (1 + sa_block.BITS_ARRAY_OFFSET) * 2
+        self.assertEqual(self.dmg.info_text[bit_chars:bit_chars + 20].upper(),
+                         sa_block.bit_bytes.hex().upper())
+
+    def test_signed_overdischarge_alarm(self):
+        block = ParameterBlock.from_frame(self.sa)
+        self.assertEqual(block.name(0x32), "Over Discharge Current Alarm")
+        self.assertEqual(block.raw(0x32), 0xFF97)
+        self.assertEqual(block.scaled(0x32), -105.0)
+
+
+class TestBlockLength(unittest.TestCase):
+    def test_requires_full_273_byte_info(self):
+        full = standalone_frames()[0].info_bytes()
+        self.assertEqual(len(full), 273)
+        ParameterBlock(full)                       # exact 273: fine
+        for short in (272, 261, 262):
+            with self.assertRaises(bms073.FrameError):
+                ParameterBlock(bytes(short))
+
+
+class TestWriteGates(unittest.TestCase):
+    """rs485_write_param.py validation - it gates writes to live packs."""
+
+    @staticmethod
+    def args(pack="01", param="4C", mv=3420, raw=None):
+        import types
+        return types.SimpleNamespace(pack=pack, param=param, mv=mv, raw=raw)
+
+    @classmethod
+    def setUpClass(cls):
+        import rs485_write_param
+        cls.validate = staticmethod(rs485_write_param.validate)
+
+    def test_accepts_valid_request(self):
+        self.assertEqual(self.validate(self.args()), (1, 0x4C, 3420))
+
+    def test_range_boundaries(self):
+        self.assertEqual(self.validate(self.args(mv=3400))[2], 3400)
+        self.assertEqual(self.validate(self.args(mv=3500))[2], 3500)
+
+    def test_rejects_out_of_range(self):
+        for mv in (3399, 3501, 9999):
+            with self.assertRaises(SystemExit):
+                self.validate(self.args(mv=mv))
+
+    def test_rejects_non_slave_packs(self):
+        for pack in ("00", "05", "FF", "zz"):
+            with self.assertRaises(SystemExit):
+                self.validate(self.args(pack=pack))
+
+    def test_rejects_multibyte_param_index(self):
+        with self.assertRaises(SystemExit):
+            self.validate(self.args(param="0100", mv=None, raw="0001"))
+
+    def test_rejects_off_allowlist_without_force_escape(self):
+        # there is no --force: protection params, live values and duplicated
+        # XML indices can only be enabled by editing ALLOWED_PARAMS with a range
+        for param in ("04", "45", "00", "5F"):
+            with self.assertRaises(SystemExit):
+                self.validate(self.args(param=param, mv=None, raw="0D66"))
+
+
 if __name__ == "__main__":
     unittest.main()
