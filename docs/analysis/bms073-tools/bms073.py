@@ -29,6 +29,12 @@ XML_PATH = Path(__file__).resolve().parents[3] / "BMS073-H17-BL08-16S-en-US.xml"
 HEX_DIGITS = frozenset("0123456789ABCDEFabcdef")
 HEADER_CHARS = 12        # VER+ADR+CID1+CID2 (8) + LENID (4) before INFO
 
+# Empirically-signed int parameters: the XML does not declare signedness, so
+# it is maintained per field. Evidence: index 0x32 (Over Discharge Current
+# Alarm) carries 0xFF97 at rest, which is -105 A signed and nonsense as the
+# unsigned 65431 A.
+SIGNED_PARAMS = frozenset({0x32})
+
 
 class FrameError(ValueError):
     pass
@@ -84,8 +90,11 @@ class Frame:
         return self.cid2
 
     @property
-    def stored_checksum(self) -> int:
-        return int(self.raw[-5:-1].decode("ascii"), 16)
+    def stored_checksum(self) -> int | None:
+        try:
+            return int(self.raw[-5:-1].decode("ascii"), 16)
+        except ValueError:
+            return None
 
     @property
     def damaged(self) -> bool:
@@ -151,15 +160,36 @@ class Frame:
         lchk = int(text[8], 16)
         declared = int(text[9:12], 16)
         info_text = text[HEADER_CHARS:]
-        lenid_valid = lchk == ((~sum(int(c, 16) for c in text[9:12]) + 1) & 0xF)
-        lenid_valid = lenid_valid and len(info_text) >= declared
-        info_text = info_text[:declared] if lenid_valid else info_text
-        if len(text) < 16:
+        if len(text) < HEADER_CHARS + 4:
             raise FrameError("no checksum field")
-        checksum_valid = int(text[-4:], 16) == checksum(text[:-4]) and lenid_valid
+        lenid_valid = lchk == ((~sum(int(c, 16) for c in text[9:12]) + 1) & 0xF)
+        lenid_valid = lenid_valid and len(text) == HEADER_CHARS + declared + 4
+        info_text = info_text[:declared] if lenid_valid else info_text
+        try:
+            stored = int(text[-4:], 16)
+        except ValueError:
+            raise FrameError("checksum field is not ASCII-hex") from None
+        checksum_valid = stored == checksum(text[:-4]) and lenid_valid
         return cls(raw=raw, ver=ver, adr=adr, cid1=cid1, cid2=cid2,
                    info_text=info_text,
                    checksum_valid=checksum_valid, lenid_valid=lenid_valid)
+
+    @classmethod
+    def _from_truncated(cls, raw: bytes) -> "Frame":
+        """A frame whose EOI was destroyed by a collision (or cut off at the
+        end of a capture): header parsed if sane, declared INFO as far as
+        present, checksum treated as unverifiable."""
+        text = raw[1:].decode("latin-1")
+        if len(text) < HEADER_CHARS or not all(c in HEX_DIGITS for c in text[:HEADER_CHARS]):
+            raise FrameError("header is not ASCII-hex")
+        ver, adr, cid1, cid2 = (int(text[i:i + 2], 16) for i in (0, 2, 4, 6))
+        lchk = int(text[8], 16)
+        declared = int(text[9:12], 16)
+        return cls(raw=raw, ver=ver, adr=adr, cid1=cid1, cid2=cid2,
+                   info_text=text[HEADER_CHARS:HEADER_CHARS + declared],
+                   checksum_valid=False,
+                   lenid_valid=lchk == ((~sum(int(c, 16) for c in text[9:12]) + 1) & 0xF),
+                   truncated=True)
 
     @classmethod
     def parse(cls, data: bytes) -> "Frame":
@@ -187,15 +217,27 @@ def parse_stream(data: bytes):
             return
         e = data.find(b"\r", s)
         nxt = data.find(b"~", s + 1)
-        if e == -1 or (nxt != -1 and nxt < e):
-            # truncated tail or a '~' before any CR: nothing more extractable
+        if e != -1 and (nxt == -1 or e < nxt):
+            raw = data[s:e + 1]
+            try:
+                yield Frame._from_candidate(raw)
+            except FrameError:
+                pass
+            pos = e + 1
+        elif nxt != -1:
+            # EOI destroyed by a collision (a '~' shows up before any CR):
+            # salvage what remains of this frame, then resume at the new '~'
+            try:
+                yield Frame._from_truncated(data[s:nxt])
+            except FrameError:
+                pass
+            pos = nxt
+        else:
+            try:
+                yield Frame._from_truncated(data[s:])
+            except FrameError:
+                pass
             return
-        raw = data[s:e + 1]
-        try:
-            yield Frame._from_candidate(raw)
-        except FrameError:
-            pass
-        pos = e + 1
 
 
 class ParameterBlock:
@@ -211,10 +253,11 @@ class ParameterBlock:
     BITS_LENGTH = 10
     TAIL_ARRAY_OFFSET = BITS_ARRAY_OFFSET + BITS_LENGTH   # 261
     TAIL_LENGTH = 11
+    FULL_INFO_BYTES = 1 + TAIL_ARRAY_OFFSET + TAIL_LENGTH  # 273: battery + array
 
     def __init__(self, info: bytes, table: dict | None = None):
-        if len(info) < self.TAIL_ARRAY_OFFSET:
-            raise FrameError(f"parameter block too short: {len(info)} bytes")
+        if len(info) < self.FULL_INFO_BYTES:
+            raise FrameError(f"parameter block short of full 273-byte INFO: {len(info)} bytes")
         self.info = info
         self.battery_number = info[0]
         self.array = info[1:]
@@ -239,10 +282,23 @@ class ParameterBlock:
         return struct.unpack_from(">H", self.info, self.byte_offset(index))[0]
 
     def scaled(self, index: int) -> float:
-        return self.raw(index) * self.table[index]["scale"]
+        raw = self.raw(index)
+        if index in SIGNED_PARAMS and raw >= 0x8000:
+            raw -= 0x10000
+        return raw * self.table[index]["scale"]
 
     def name(self, index: int) -> str:
         return self.table[index]["name"]
+
+    def bit(self, byte_index: int, bit_index: int) -> int:
+        """bitPara value as (byte, bit) per the XML's ByteIndex/BitIndex."""
+        if not 0 <= byte_index < self.BITS_LENGTH:
+            raise FrameError(f"bit byte {byte_index} outside the 10-byte block")
+        if not 0 <= bit_index <= 7:
+            raise FrameError(f"bit index {bit_index} invalid")
+        if len(self.bit_bytes) <= byte_index:
+            raise FrameError("bit block unavailable (damaged-frame prefix ends early)")
+        return (self.bit_bytes[byte_index] >> bit_index) & 1
 
     @classmethod
     def from_frame(cls, frame: Frame, table: dict | None = None) -> "ParameterBlock":

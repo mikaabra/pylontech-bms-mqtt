@@ -92,7 +92,7 @@ def health_report(fd, logf, seconds: float = 15.0) -> str:
     import re
     data = collect(fd, seconds, logf).decode("ascii", "replace")
     requests = re.findall(r"~8050D5[0-9A-F]{2}E002", data)
-    resp42 = data.count("9052")
-    resp44 = data.count("B07E")
+    analog = data.count("B07E")    # LENID of the CID2 42 (analog) response
+    status = data.count("9052")    # LENID of the CID2 44 (status) response
     return (f"health window: master requests={len(requests)}, "
-            f"analog/44-response markers={resp42}/{resp44}")
+            f"analog(42)/status(44) markers={analog}/{status}")
