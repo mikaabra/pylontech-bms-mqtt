@@ -11,6 +11,7 @@ esphome-epever/.esphome/
 *.elf
 *.ota
 *.factory
+!docs/analysis/bms073-tools/instack_d547_damaged.bin
 
 # Logs
 *.log

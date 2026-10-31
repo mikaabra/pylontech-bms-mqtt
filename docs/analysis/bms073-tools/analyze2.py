@@ -2,6 +2,10 @@
 """Segment USB-serial bytes into frames using direction changes and timing gaps, then classify ASCII/MODBUS."""
 import binascii
 
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+
 def load(path, direction):
     ev = []
     for line in open(path):
@@ -16,7 +20,7 @@ def load(path, direction):
         ev.append((float(t), direction, b))
     return ev
 
-events = sorted(load("/tmp/opencode/tx.txt", "TX") + load("/tmp/opencode/rx.txt", "RX"),
+events = sorted(load(HERE / "tx.txt", "TX") + load(HERE / "rx.txt", "RX"),
                 key=lambda e: e[0])
 
 # build byte timeline
