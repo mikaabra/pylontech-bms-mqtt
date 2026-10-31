@@ -30,6 +30,10 @@ esphome:
     priority: -100
     then:
       - lambda: |-
+          // text_sensor has update_interval: never; without this its state
+          // stays blank until someone presses the toggle
+          id(debug_level_sensor).publish_state(id(logger_level));
+      - lambda: |-
           id(pylontech_can) = (void*) new PylontechCAN("${can_prefix}", ${num_batteries}, "${device_name}/status");
           id(pylontech_rs485) = (void*) new PylontechRS485(id(rs485_uart), "${rs485_prefix}", ${num_batteries}, ${pylontech_addr}, "${device_name}/status");
 
