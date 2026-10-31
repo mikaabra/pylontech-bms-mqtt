@@ -65,7 +65,7 @@ Comprehensive documentation of CAN and RS485 protocols for Pylontech-compatible 
 | 4-5 | Temperature | °C | ÷10 | Pack temperature |
 
 #### 0x359 - Protection & Alarm Flags (V1.2)
-**Length:** 7 bytes (bytes 4-7: module count, "P", "N", status)
+**Length:** 8 bytes — bitfield in bytes 0-3, module count in byte 4, "P" (0x50) in byte 5, "N" (0x4E) in byte 6, producer-specific status in byte 7. The firmware requires all 8 bytes.
 
 Bitfield per the official Pylontech CAN V1.2 PDF (2018-04-08):
 
@@ -91,10 +91,10 @@ Bitfield per the official Pylontech CAN V1.2 PDF (2018-04-08):
 > 0x35C frame length. The byte 0/2 mappings match observed behavior,
 > but the byte 1 bit 3 (system error) and byte 3 bit 3 (comms fail)
 > positions could not be verified without a real fault. The raw
-> `deye_bms/flags` topic (16-bit-per-byte dump of 0x359) is published
-> unchanged and is the ground truth to check against an actual fault
-> event. Do not rely on the two decoded binary sensors as the only
-> protection alert.
+> `deye_bms/flags` topic is the ground truth to check against an actual
+> fault event: it carries all 8 bytes of 0x359 packed little-endian into
+> a single 64-bit hex value (byte 0 is the least significant). Do not
+> rely on the two decoded binary sensors as the only protection alert.
 
 **Note:** V1.3 replaces 0x359 with 0x35A for compatibility with SMA/Victron protocols.
 

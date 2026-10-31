@@ -915,7 +915,10 @@ private:
     std::vector<HysteresisBool> hyst_batt_cw_active_;
 
     // paces publish_raw bursts (e.g. the 5-minute forced heartbeat sweep,
-    // ~200 messages) so blocking publishes cannot starve the watchdog
+    // ~200 messages). App.feed_wdt() in the pacer keeps the 5s task
+    // watchdog fed across a burst; a single publish blocking longer than
+    // that (network timeout, up to ~10s on a stalled broker) can still
+    // reset the device until the deferred restructure.
     PublishPacer raw_pacer_;
 
     void publish_raw(const char* topic, const char* value) {
