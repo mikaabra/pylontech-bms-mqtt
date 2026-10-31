@@ -88,11 +88,10 @@ ota:
 # BLE tracker for Victron SmartShunt
 esp32_ble_tracker:
   scan_parameters:
+    # ESPHome warns that a scan window equal to the interval starves WiFi on
+    # the same radio (guidance: <= 600ms). Kept at 1100ms: no WiFi instability
+    # observed at this value in production; lower it if disconnects appear.
     interval: 1100ms
-    # window omitted: on ESP-IDF 5.5.5+ with WiFi coexistence, window now
-    # defaults to interval (fixes the 9.4% listen time bug). Since our previous
-    # explicit window was equal to interval, removing it uses the new default
-    # which is identical and avoids the deprecated explicit override.
     active: true
 
 # RS485 for EPEVER MPPT
