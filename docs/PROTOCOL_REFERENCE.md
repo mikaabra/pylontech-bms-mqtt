@@ -347,7 +347,7 @@ if status_pos + 22 <= len(data_hex):
 
 **Source of evidence:** USB capture (`~/Downloads/usb-bms-bqadmin-update-3421-then-3420.pcapng`, 2026-10-26) of the Windows vendor configuration utility, taken with USBPcap inside a UTM Windows VM on an FTDI-based USB-RS485 dongle, battery in standalone (single-battery) mode. Serialized byte streams extracted via Wireshark's FTDI dissector (`ftdi-ft.if_a_tx_payload` / `if_a_rx_payload`); all frames below verbatim from that capture.
 
-**Identified hardware (from the BMS's own identity response):** model **`073-BLC06`**, manufacturer **`JS-Richpower Co,Ltd`**. Serial number read (CID2 0xC9): `JG2406190021 0013`. This is the same BMS073 family as `BMS073-H17-BL08-16S-en-US.xml` (repo root) — the vendor tool's own protocol profile, whose parameter table indexes the write command below.
+**Identified hardware (from the BMS's own identity response):** model **`073-BLC06`**, manufacturer **`JS-Richpower Co,Ltd`** (serial number elided from this public repo; it is in the capture and readable via CID2 `0xC9`). This is the same BMS073 family as `BMS073-H17-BL08-16S-en-US.xml` (repo root) — the vendor tool's own protocol profile, whose parameter table indexes the write command below.
 
 ### Relationship to the Pylontech RS485 dialect
 
@@ -395,7 +395,7 @@ The vendor tool also probes MODBUS RTU in its scan loop (FC 0x04, register 0x800
 |------|-----------|---------|------------|
 | `42` | read | analog values | request INFO = pack index (`00`); response INFO: RTN `00`, battery number, cell count `0010` (=16), 16 × u16 cell mV BE, temp count `06`, 6 × u16 temp 0.1K BE, then tail fields |
 | `44` | read | status/alarms | response mostly zeros in this session (no active faults); layout per XML `teleSignal` blocks, details pending |
-| `47` | read | int-parameter block | response LENID `A222` (273 info bytes = RTN + 272 = 136 × u16 slots); partial alignment below |
+| `47` | read | int-parameter block | response LENID `A222` (0x222 = 546-char INFO); layout fully decoded below |
 | `49` | **write** | set one int parameter | INFO = `ParamIndex u16 BE` + `Value u16 BE` (4 bytes / 8 chars) |
 | `C9` | read | serial number | response contains ASCII SN |
 | `4F` | probe | get protocol version | the scan-loop knock `~2600464F0000…`; per the official Pylontech V3.5 CID2 table, CID2 `0x4F` = "get communication protocol version" — the tool asking the battery which dialect it speaks |
@@ -414,9 +414,36 @@ RX  ~8000D5 00 0000 FD9F CR               → OK
 
 Per `BMS073-H17-BL08-16S-en-US.xml`, parameter index **0x4C = "Start Balance Voltage", scale 0.001 V** — i.e. the tool set the balancing start threshold to 3.421 V, then corrected it to 3.420 V (matches the user's account of what was clicked). The XML's full `int_para` table (indices 0x00–0x7C + 3 calibration entries; bit-params as a separate flag table) is the vendor's own parameter map for this dialect.
 
-### Partial parameter-block alignment (CID2 47 response)
+### Parameter-block layout (CID2 47 response) — fully decoded, verified against the repo XML
 
-First six u16 slots after the RTN byte read `0DDE 0D48 0C1C 0B54 0E42 0D48` (3550 / 3400 / 3100 / 2900 / 3648 / 3400 mV), which aligns exactly with XML parameter indices 0–5: Cell Over Voltage Alarm 3.550 V, alarm release 3.400 V, under-voltage alarm release 3.100 V, under-voltage alarm 2.900 V, **over-voltage protect 3.648 V** (classic LFP value), protect release 3.400 V. Alignment past index 5 is **not yet verified** — several plausible values appear further in (300 = 30.0 °C, 10000 = "100.00"–scaled capacity, 3.420 V again where the balance voltage lives at index 0x4C within the same block), but the layout must be confirmed by a scripted decode against the XML table before any of it is trusted.
+Decoded with the shared fixture-tested parser (`docs/analysis/bms073-tools/bms073.py` + `test_bms073.py` — every value below is asserted there). The `A222` response INFO is 546 ASCII-hex chars = 273 bytes:
+
+```
+[battery number: 1 byte]
+[u16 idx 0x00–0x06 : 14 bytes]
+[1 stray byte — observed 0x76, meaning unknown, matches no XML entry]
+[u16 idx 0x07–0x7C : 236 bytes]
+[bit-parameters: 10 bytes — XML bitParaStartIndex 0x7D, bitParaByteNum 10]
+[newline-terminated-style tail: 11 bytes]  → observed "/073-BLC06\0"
+```
+
+The **stray byte is required for alignment**: without it the balance voltage would land at INFO char 306 and read garbage (`0x000A` → 0.010 V); with it, `0x4C` lands at char **308** (byte offset 154), exactly where both captured reads and the in-stack write read-back agree. All 125 unique XML indices decode to plausible values with the stray byte allowed for, and the block checksums valid on both captured frames. **Verify the stray byte on a second pack before building a second parser** — its meaning (8-bit status? firmware marker?) is unknown; report of record: pack-01 in-stack read-back also showed `0x76`.
+
+Verified decodes (both 2026-10-26 standalone frames; scales per the XML):
+
+| Index | Parameter | Raw | Value |
+|-------|-----------|-----|-------|
+| 0x04 | Cell Over Voltage Protect | `0E42` | **3.650 V** (3650 mV — classic LFP protect level) |
+| 0x45 | Residual Capacity *(live value)* | `6467` → `6465` | 257.03 → 257.01 Ah between the two reads (8.5 s) — a live Coulomb counter, not stored config |
+| 0x48 | Sleep Delay Time | `05A0` | 1440 min (24 h) |
+| 0x4C | Start Balance Voltage | `0D5C` | 3.420 V (the post-write state) |
+| 0x50 | Wake-up Delay Time | `00F0` | 240 min |
+| 0x51 | Wake-up Times | `000A` | 10 |
+| 0x5D | Charging detection interval | `0E10` | 3600 s |
+| 0x5E | Charging detection frequency | `0030` | 48 |
+| 0x77 | Battery design capacity | `2710` | **100.00 Ah** — see the capacity-mismatch note below |
+
+Two cautions from the same decode: the XML **duplicates indices 0–2** (alarm parameters and the calibration entries reuse them — 128 entries, 125 unique), so index-based writes to 0–2 are ambiguous and excluded from every write surface; and the design-capacity setting (100 Ah) disagrees with the packs' 280 Ah nominal (the live residual counter scales against ~280 Ah — 257 of 280 ≈ 92% SOC, plausible). That mismatch is worth investigating before the config bridge writes anything capacity-related.
 
 ### CID2 42 (analog) INFO layout — verified portions
 
@@ -438,7 +465,7 @@ Passive read-only sniff of the assembled stack's battery-battery bus (10 minutes
 - **The dialect is identical in both directions.** The stack master polls with `~8050D542E002<xx>…` / `~8050D544E002<xx>…` — VER `80`, **request ADR = 0x50 (master role)**, CID1 `D5`, target pack index `01`–`04` in INFO. Slaves answer with the same response format as the standalone session (`~8000D500 B07E/9052`, battery number `000N`). There is no third protocol variant on this bus.
 - **Normal operation sends only telemetry polls.** The whole capture contains CID2 `42` (analog) and `44` (status) and nothing else — no parameter reads (`47`), no writes (`49`). Configuration is never pushed by the stack; a config client must inject it.
 - **Cadence:** one poll slot every 624 ms (occasional 1264 ms double-slot), each slot = request ~20 chars + response ~160 chars, response turnaround <16 ms — leaving roughly **400 ms of idle bus per slot**.
-- This stack has **4 packs addressed 01–04** on the Link bus (note: `deye-bms-can.yaml` has `num_batteries: 5` — reconcile if a fifth pack is expected).
+- The Link bus carries **4 slave packs addressed 01–04**. The stack master (battery 0, the pack wired to the inverter port) is the **fifth physical pack**: it is the poller on this bus and never appears as a poll target, which is why `deye-bms-can.yaml`'s `num_batteries: 5` is *correct*, not contradictory — the master reports itself plus the four slaves over the inverter port. Numbering map: Link ADR `01`–`04` = deye battery 1–4 = user-facing "bat 1"–"bat 4"; the master is "bat 0" (per the user's account of the stack; a physical count of the rack is still worth one glance, since a wrongly-low `num_batteries` would silently drop a pack from monitoring).
 
 **Deliberate in-stack probe (single frame, gap-injected, user-approved):** a tool-style client read `~8000D542E00201FD21\r` (ADR `00`, pack `01`) was sent into a confirmed ≥150 ms idle gap:
 
@@ -454,17 +481,24 @@ The full write path was then executed against the live stack: **pack 01, param 0
 1. **Write** (gap-injected, single frame): `~8000D5498008014C0D66FBCA\r`
    → ack `~8000D5000000FD9F\r` (RTN `00`, byte-identical to the tool-session ack format). Exactly **one** ack arrived — on a 4-pack bus, a broadcast write would have produced overlapping acks from all packs, so this also confirms pack-addressed semantics for the INFO `[pack][param][value]` parse (the tool's standalone write INFO `004C0D5D` is the same shape with pack `00` — the standalone battery self-identified as battery `00`).
 2. **Targeted short reads are unsupported**: CID2 `47` with extended INFO (`014C`) is silently ignored — the only parameter read is the full `A222` block (546-char INFO, ~590 ms on the wire at 9600).
-3. **Read-back**: the block read overruns the ~445 ms idle window by ~180 ms, colliding with the master's next poll — accepted once, knowing the stack natively tolerates dropped slots (the 1264 ms double-slots in healthy operation). Result: response INFO = battery number (`01`) + parameter array; **`0D66` present at exactly the predicted slot 308, old `0D5C` gone**, checksum garbled only in the tail *after* the balance region by the predicted collision. Total disruption: one garbled master slot, immediate recovery (19/19 exchanges in the following health window, all four packs on cadence).
-4. **In-stack 47-response layout note**: response INFO begins with the **battery number** (`01…`) followed directly by the parameter array — the standalone capture's leading `00` was the same field (battery `00`).
+3. **Read-back**: the block read overruns the ~445 ms idle window by ~180 ms, colliding with the master's next poll — accepted once (see the caution below). Result: response INFO = battery number (`01`) + parameter array; **`0D66` present at exactly the predicted char 308, old `0D5C` gone**. Total observed disruption: one garbled master slot, immediate recovery (19/19 exchanges in the following health window, all four packs on cadence).
+4. **Read-back evidence methodology (clarified):** the received frame was collision-damaged — 18 INFO chars (319–337, *after* the intact balance region) came through as on-air garbage, so its **whole-frame checksum failed and the runtime script's own gate printed only "inconclusive"**. The documented verdict was produced by reassembling the logged bytes: damage span identified, `0x4C` read from the undamaged prefix, and — the decisive check — the stored trailing CHKSUM (`87C1`) matches the sum over the collision-free reconstruction exactly, proving the pack transmitted a complete, validly-checksummed frame and only the medium was damaged mid-flight. This reassembly is now automated: `rs485_verify_write.py` runs it natively, and `test_bms073.py` asserts it against the byte-exact damaged frame (`instack_d547_damaged.bin`). For calibration: the 540 non-live chars of that frame are byte-identical to the standalone capture — only battery byte, residual capacity, and the balance value differ — i.e. the parameter block is overwhelmingly static config.
+5. **In-stack 47-response layout note**: response INFO begins with the **battery number** (`01…`) followed directly by the parameter array — the standalone capture's leading `00` was the same field (battery `00`).
 
-**In-situ configuration is now proven end-to-end on the live stack: gap-injected write → ack → read-back confirmation, stacked and operating.** Remaining work is purely implementation: the Mac-side tool and/or the ESP32 second-UART feature both have a verified protocol and a measured bus to run on.
+**Final state and evidence status** (follow-up session, user-requested): packs **01 and 02 were both set to 3.420 V** (`0x0D5C`, param 0x4C):
+
+- Both writes acked (RTN `00`); **the ack is pack-agnostic** — a bare `~8000D5000000FD9F` from an unaddressed responder, so the stored values are **ack-level verified only**. Pack 01's earlier 3.430 V value was read-back-verified, but was then overwritten by this 3.420 V write; packs 02–04 were not re-read afterwards.
+- **Persistence across a BMS reboot/power-cycle is untested** — nothing yet shows the value survives; test on the next intentional BMS reset.
+- The "stack tolerates dropped slots" reading of the 1264 ms double-slots is an **inference**, not a demonstrated equivalence; no inverter/Deye log was checked for the collision moment. Until that is checked, do not make block reads routine.
+
+**In-situ configuration is proven at the protocol level (write → ack → read-back, stacked and operating), with the evidence-status caveats above.** Remaining work is purely implementation: the Mac-side tool and/or the ESP32 second-UART feature both have a verified protocol and a measured bus to run on.
 
 ### ESP32 in-situ configuration — design implications
 
 1. The current single RS485 channel of the Waveshare ESP32-S3-RS485-CAN stays on the to-inverter port (polling + CAN must not regress).
 2. In-situ configuration needs a **second RS485 transceiver** (external MAX3485-class on free GPIOs; ESP32-S3 has a spare UART) tapped onto the battery-battery chain.
 3. Injected frames are ~30 ms at 9600 against ~400 ms measured idle per poll slot. Gap-injection validated experimentally (probe above); a client that passively times the poll cadence before sending is the safe design, with single retry on no-ack.
-4. Remaining unknowns: (a) ~~CID2 49 write in-stack~~ — **resolved 2026-10-31**, executed and verified (see above); (b) the D547 parameter-block layout beyond the balance region (indices 0–5 plus the 0x49–0x4F neighborhood confirmed; full scripted decode against the repo XML pending); (c) current/capacity field scales in the CID2 42 tail; (d) the CID2 and exact framing of the teleControl write (`SYS_OFF`/`Recovery`) — expected from a capture of the vendor tool's power buttons; (e) whether `SYS_OFF` on these packs is reboot-under-load or true sleep (one in-stack experiment, only after (d)).
+4. Remaining unknowns: (a) ~~CID2 49 write in-stack~~ — **resolved 2026-10-31**, executed, acked and read-back-verified (see above); (b) ~~the D547 parameter-block layout beyond index 5~~ — **resolved 2026-10-31**, fully decoded against the XML (see layout section; the one residue is the meaning of the stray `0x76` byte — verify on a second pack); (c) current/capacity field scales in the CID2 42 tail; (d) the CID2 and exact framing of the teleControl write (`SYS_OFF`/`Recovery`) — expected from a capture of the vendor tool's power buttons; (e) whether `SYS_OFF` on these packs is reboot-under-load or true sleep (one in-stack experiment, only after (d)); (f) the design-capacity setting (100 Ah) vs nominal (280 Ah) mismatch — investigate before any capacity-related writes; also whether written parameters persist across a BMS reboot.
 
 ### Control register and remote reset (teleControl)
 
@@ -485,7 +519,22 @@ Remote reset is therefore designed into the BMS. **The exact CID2 carrying this 
 - Pylontech V3.5 (official family doc): CID2 `0x95` = per-battery turnoff; RTN codes `01`=VER error, `02`=CHKSUM error, `03`=LCHKSUM error, `04`=CID2 invalid, `06`=invalid INFO data
 - PACE BMSes (same ecosystem, per esphome-pace-bms documentation): **a shutdown command sent while the pack is actively charging or discharging causes the BMS to reinitialize and immediately wake back up — effectively a remote reboot.** A shutdown sent to an idle pack puts it into genuine sleep, with documented wake paths: charge activation, **communication activation** (frames on the bus), or manual reset — matching the `Recovery` bit and the "Communication Wake Up" parameter (bit_para, ByteIndex 5 bit 7)
 
-**Targets for the eventual automation:** capture the vendor tool's power-off/power-on buttons (same USBPcap method as the parameter-write capture) to pin the exact frames; run one deliberate in-stack reboot experiment on a pack *that is charging/discharging at the moment of reset*; only then schedule preventive reboots. Two sequencing constraints: never `SYS_OFF` an idle pack without a prepared wake (Recovery frame or incoming charge current), and treat a pack that doesn't rejoin within a few seconds as failed-reset — don't retry blind.
+**Targets for the eventual automation:** capture the vendor tool's power-off/power-on buttons (same USBPcap method as the parameter-write capture) to pin the exact frames; run one deliberate in-stack reboot experiment on a pack *that is charging/discharging at the moment of reset*. Also: **a passive listener on the Link bus should capture the next real incident first** (see the reset-plan status below) — only automate a reset if that capture shows the pack still responding on the bus and a reset actually fixing it.
+
+### The pack's own timers — decoded from this hardware (primary lead)
+
+The D547 block decode (see the parameter-layout section) gives the pack's own sleep/wake configuration for this exact model: **Sleep Delay 1440 min (24 h)**, **Wake-up Delay 240 min × 10 attempts**, **Charging detection 3600 s × 48**. Names come from the vendor XML; the semantics of "Wake-up Times = 10" are the working hypothesis: a pack that falls asleep may try to wake for a bounded budget (240 min × 10) and then give up until someone resets it — which would make the every-couple-of-months lockup a **settings problem** (a starved wake/detection budget), not something to reboot around. This is this-vendor data and therefore the primary lead; the family reports below are corroborating context, not evidence about these units.
+
+### Reset plan status: hypothesis, not schedule
+
+The scheduled "preventive reboot" is **not sanctioned yet** — the supporting evidence is from other vendors in this family, and four specific problems bind any reset automation:
+
+1. A pack that needs the button may not respond on the bus at all — the reset command needs a responsive target.
+2. The reported failure mode often occurs idle at high charge — precisely when `SYS_OFF` is real sleep rather than a reboot (per the PACE family semantics), the worst possible experiment.
+3. The master is special: rebooting it would take down the Link bus polling and the inverter's BMS comms; "one pack at a time" does not cover the master.
+4. Load shifts during a reboot: the remaining packs absorb the whole current, and the returning pack reconnects at a different voltage. Set a current limit before the first experiment.
+
+**Revised order of operations:** passive Link listener → capture the next incident → correlate with the timers above (sleep entry? wake-budget exhaustion? charging-detection window?) → if a write can fix it (e.g. a larger wake-up budget), prefer the settings fix → only automate a reset if a reset demonstrably fixes it.
 
 ### Known family behavior: the periodic-reset problem
 
@@ -493,19 +542,23 @@ The production stack's symptom — packs need a reset every couple of months —
 
 - **Pylontech** (DIY Solar Forum, 2023): batteries stick in idle at/near 100% SOC and refuse to discharge until the red power button resets them; a later inverter firmware fix reportedly "pings the batteries with a low-level charge to keep them from going to sleep"
 - **Shoto** (Power Forum, "Shoto battery problems endless" thread, same brand as these packs): master pack showing dead until a 2-minute button-hold reset
-- Vendor-confirmed BMS logic (Victron community): no charge/discharge for 3 days → pack auto-shutdowns into sleep; the master then reports internal alarms to the inverter
+- Vendor-confirmed BMS logic for the family (Victron community): no charge/discharge for 3 days → pack auto-shutdowns into sleep; the master then reports internal alarms to the inverter
 
-Implication: a scheduled, staggered, one-pack-at-a-time **reboot-under-load** via the Link bus is a sanctioned preventive for a known family weakness — and the config bridge makes it a HA automation instead of a battery-shed ritual.
+These are family reports, consistent with — but not proof of — the timers hypothesis above. They motivate the passive-listener capture, not the reset schedule.
 
 ### Config-bridge deployment note
 
 - **Dedicated second Waveshare ESP32-S3-RS485-CAN is the recommended form** (onboard RS485 → Link bus; CAN port unused): one device per role per fleet convention, and a config tool must not share a fault domain with the production battery monitor.
 - Full-time passive listening on the Link bus is free (a receiver never keys the transmitter) and yields per-pack telemetry at the master's 624 ms slot cadence — including balance FET and CW flags (the CID2 `44` response family layout from section 2; exact D5-`44` INFO mapping to be decoded when balancing actually runs), which directly supports the pack-balancing workflow as HA history.
 - The config dialect is proven on this bus end-to-end (write → ack → read-back, 2026-10-31); remaining implementation risk is confined to the un-observed teleControl write.
+- **Write surface is minimal and allowlisted at the firmware level** (not MQTT-settable): initially only index `0x4C`, range-checked (3.300–3.600 V). Never expose raw parameter writes, protection thresholds, the live `0x45` Coulomb counter, the duplicated indices 0–2 (calibration/alarm collision in the XML), or the FET/teleControl bits through MQTT/HA — the bus has no authentication.
+- **Writes fire only on change, rate-limited** — BMS parameter-storage flash endurance is unknown; no periodic rewrites.
+- **Hardware bus-safety checks before and during deployment:** sniff the Link bus while the bridge ESP32 reboots and while it takes an OTA update (a TX-pin glitch can key the RS485 transceiver and corrupt a poll slot), and verify the board's 120 Ω termination jumper against the chain's existing termination before first connection.
 
 ### References for this section
 
 - Capture: `usb-bms-bqadmin-update-3421-then-3420.pcapng` (kept out of the repo; analysis transcripts summarized above)
+- `docs/analysis/bms073-tools/` — the working tooling for this section: shared dialect parser `bms073.py` (frame syntax + parameter-block layout, driven by the repo XML), serial-IO helper `linkbus.py`, the experiment scripts, and `test_bms073.py` — fixture tests that assert every decoded value, frame, and evidence claim above against the committed captures (`transcript.txt`, `instack_d547_damaged.bin`)
 - `BMS073-H17-BL08-16S-en-US.xml` (repo root) — vendor tool protocol profile: telemetry layouts, int/bit parameter tables, teleControl group, index 0x4C
 - [taico-bms-unleashed V-KING/TAICO protocol spec](https://github.com/Gesiima/taico-bms-unleashed/blob/main/VKING_BMS_Protokoll_Spezifikation.md) — same protocol family, independently reverse-engineered; documents the CID2 command set (42/44/47/49/4B/4C/4D/4E/E2/E5/E9/EB/ED/EF/F1/F2) and the local-only GUI password design
 - Shoto SDA10-48100 BMS Modbus RTU protocol v0.3 (Scribd) — the MODBUS dialect probed by the tool; register 0x8000 = identification block, addresses 0–15 via DIP switch
