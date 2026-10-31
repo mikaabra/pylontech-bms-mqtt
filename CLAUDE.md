@@ -59,7 +59,7 @@ All v2 firmware uses the same pattern: YAML (component wiring) + C++ header hand
 
 - **`includes/pylontech_can.h`** — CAN frame parsing (0x351, 0x355, 0x359, 0x35C, 0x370), diagnostics, stale detection
 - **`includes/pylontech_rs485.h`** — RS485 polling state machine, per-battery data, stack aggregation
-- **`includes/pylontech_protocol.h`** — Shared protocol constants
+- **`includes/pylontech_protocol.h`** — Shared protocol pure helpers + RS485 INFO decoders (0x42 analog / 0x44 alarm), host-oracle tested (`tests/`)
 
 ### Rack Solar BLE v2 (`firmware/rack-solar-site/esphome-smartshunt-epever-ble-v2/`)
 
