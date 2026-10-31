@@ -61,9 +61,7 @@ public:
     void handle_time_to_go(float x) {
         if (!std::isfinite(x)) return;
         int val = (int)roundf(x);
-        // 65535 is the Victron "no time-to-go estimate" sentinel (victron_ble
-        // passes it through unfiltered); real TTG values are far below it
-        if (hys_time_to_go_.check(val, 1, 0, 65534)) {
+        if (hys_time_to_go_.check(val, 1)) {
             publish_topic("time_to_go", std::to_string(val).c_str());
         }
     }
