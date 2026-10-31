@@ -8,9 +8,10 @@ Comprehensive documentation of CAN and RS485 protocols for Pylontech-compatible 
 
 1. [Pylontech CAN Protocol](#pylontech-can-protocol)
 2. [Pylontech RS485 Protocol](#pylontech-rs485-protocol)
-3. [EPever Inverter Protocols](#epever-inverter-protocols)
-4. [EPever BMS-Link Converter](#epever-bms-link-converter)
-5. [Protocol Translator Design Notes](#protocol-translator-design-notes)
+3. [BMS073 Configuration Protocol (Richpower, battery-battery port)](#bms073-configuration-protocol-richpower-battery-battery-port)
+4. [EPever Inverter Protocols](#epever-inverter-protocols)
+5. [EPever BMS-Link Converter](#epever-bms-link-converter)
+6. [Protocol Translator Design Notes](#protocol-translator-design-notes)
 
 ---
 
@@ -341,6 +342,178 @@ if status_pos + 22 <= len(data_hex):
 - A cell may have CW=Y but not be actively balancing yet
 
 ---
+
+## BMS073 Configuration Protocol (Richpower, battery-battery port)
+
+**Source of evidence:** USB capture (`~/Downloads/usb-bms-bqadmin-update-3421-then-3420.pcapng`, 2026-10-26) of the Windows vendor configuration utility, taken with USBPcap inside a UTM Windows VM on an FTDI-based USB-RS485 dongle, battery in standalone (single-battery) mode. Serialized byte streams extracted via Wireshark's FTDI dissector (`ftdi-ft.if_a_tx_payload` / `if_a_rx_payload`); all frames below verbatim from that capture.
+
+**Identified hardware (from the BMS's own identity response):** model **`073-BLC06`**, manufacturer **`JS-Richpower Co,Ltd`**. Serial number read (CID2 0xC9): `JG2406190021 0013`. This is the same BMS073 family as `BMS073-H17-BL08-16S-en-US.xml` (repo root) — the vendor tool's own protocol profile, whose parameter table indexes the write command below.
+
+### Relationship to the Pylontech RS485 dialect
+
+Same YD/T 1363.3 "PACE/Seplos/Pylontech" family as section 2: identical SOI (`~`) / EOI (CR), identical ASCII-hex INFO encoding, identical CHKSUM and LENID formulas. Different endpoint constants:
+
+| Dialect | VER | CID1 | Used by | Physical port |
+|----------|-----|------|---------|---------------|
+| Pylontech polling | `20` | `46` | deye-bms-can (this repo), inverters | to-inverter RJ45 (RS485 pins 7/8) |
+| BMS073 configuration | `80` | `D5` | vendor Windows tool | battery-battery (Link) ports |
+
+The vendor tool also probes MODBUS RTU in its scan loop (FC 0x04, register 0x8000, qty 31, slave addresses 00–0F — the identification block of Shoto Modbus protocol v0.3); in standalone mode the battery never answered those probes, only the ASCII dialect.
+
+### Physical layer
+
+- 9600 8N1 (tool sets both 9600 and 19200 during its scan; connection at 9600)
+- Battery-battery (Link) RS485 ports only. The manufacturer states this protocol is **not** served on the to-inverter RS485/CAN port. *(Statement verified as coming from the vendor; not independently tested.)*
+
+### Frame format (verified across every frame in the capture)
+
+```
+~  [VER][ADR][CID1][CID2][LENID:4][INFO:N ascii-hex][CHKSUM:4]  CR
+```
+
+- VER `80`, ADR `00`, CID1 `D5` for all established-session frames
+- LENID = LCHKSUM nibble + 3-hex length, counting INFO **ASCII characters** (same formula as section 2):
+  - `E002` = 2-char INFO (read with 1-byte pack index)
+  - `8008` = 8-char INFO (single-parameter write)
+  - `0000` = zero-length INFO (write acknowledgment)
+  - observed on responses: `A222` (0x222 = 546 chars, parameter block), `B07E`, `9052`, `C022`
+- CHKSUM = two's complement of the ASCII-character sum between `~` and the checksum, 4 hex digits — same function as `rs485_calc_chksum()` in `pylontech_protocol.h`; verified correct on every frame type including both writes and the acks.
+
+### Observed command sequence
+
+1. **Scan loop** (~12 s period, repeating while no battery responds):
+   - identity probes `~FF00FF52E002<xx>…` — VER `FF`, CID1 `FF`, CID2 `52`, INFO = pack address `01`–`0F`, then two broadcast probes `~FF00FF52E002FF…`
+   - MODBUS RTU probes (`00`–`0F`, FC 04 @ 0x8000) — never answered in this mode
+   - periodic zero-length knock `~2600464F0000…` (VER `26`, CID2 `4F`)
+2. **Connection** — after ~95 s of scanning the BMS answers the broadcast probe with its identity (model / manufacturer strings above)
+3. **Poll cycle** (~2 s): CID2 `42` (analog values) and `44` (status/alarms); at connect also `47` (int-parameter block) and `C9` (serial number)
+4. **Writes** — no login, no handshake: command → ack. Full-session capture contains **zero password exchange** (see below).
+
+### Command table (observed)
+
+| CID2 | Direction | Purpose | INFO notes |
+|------|-----------|---------|------------|
+| `42` | read | analog values | request INFO = pack index (`00`); response INFO: RTN `00`, battery number, cell count `0010` (=16), 16 × u16 cell mV BE, temp count `06`, 6 × u16 temp 0.1K BE, then tail fields |
+| `44` | read | status/alarms | response mostly zeros in this session (no active faults); layout per XML `teleSignal` blocks, details pending |
+| `47` | read | int-parameter block | response LENID `A222` (273 info bytes = RTN + 272 = 136 × u16 slots); partial alignment below |
+| `49` | **write** | set one int parameter | INFO = `ParamIndex u16 BE` + `Value u16 BE` (4 bytes / 8 chars) |
+| `C9` | read | serial number | response contains ASCII SN |
+| `4F` | probe | get protocol version | the scan-loop knock `~2600464F0000…`; per the official Pylontech V3.5 CID2 table, CID2 `0x4F` = "get communication protocol version" — the tool asking the battery which dialect it speaks |
+| `52` | probe | identity read | used with VER/CID1 `FF` and pack index 01–0F; answered with model/manufacturer strings |
+
+Response frames: VER `80`, ADR `00`, CID1 `D5`, CID2 echo `00` (RTN OK), LENID, INFO, CHKSUM. Write ack: `~8000D5000000FD9F\r` (LENID `0000`, empty INFO, RTN OK).
+
+### Parameter write — captured verbatim
+
+```
+TX  ~8000D549 8008 004C 0D5D FBBE CR     → param 0x004C = 0x0D5D (3421)
+RX  ~8000D5 00 0000 FD9F CR               → OK
+TX  ~8000D549 8008 004C 0D5C FBBF CR     → param 0x004C = 0x0D5C (3420)
+RX  ~8000D5 00 0000 FD9F CR               → OK
+```
+
+Per `BMS073-H17-BL08-16S-en-US.xml`, parameter index **0x4C = "Start Balance Voltage", scale 0.001 V** — i.e. the tool set the balancing start threshold to 3.421 V, then corrected it to 3.420 V (matches the user's account of what was clicked). The XML's full `int_para` table (indices 0x00–0x7C + 3 calibration entries; bit-params as a separate flag table) is the vendor's own parameter map for this dialect.
+
+### Partial parameter-block alignment (CID2 47 response)
+
+First six u16 slots after the RTN byte read `0DDE 0D48 0C1C 0B54 0E42 0D48` (3550 / 3400 / 3100 / 2900 / 3648 / 3400 mV), which aligns exactly with XML parameter indices 0–5: Cell Over Voltage Alarm 3.550 V, alarm release 3.400 V, under-voltage alarm release 3.100 V, under-voltage alarm 2.900 V, **over-voltage protect 3.648 V** (classic LFP value), protect release 3.400 V. Alignment past index 5 is **not yet verified** — several plausible values appear further in (300 = 30.0 °C, 10000 = "100.00"–scaled capacity, 3.420 V again where the balance voltage lives at index 0x4C within the same block), but the layout must be confirmed by a scripted decode against the XML table before any of it is trusted.
+
+### CID2 42 (analog) INFO layout — verified portions
+
+16 × u16 big-endian cell millivolts (`0CF9` = 3.321 V etc., matching the XML `teleMeter` cells at scale 0.001 V) and 6 × u16 big-endian temperatures in 0.1 K (`0B42` = 2882 → 15.1 °C via `rs485_temp_to_celsius`) are directly confirmed. Pack voltage follows the temps as u16 at 0.01 V (`14C3` = 53.15 V, consistent with the cell average at that moment). The current field (`FCEE`, signed) and the capacity/cycle fields are present but their scale/sign need one more decode pass; do not trust eyeball values for those fields.
+
+### The `bqadmin` login
+
+The vendor tool requires a `bqadmin` password in its UI before allowing parameter changes. **The password never appears on the wire** — the capture covers the entire session from port-open through both writes, and contains no login or challenge exchange of any kind. This matches the same tool family's documented behavior (V-KING/TAICO BMS: "GUI password is only a local lock of the manufacturer UI and is not sent on the wire"). Consequence: any device physically on the battery-battery bus can read and write all parameters; the password protects nothing.
+
+### Topology facts (verified against this repo's firmware)
+
+- `deye-bms-can` **actively polls** the stack master at Pylontech address 2 with the section-2 dialect: `rs485_make_cmd()` builds `~20 02 46 <cid2> E002 <pack-index>` frames; CID2 0x42 every 10 s and 0x44 every 30 s per pack (`pylontech_rs485.h`), with the master responding on behalf of the slaves. CAN is listen-only on the same comm port. **The ESP32 is on the master's to-inverter port, not the battery-battery bus** (user-confirmed wiring).
+- The battery-battery (Link) chain is a separate physical bus carrying the stack's own master↔slave traffic — plus this configuration dialect.
+
+### Link-bus capture in normal stack operation (2026-10-31)
+
+Passive read-only sniff of the assembled stack's battery-battery bus (10 minutes, 756 request/response exchanges, zero checksum errors, macOS + FTDI dongle clipped onto the chain):
+
+- **The dialect is identical in both directions.** The stack master polls with `~8050D542E002<xx>…` / `~8050D544E002<xx>…` — VER `80`, **request ADR = 0x50 (master role)**, CID1 `D5`, target pack index `01`–`04` in INFO. Slaves answer with the same response format as the standalone session (`~8000D500 B07E/9052`, battery number `000N`). There is no third protocol variant on this bus.
+- **Normal operation sends only telemetry polls.** The whole capture contains CID2 `42` (analog) and `44` (status) and nothing else — no parameter reads (`47`), no writes (`49`). Configuration is never pushed by the stack; a config client must inject it.
+- **Cadence:** one poll slot every 624 ms (occasional 1264 ms double-slot), each slot = request ~20 chars + response ~160 chars, response turnaround <16 ms — leaving roughly **400 ms of idle bus per slot**.
+- This stack has **4 packs addressed 01–04** on the Link bus (note: `deye-bms-can.yaml` has `num_batteries: 5` — reconcile if a fifth pack is expected).
+
+**Deliberate in-stack probe (single frame, gap-injected, user-approved):** a tool-style client read `~8000D542E00201FD21\r` (ADR `00`, pack `01`) was sent into a confirmed ≥150 ms idle gap:
+
+- **Pack 01 answered in ~15 ms** with the standard `B07E` analog block (battery number `0001`, RTN `00`) — packs accept third-party client frames while stacked.
+- **The master was undisturbed:** its next poll left on schedule 360 ms later, no retry, and its own poll of pack 01 shortly after returned matching cell data.
+
+Conclusion: in-situ configuration is proven at the protocol level for reads; the identical envelope applies to writes (CID2 `49`).
+
+### Executed in-stack parameter write (2026-10-31)
+
+The full write path was then executed against the live stack: **pack 01, param 0x4C (Start Balance Voltage), 3.420 V → 3.430 V** (`0x0D5C` → `0x0D66`), the user's requested change.
+
+1. **Write** (gap-injected, single frame): `~8000D5498008014C0D66FBCA\r`
+   → ack `~8000D5000000FD9F\r` (RTN `00`, byte-identical to the tool-session ack format). Exactly **one** ack arrived — on a 4-pack bus, a broadcast write would have produced overlapping acks from all packs, so this also confirms pack-addressed semantics for the INFO `[pack][param][value]` parse (the tool's standalone write INFO `004C0D5D` is the same shape with pack `00` — the standalone battery self-identified as battery `00`).
+2. **Targeted short reads are unsupported**: CID2 `47` with extended INFO (`014C`) is silently ignored — the only parameter read is the full `A222` block (546-char INFO, ~590 ms on the wire at 9600).
+3. **Read-back**: the block read overruns the ~445 ms idle window by ~180 ms, colliding with the master's next poll — accepted once, knowing the stack natively tolerates dropped slots (the 1264 ms double-slots in healthy operation). Result: response INFO = battery number (`01`) + parameter array; **`0D66` present at exactly the predicted slot 308, old `0D5C` gone**, checksum garbled only in the tail *after* the balance region by the predicted collision. Total disruption: one garbled master slot, immediate recovery (19/19 exchanges in the following health window, all four packs on cadence).
+4. **In-stack 47-response layout note**: response INFO begins with the **battery number** (`01…`) followed directly by the parameter array — the standalone capture's leading `00` was the same field (battery `00`).
+
+**In-situ configuration is now proven end-to-end on the live stack: gap-injected write → ack → read-back confirmation, stacked and operating.** Remaining work is purely implementation: the Mac-side tool and/or the ESP32 second-UART feature both have a verified protocol and a measured bus to run on.
+
+### ESP32 in-situ configuration — design implications
+
+1. The current single RS485 channel of the Waveshare ESP32-S3-RS485-CAN stays on the to-inverter port (polling + CAN must not regress).
+2. In-situ configuration needs a **second RS485 transceiver** (external MAX3485-class on free GPIOs; ESP32-S3 has a spare UART) tapped onto the battery-battery chain.
+3. Injected frames are ~30 ms at 9600 against ~400 ms measured idle per poll slot. Gap-injection validated experimentally (probe above); a client that passively times the poll cadence before sending is the safe design, with single retry on no-ack.
+4. Remaining unknowns: (a) ~~CID2 49 write in-stack~~ — **resolved 2026-10-31**, executed and verified (see above); (b) the D547 parameter-block layout beyond the balance region (indices 0–5 plus the 0x49–0x4F neighborhood confirmed; full scripted decode against the repo XML pending); (c) current/capacity field scales in the CID2 42 tail; (d) the CID2 and exact framing of the teleControl write (`SYS_OFF`/`Recovery`) — expected from a capture of the vendor tool's power buttons; (e) whether `SYS_OFF` on these packs is reboot-under-load or true sleep (one in-stack experiment, only after (d)).
+
+### Control register and remote reset (teleControl)
+
+The XML `teleControl_Group` defines a **2-byte control block** (`teleCtrlByteNum: 2`):
+
+| Bit | Name | Type | Meaning |
+|-----|------|------|---------|
+| 0 | DISCHG Ctrl | OnOff | Discharge FET |
+| 1 | CHG_Ctrl | OnOff | Charge FET |
+| 2 | LMCHG_Ctrl | OnOff | Charge-limiter FET |
+| 3 | Heat_Ctrl | OnOff | Heater |
+| 4 | **SYS_OFF** | Simple | Shut the pack down |
+| 5 | **Recovery** | Simple | Bring it back |
+
+Remote reset is therefore designed into the BMS. **The exact CID2 carrying this write on the BMS073 variant has not yet been observed.** Family evidence for its shape and semantics:
+
+- V-KING/TAICO spec: CID2 `E2` = "MOS / current-limit control", write, INFO = pack + 2-byte mask — matches the 2-byte control-block shape
+- Pylontech V3.5 (official family doc): CID2 `0x95` = per-battery turnoff; RTN codes `01`=VER error, `02`=CHKSUM error, `03`=LCHKSUM error, `04`=CID2 invalid, `06`=invalid INFO data
+- PACE BMSes (same ecosystem, per esphome-pace-bms documentation): **a shutdown command sent while the pack is actively charging or discharging causes the BMS to reinitialize and immediately wake back up — effectively a remote reboot.** A shutdown sent to an idle pack puts it into genuine sleep, with documented wake paths: charge activation, **communication activation** (frames on the bus), or manual reset — matching the `Recovery` bit and the "Communication Wake Up" parameter (bit_para, ByteIndex 5 bit 7)
+
+**Targets for the eventual automation:** capture the vendor tool's power-off/power-on buttons (same USBPcap method as the parameter-write capture) to pin the exact frames; run one deliberate in-stack reboot experiment on a pack *that is charging/discharging at the moment of reset*; only then schedule preventive reboots. Two sequencing constraints: never `SYS_OFF` an idle pack without a prepared wake (Recovery frame or incoming charge current), and treat a pack that doesn't rejoin within a few seconds as failed-reset — don't retry blind.
+
+### Known family behavior: the periodic-reset problem
+
+The production stack's symptom — packs need a reset every couple of months — is a documented pattern across this whole battery family, not specific to these units:
+
+- **Pylontech** (DIY Solar Forum, 2023): batteries stick in idle at/near 100% SOC and refuse to discharge until the red power button resets them; a later inverter firmware fix reportedly "pings the batteries with a low-level charge to keep them from going to sleep"
+- **Shoto** (Power Forum, "Shoto battery problems endless" thread, same brand as these packs): master pack showing dead until a 2-minute button-hold reset
+- Vendor-confirmed BMS logic (Victron community): no charge/discharge for 3 days → pack auto-shutdowns into sleep; the master then reports internal alarms to the inverter
+
+Implication: a scheduled, staggered, one-pack-at-a-time **reboot-under-load** via the Link bus is a sanctioned preventive for a known family weakness — and the config bridge makes it a HA automation instead of a battery-shed ritual.
+
+### Config-bridge deployment note
+
+- **Dedicated second Waveshare ESP32-S3-RS485-CAN is the recommended form** (onboard RS485 → Link bus; CAN port unused): one device per role per fleet convention, and a config tool must not share a fault domain with the production battery monitor.
+- Full-time passive listening on the Link bus is free (a receiver never keys the transmitter) and yields per-pack telemetry at the master's 624 ms slot cadence — including balance FET and CW flags (the CID2 `44` response family layout from section 2; exact D5-`44` INFO mapping to be decoded when balancing actually runs), which directly supports the pack-balancing workflow as HA history.
+- The config dialect is proven on this bus end-to-end (write → ack → read-back, 2026-10-31); remaining implementation risk is confined to the un-observed teleControl write.
+
+### References for this section
+
+- Capture: `usb-bms-bqadmin-update-3421-then-3420.pcapng` (kept out of the repo; analysis transcripts summarized above)
+- `BMS073-H17-BL08-16S-en-US.xml` (repo root) — vendor tool protocol profile: telemetry layouts, int/bit parameter tables, teleControl group, index 0x4C
+- [taico-bms-unleashed V-KING/TAICO protocol spec](https://github.com/Gesiima/taico-bms-unleashed/blob/main/VKING_BMS_Protokoll_Spezifikation.md) — same protocol family, independently reverse-engineered; documents the CID2 command set (42/44/47/49/4B/4C/4D/4E/E2/E5/E9/EB/ED/EF/F1/F2) and the local-only GUI password design
+- Shoto SDA10-48100 BMS Modbus RTU protocol v0.3 (Scribd) — the MODBUS dialect probed by the tool; register 0x8000 = identification block, addresses 0–15 via DIP switch
+- [Pylontech RS485 protocol V3.5 (PDF)](https://www.basenpower.com/wp-content/uploads/2026/07/PYLON-485-ProtocolV3.5.pdf) — official family CID2 table: `0x4F` get-protocol-version, `0x95` per-battery turnoff, RTN codes
+- [esphome-pace-bms (nkinnan)](https://github.com/nkinnan/esphome-pace-bms) — ESPHome component for PACE-family BMSes; documents the shutdown command's reboot-when-under-load semantics
+- [esphome-pace-bms (syssi)](https://github.com/syssi/esphome-pace-bms/) — PACE_MODBUS variant, tested-hardware list, ESP32+RS485 wiring reference
+- [Pylontech batteries in protect mode, will not discharge without reset (DIY Solar Forum, 2023)](https://diysolarforum.com/threads/pylontech-batteries-apparently-in-protect-mode-will-not-discharge-without-reset.62153/) — family periodic-reset reports
+- Shoto battery problems thread (Power Forum, powerforum.co.za/topic/10636) — Shoto-specific master-pack reset cases
 
 ## EPever Inverter Protocols
 
