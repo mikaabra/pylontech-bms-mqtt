@@ -11,11 +11,12 @@
 
 class PylontechRS485 {
 public:
-    PylontechRS485(esphome::uart::UARTComponent* uart, const char* mqtt_prefix, int num_batteries, int pylontech_addr)
+    PylontechRS485(esphome::uart::UARTComponent* uart, const char* mqtt_prefix, int num_batteries, int pylontech_addr, const char* device_status_topic)
         : uart_(uart)
         , mqtt_prefix_(mqtt_prefix)
         , num_batteries_(num_batteries)
         , pylontech_addr_(pylontech_addr)
+        , device_status_topic_(device_status_topic)
         , batteries_(num_batteries)
         , availability_((std::string(mqtt_prefix) + "/status").c_str())
         , hyst_cell_voltages_(16 * num_batteries)
@@ -670,7 +671,11 @@ public:
         PublishPacer pacer;
 
         std::string device_json = R"("device":{"identifiers":["pylontech_rs485"],"name":"Pylontech RS485","manufacturer":"Pylontech","model":"BMS RS485"})";
-        std::string avail_str = std::string(R"("availability_topic":")") + mqtt_prefix_ + R"(/status","payload_available":"online","payload_not_available":"offline")";
+        // both the client last-will topic (device death) and the channel
+        // availability topic (RS485 data gone stale) gate HA availability
+        std::string avail_str = std::string(R"("availability":[{"topic":")") + device_status_topic_ +
+            R"(","payload_available":"online","payload_not_available":"offline"},{"topic":")" +
+            mqtt_prefix_ + R"(/status","payload_available":"online","payload_not_available":"offline"}],"availability_mode":"all")";
 
         const char* stack_sensors[][5] = {
             {"stack_cell_min", "Stack Cell Min", "V", "voltage", "measurement"},
@@ -844,6 +849,7 @@ private:
     std::string mqtt_prefix_;
     int num_batteries_;
     int pylontech_addr_;
+    std::string device_status_topic_;
     AvailabilityTracker availability_;
 
     enum State : int { IDLE = 0, SEND_ANALOG = 1, WAIT_ANALOG = 2, SEND_ALARM = 3, WAIT_ALARM_RX = 4 };

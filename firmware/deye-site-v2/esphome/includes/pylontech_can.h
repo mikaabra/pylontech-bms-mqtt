@@ -11,9 +11,10 @@
 
 class PylontechCAN {
 public:
-    PylontechCAN(const char* mqtt_prefix, int num_batteries)
+    PylontechCAN(const char* mqtt_prefix, int num_batteries, const char* device_status_topic)
         : can_prefix_(mqtt_prefix)
         , num_batteries_(num_batteries)
+        , device_status_topic_(device_status_topic)
         , availability_((std::string(mqtt_prefix) + "/status").c_str())
     {
     }
@@ -405,8 +406,11 @@ public:
         PublishPacer pacer;
 
         const char* device_json = R"("device":{"identifiers":["deye_bms_can"],"name":"Deye BMS CAN","manufacturer":"Pylontech","model":"BMS CAN"})";
-        const char* avail_json = R"("availability_topic":")";
-        std::string avail_str = std::string(R"("availability_topic":")") + can_prefix_ + R"(/status","payload_available":"online","payload_not_available":"offline")";
+        // both the client last-will topic (device death) and the channel
+        // availability topic (BMS data gone stale) gate HA availability
+        std::string avail_str = std::string(R"("availability":[{"topic":")") + device_status_topic_ +
+            R"(","payload_available":"online","payload_not_available":"offline"},{"topic":")" +
+            can_prefix_ + R"(/status","payload_available":"online","payload_not_available":"offline"}],"availability_mode":"all")";
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soc/config");
         if (build_ha_sensor_payload(payload, sizeof(payload), "BMS SOC", (can_prefix_ + "/soc").c_str(), "deye_bms_can_soc", "%", "battery", "measurement", avail_str.c_str(), device_json)) {
@@ -567,6 +571,7 @@ public:
 private:
     std::string can_prefix_;
     int num_batteries_;
+    std::string device_status_topic_;
     AvailabilityTracker availability_;
 
     uint32_t last_can_rx_ = 0;
