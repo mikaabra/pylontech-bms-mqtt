@@ -39,6 +39,14 @@ struct AvailabilityTracker {
         }
     }
 
+    // republish the retained status even when unchanged - mark_online above
+    // is a no-op once online, so periodic heartbeats must come through here
+    void heartbeat(esphome::mqtt::MQTTClientComponent* mqtt) {
+        if (!stale) {
+            mqtt->publish(status_topic, std::string("online"), (uint8_t)0, true);
+        }
+    }
+
     void reset() {
         stale = true;
         last_online = false;

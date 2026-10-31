@@ -370,32 +370,20 @@ public:
 
     void on_mqtt_connect() {
         availability_.on_connect(esphome::mqtt::global_mqtt_client);
-
-        hys_v_charge_max_.reset();
-        hys_v_low_.reset();
-        hys_i_charge_.reset();
-        hys_i_discharge_.reset();
-        hys_soc_.reset();
-        hys_soh_.reset();
-        hys_temp_min_.reset();
-        hys_temp_max_.reset();
-        hys_cell_v_min_.reset();
-        hys_cell_v_max_.reset();
-
-        last_flags_value_ = 0;
-        last_flags_publish_ = 0;
-        last_soc_publish_ = 0;
-        last_extremes_publish_ = 0;
-        last_charge_state_ = 0xFF;
-        last_charge_publish_ = 0;
-        last_decoded_state_ = 0;
-        last_decoded_publish_ = 0;
+        reset_value_hysteresis();
         last_diag_publish_ = 0;
         last_status_heartbeat_ = 0;
         received_0x359_ = false;
         received_0x35C_ = false;
 
         publish_discovery();
+    }
+
+    // short MQTT gap (< 6s debounce): discovery survives (retained), but
+    // value updates lost during the outage must be re-sent
+    void on_short_reconnect() {
+        availability_.on_connect(esphome::mqtt::global_mqtt_client);
+        reset_value_hysteresis();
     }
 
     void publish_discovery() {
@@ -630,6 +618,28 @@ private:
     void publish_topic(const char* suffix, const char* value) {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         esphome::mqtt::global_mqtt_client->publish(can_prefix_ + suffix, std::string(value));
+    }
+
+    void reset_value_hysteresis() {
+        hys_v_charge_max_.reset();
+        hys_v_low_.reset();
+        hys_i_charge_.reset();
+        hys_i_discharge_.reset();
+        hys_soc_.reset();
+        hys_soh_.reset();
+        hys_temp_min_.reset();
+        hys_temp_max_.reset();
+        hys_cell_v_min_.reset();
+        hys_cell_v_max_.reset();
+
+        last_flags_value_ = 0;
+        last_flags_publish_ = 0;
+        last_soc_publish_ = 0;
+        last_extremes_publish_ = 0;
+        last_charge_state_ = 0xFF;
+        last_charge_publish_ = 0;
+        last_decoded_state_ = 0;
+        last_decoded_publish_ = 0;
     }
 
     void publish_mqtt_bool(const char* suffix, bool value) {

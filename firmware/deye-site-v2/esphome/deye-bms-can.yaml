@@ -165,6 +165,12 @@ interval:
           if (!id(pylontech_can) || !id(pylontech_rs485)) return;
           bool connected = id(mqtt_client).is_connected();
           if (connected) {
+            if (id(mqtt_was_connected) && id(mqtt_disconnect_count) > 0) {
+              // Short gap (below the 6s debounce): discovery survives retained,
+              // but value updates lost during the outage must be re-sent.
+              ((PylontechCAN*)id(pylontech_can))->on_short_reconnect();
+              ((PylontechRS485*)id(pylontech_rs485))->on_short_reconnect();
+            }
             id(mqtt_was_connected) = true;
             id(mqtt_disconnect_count) = 0;
           } else if (id(mqtt_was_connected)) {

@@ -407,7 +407,7 @@ public:
             last_heartbeat_ = now;
             ESP_LOGI("mqtt", "RS485 heartbeat: forcing republish of all values");
             if (!availability_.stale) {
-                availability_.mark_online(esphome::mqtt::global_mqtt_client);
+                availability_.heartbeat(esphome::mqtt::global_mqtt_client);
             }
             reset_all_hysteresis();
         }
@@ -661,6 +661,17 @@ public:
             publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm);
         }
         publish_discovery();
+    }
+
+    // short MQTT gap (< 6s debounce): discovery survives (retained), but
+    // value updates lost during the outage must be re-sent
+    void on_short_reconnect() {
+        availability_.on_connect(esphome::mqtt::global_mqtt_client);
+        reset_all_hysteresis();
+        for (int batt = 0; batt < num_batteries_; batt++) {
+            publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm);
+            publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm);
+        }
     }
 
     void publish_discovery() {
