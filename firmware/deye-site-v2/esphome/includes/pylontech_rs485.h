@@ -421,29 +421,29 @@ public:
         for (int batt = 0; batt < num_batteries_; batt++) {
             float batt_min = 99.0f, batt_max = 0.0f;
 
-            for (int cell = 0; cell < 16; cell++) {
-                float v = batteries_[batt].cell_voltages[cell];
-                if (v > 0.1f) {
-                    if (v < batt_min) batt_min = v;
-                    if (v > batt_max) batt_max = v;
-                    if (v < stack_cell_min) stack_cell_min = v;
-                    if (v > stack_cell_max) stack_cell_max = v;
-                }
-            }
-
-            for (int t = 0; t < 6; t++) {
-                float temp = batteries_[batt].cell_temps[t];
-                if (temp > -40.0f && temp < 100.0f) {
-                    if (temp < stack_temp_min) stack_temp_min = temp;
-                    if (temp > stack_temp_max) stack_temp_max = temp;
-                }
-            }
-
-            if (batteries_[batt].voltage > 0.1f) {
-                stack_voltage += batteries_[batt].voltage;
-                valid_batts++;
-            }
             if (batteries_[batt].has_analog) {
+                for (int cell = 0; cell < 16; cell++) {
+                    float v = batteries_[batt].cell_voltages[cell];
+                    if (v > 0.1f) {
+                        if (v < batt_min) batt_min = v;
+                        if (v > batt_max) batt_max = v;
+                        if (v < stack_cell_min) stack_cell_min = v;
+                        if (v > stack_cell_max) stack_cell_max = v;
+                    }
+                }
+
+                for (int t = 0; t < 6; t++) {
+                    float temp = batteries_[batt].cell_temps[t];
+                    if (temp > -40.0f && temp < 100.0f) {
+                        if (temp < stack_temp_min) stack_temp_min = temp;
+                        if (temp > stack_temp_max) stack_temp_max = temp;
+                    }
+                }
+
+                if (batteries_[batt].voltage > 0.1f) {
+                    stack_voltage += batteries_[batt].voltage;
+                    valid_batts++;
+                }
                 stack_current += batteries_[batt].current;
             }
 
@@ -914,6 +914,15 @@ private:
         if (batteries_[batt].analog_poll_failures >= 10 && !batteries_[batt].analog_poll_alarm) {
             batteries_[batt].analog_poll_alarm = true;
             batteries_[batt].has_analog = false;
+            // clear frozen values so the dead battery stops feeding
+            // stack cell/temp/voltage/current totals
+            memset(batteries_[batt].cell_voltages, 0, sizeof(batteries_[batt].cell_voltages));
+            for (int t = 0; t < 6; t++) batteries_[batt].cell_temps[t] = -999.0f;
+            batteries_[batt].voltage = 0.0f;
+            batteries_[batt].current = 0.0f;
+            batteries_[batt].soc = 0.0f;
+            batteries_[batt].remain_ah = 0.0f;
+            batteries_[batt].total_ah = 0.0f;
             publish_poll_alarm(batt, true);
         }
     }
