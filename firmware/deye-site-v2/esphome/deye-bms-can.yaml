@@ -96,6 +96,12 @@ web_server:
   auth:
     username: !secret web_server_username
     password: !secret web_server_password
+    # digest: basic sends the password in easily reversible form over the
+    # LAN; digest becomes the ESPHome default in 2027.1.0 - adopt now
+    type: digest
+  # disable the plaintext /update OTA path - encrypted OTA covers updates,
+  # and this endpoint accepted the same image without encryption
+  ota: false
 
 uart:
   id: rs485_uart
