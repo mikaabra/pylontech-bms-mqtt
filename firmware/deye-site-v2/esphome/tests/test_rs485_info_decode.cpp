@@ -215,9 +215,10 @@ static void test_alarm_state_bits() {
     check(rs485_parse_alarm_info(standby, out), "alarm states: standby parse ok");
     check_str(out.state, "Standby", "alarm states: 0x10 -> Standby");
 
-    // 0x20 = Shutdown, decoded from the documented operating-state table in
-    // PROTOCOL_REFERENCE.md. No captured frame has shown the bit set yet, so
-    // it is unconfirmed on hardware; the capture issue (#36) should validate.
+    // 0x20 = Shutdown, from the vendor parameter file's mode-text table
+    // (BMS073-H17-BL08-16S-en-US.xml - stronger evidence than our own doc,
+    // per review). Confirm only if a pack is ever seen in shutdown; normal
+    // traffic never shows the bit, so otherwise it stays unconfirmed (#36).
     std::string shutdown = std::string(ALARM_FULL);
     shutdown.replace(76, 2, "20");
     check(rs485_parse_alarm_info(shutdown, out), "alarm states: shutdown parse ok");

@@ -352,10 +352,10 @@ inline Rs485AnalogResult rs485_parse_analog_info(const std::string& data, Batter
 //   states - those fire routinely at full charge on these packs.
 // - status bytes (status_pos): charge status 0x02 raises charge_overcurrent
 //   and module-voltage 0x01/0x02 raises pack_undervolt/pack_overvolt, all
-// as alarms in both directions.
+//   as alarms in both directions.
 // The full-charge behavior of the status bytes is a pending check against
-// captured real frames (tracked in #36);
-// the code-as-documented split above is what ships today.
+// captured real frames (tracked in #36); the code-as-documented split above
+// is what ships today.
 inline bool rs485_parse_alarm_info(const std::string& data, BatteryData& out) {
     bool parse_ok = true;
     unsigned long hex_val;
@@ -488,9 +488,12 @@ inline bool rs485_parse_alarm_info(const std::string& data, BatteryData& out) {
                         if (last_byte & 0x04) { if (!state_str.empty()) state_str += ","; state_str += "Float"; }
                         if (last_byte & 0x08) { if (!state_str.empty()) state_str += ","; state_str += "Full"; }
                         if (last_byte & 0x10) { if (!state_str.empty()) state_str += ","; state_str += "Standby"; }
-                        // bit 5 Shutdown: decoded from the documented operating-state
-                        // table in PROTOCOL_REFERENCE.md; not yet confirmed on hardware
-                        // (no captured frame has shown the bit set - see #36)
+                        // bit 5 Shutdown: 0x20 in the vendor parameter file's
+                        // mode-text table (BMS073-H17-BL08-16S-en-US.xml, same
+                        // sequence as Charge/Float/Full/Standby - stronger
+                        // evidence than our own doc). Normal traffic never
+                        // shows the bit, so it stays unconfirmed on hardware
+                        // unless a pack is ever seen in shutdown (#36)
                         if (last_byte & 0x20) { if (!state_str.empty()) state_str += ","; state_str += "Shutdown"; }
                     }
                 }
