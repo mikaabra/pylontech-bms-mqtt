@@ -669,11 +669,15 @@ button:
     icon: "mdi:toggle-switch"
     on_press:
       - lambda: |-
-          if (id(logger_level) == "WARN") {
+          // INFO -> DEBUG -> WARN -> INFO; cycle back to the boot level
+          if (id(logger_level) == "INFO") {
             id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_DEBUG);
             id(logger_level) = "DEBUG";
-          } else {
+          } else if (id(logger_level) == "DEBUG") {
             id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_WARN);
             id(logger_level) = "WARN";
+          } else {
+            id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_INFO);
+            id(logger_level) = "INFO";
           }
           id(debug_level_sensor).publish_state(id(logger_level));
