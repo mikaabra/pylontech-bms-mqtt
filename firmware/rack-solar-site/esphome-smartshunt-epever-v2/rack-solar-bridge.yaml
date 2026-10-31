@@ -592,8 +592,10 @@ sensor:
     state_topic: null
     register_type: read
     address: 13083
-    # 0x331B is a SIGNED 16-bit register (charge +, discharge -) per the
-    # EPEVER Modbus protocol; decoding it unsigned turned discharge into
+    # 0x331B is signed (charge +, discharge -): either a standalone signed
+    # 16-bit register or the low half of a signed 32-bit value at
+    # 0x331B/0x331C (unconfirmed against the EPEVER spec; identical below
+    # +-327A either way). Decoding it unsigned turned discharge into
     # ~655A raw, which the handler's sane-range gate then silently dropped.
     value_type: S_WORD
     unit_of_measurement: "A"

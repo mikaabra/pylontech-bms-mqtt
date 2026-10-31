@@ -125,7 +125,8 @@ public:
         reset_hysteresis();
     }
 
-    // refresh the retained status topic; heartbeat() no-ops while stale
+    // refresh the retained status topic with the current state, online or
+    // offline - repairs an offline lost during a short disconnect
     void heartbeat_status() {
         availability_.heartbeat(esphome::mqtt::global_mqtt_client);
     }

@@ -40,11 +40,14 @@ struct AvailabilityTracker {
     }
 
     // republish the retained status even when unchanged - mark_online above
-    // is a no-op once online, so periodic heartbeats must come through here
+    // is a no-op once online, so periodic heartbeats must come through here.
+    // Publishes the CURRENT state either way: if a stale-transition's
+    // "offline" was lost during a short disconnect, the retained topic
+    // stays "online" and HA shows frozen data as live; repeating the
+    // offline repairs it on the next heartbeat.
     void heartbeat(esphome::mqtt::MQTTClientComponent* mqtt) {
-        if (!stale) {
-            mqtt->publish(status_topic, std::string("online"), (uint8_t)0, true);
-        }
+        if (!mqtt) return;
+        mqtt->publish(status_topic, std::string(stale ? "offline" : "online"), (uint8_t)0, true);
     }
 
     void reset() {

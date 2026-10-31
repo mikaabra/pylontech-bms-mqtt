@@ -134,7 +134,8 @@ public:
         reset_hysteresis();
     }
 
-    // refresh all retained group status topics; heartbeat() no-ops while stale
+    // refresh all retained group status topics with the current state,
+    // online or offline - repairs an offline lost during a short disconnect
     void heartbeat_status() {
         pv_avail_.heartbeat(esphome::mqtt::global_mqtt_client);
         controller_avail_.heartbeat(esphome::mqtt::global_mqtt_client);
