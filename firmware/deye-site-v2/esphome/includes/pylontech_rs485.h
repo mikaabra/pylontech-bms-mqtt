@@ -651,6 +651,12 @@ public:
         availability_.on_connect(esphome::mqtt::global_mqtt_client);
         reset_all_hysteresis();
         has_any_alarm_ = false;
+        for (int batt = 0; batt < num_batteries_; batt++) {
+            // alarms are published on change only; republish the retained
+            // state so a broker restart or missed change doesn't leave HA stale
+            publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm);
+            publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm);
+        }
         publish_discovery();
     }
 
@@ -884,13 +890,15 @@ private:
     void publish_poll_alarm(int batt, bool alarm) {
         char topic[80];
         snprintf(topic, sizeof(topic), "%s/battery%d/poll_alarm", mqtt_prefix_.c_str(), batt);
-        esphome::mqtt::global_mqtt_client->publish(std::string(topic), alarm ? "ON" : "OFF", (uint8_t)0, true);
+        // std::string payload is required: a const char* literal here is
+        // ambiguous and GCC silently binds it as payload_length (qos=1, no retain).
+        esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(alarm ? "ON" : "OFF"), (uint8_t)0, true);
     }
 
     void publish_alarm_poll_alarm(int batt, bool alarm) {
         char topic[80];
         snprintf(topic, sizeof(topic), "%s/battery%d/alarm_poll_alarm", mqtt_prefix_.c_str(), batt);
-        esphome::mqtt::global_mqtt_client->publish(std::string(topic), alarm ? "ON" : "OFF", (uint8_t)0, true);
+        esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(alarm ? "ON" : "OFF"), (uint8_t)0, true);
     }
 
     void handle_analog_failure(int batt) {
