@@ -544,12 +544,15 @@ sensor:
     state_topic: null
     register_type: read
     address: 13083
-    value_type: U_WORD
+    # 0x331B is a SIGNED 16-bit register (charge +, discharge -) per the
+    # EPEVER Modbus protocol; decoding it unsigned turned discharge into
+    # ~655A raw, which the handler's sane-range gate then silently dropped -
+    # the topic froze at the last charging value whenever the bank discharged.
+    value_type: S_WORD
     unit_of_measurement: "A"
     device_class: current
     state_class: measurement
     filters:
-      - lambda: 'if (x == 65535.0f) return NAN; return x;'
       - multiply: 0.01
     on_value:
       then:
