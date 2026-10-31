@@ -430,14 +430,29 @@ The vendor tool requires a `bqadmin` password in its UI before allowing paramete
 
 - `deye-bms-can` **actively polls** the stack master at Pylontech address 2 with the section-2 dialect: `rs485_make_cmd()` builds `~20 02 46 <cid2> E002 <pack-index>` frames; CID2 0x42 every 10 s and 0x44 every 30 s per pack (`pylontech_rs485.h`), with the master responding on behalf of the slaves. CAN is listen-only on the same comm port. **The ESP32 is on the master's to-inverter port, not the battery-battery bus** (user-confirmed wiring).
 - The battery-battery (Link) chain is a separate physical bus carrying the stack's own master↔slave traffic — plus this configuration dialect.
-- The config protocol is addressable (probe INFO carries pack addresses 01–0F, 15-pack range), suggesting per-pack messaging in-stack is at least designed for. Whether the packs answer the config dialect while the stack is assembled and operating is **untested** — the one experiment that must pass before any in-situ use.
+
+### Link-bus capture in normal stack operation (2026-10-31)
+
+Passive read-only sniff of the assembled stack's battery-battery bus (10 minutes, 756 request/response exchanges, zero checksum errors, macOS + FTDI dongle clipped onto the chain):
+
+- **The dialect is identical in both directions.** The stack master polls with `~8050D542E002<xx>…` / `~8050D544E002<xx>…` — VER `80`, **request ADR = 0x50 (master role)**, CID1 `D5`, target pack index `01`–`04` in INFO. Slaves answer with the same response format as the standalone session (`~8000D500 B07E/9052`, battery number `000N`). There is no third protocol variant on this bus.
+- **Normal operation sends only telemetry polls.** The whole capture contains CID2 `42` (analog) and `44` (status) and nothing else — no parameter reads (`47`), no writes (`49`). Configuration is never pushed by the stack; a config client must inject it.
+- **Cadence:** one poll slot every 624 ms (occasional 1264 ms double-slot), each slot = request ~20 chars + response ~160 chars, response turnaround <16 ms — leaving roughly **400 ms of idle bus per slot**.
+- This stack has **4 packs addressed 01–04** on the Link bus (note: `deye-bms-can.yaml` has `num_batteries: 5` — reconcile if a fifth pack is expected).
+
+**Deliberate in-stack probe (single frame, gap-injected, user-approved):** a tool-style client read `~8000D542E00201FD21\r` (ADR `00`, pack `01`) was sent into a confirmed ≥150 ms idle gap:
+
+- **Pack 01 answered in ~15 ms** with the standard `B07E` analog block (battery number `0001`, RTN `00`) — packs accept third-party client frames while stacked.
+- **The master was undisturbed:** its next poll left on schedule 360 ms later, no retry, and its own poll of pack 01 shortly after returned matching cell data.
+
+Conclusion: in-situ configuration is proven at the protocol level for reads; the identical envelope applies to writes (CID2 `49`). The one remaining unexecuted experiment is a real parameter write in-stack — planned as the next genuine configuration change (with read-back verification), not a synthetic test.
 
 ### ESP32 in-situ configuration — design implications
 
 1. The current single RS485 channel of the Waveshare ESP32-S3-RS485-CAN stays on the to-inverter port (polling + CAN must not regress).
 2. In-situ configuration needs a **second RS485 transceiver** (external MAX3485-class on free GPIOs; ESP32-S3 has a spare UART) tapped onto the battery-battery chain.
-3. On that bus the ESP32 must contend with the stack master's own polling — writes are single frames (~100 ms) with acks, retry-tolerant, but a gap-injecting sender (the passive RX already sees the poll cadence) is the safe design.
-4. Unknowns to resolve by experiment, in order: (a) do packs answer CID2 42/47/49 while stacked and addressed by index? (b) does the stack master tolerate foreign frames on its bus (worst case: one CRC-retry)? (c) does a parameter write stick on a slave pack without disturbing the master's view of the stack?
+3. Injected frames are ~30 ms at 9600 against ~400 ms measured idle per poll slot. Gap-injection validated experimentally (probe above); a client that passively times the poll cadence before sending is the safe design, with single retry on no-ack.
+4. Remaining unknowns: (a) whether a CID2 49 **write** sticks on a slave pack without disturbing the master's view of the stack (deferred to the next real configuration change, per above); (b) the D547 parameter-block layout beyond indices 0–5 (scripted decode against the repo XML pending); (c) current/capacity field scales in the CID2 42 tail.
 
 ### References for this section
 
