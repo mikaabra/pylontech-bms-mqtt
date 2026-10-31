@@ -180,16 +180,21 @@ All frames use ASCII hex encoding:
 
 ```
 SOI  VER   ADR   CID1  CID2  LENGTH  INFO        CHKSUM  EOI
-7E   3232  3032  3441  3432  E002    30323031    FD27    0D
-~    22    02    4A    42    ...     0201        ....    CR
+7E   3230  3032  3436  3432  45303032 3031       46443734 0D
+~    20    02    46    42    E002    01          FD34    CR
 ```
+
+Real request emitted by the production poller — `rs485_make_cmd(2, 0x42, 1)` in
+`firmware/deye-site-v2/esphome/includes/pylontech_protocol.h` (analog-values
+request, pack 1), byte-exact.
+
 
 | Field | Bytes | Description |
 |-------|-------|-------------|
 | SOI | 1 | Start of Information: 0x7E (`~`) |
-| VER | 2 | Protocol version (ASCII): "22" = 0x22 |
+| VER | 2 | Protocol version (ASCII): "20" = 0x20 |
 | ADR | 2 | Device address (ASCII): "02" = address 2 |
-| CID1 | 2 | Command ID 1 (ASCII): "4A" = 0x4A (fixed) |
+| CID1 | 2 | Command ID 1 (ASCII): "46" = 0x46 (fixed) |
 | CID2 | 2 | Command ID 2 (ASCII): command type |
 | LENGTH | 4 | Info length with checksum nibble |
 | INFO | N | Command/response data (ASCII hex) |
