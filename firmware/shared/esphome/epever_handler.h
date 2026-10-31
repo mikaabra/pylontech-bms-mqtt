@@ -129,20 +129,28 @@ public:
         pacer.yield_every = 10;
         const char* device_json = R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})";
 
-        const char* pv_avail = R"("availability_topic":"rack-solar/epever/pv/status","payload_available":"online","payload_not_available":"offline")";
-        const char* controller_avail = R"("availability_topic":"rack-solar/epever/controller/status","payload_available":"online","payload_not_available":"offline")";
-        const char* battery_avail = R"("availability_topic":"rack-solar/epever/battery/status","payload_available":"online","payload_not_available":"offline")";
+        // data entities gate on BOTH the client last-will topic (device death)
+        // and their channel-group availability topic (data gone stale)
+        auto make_avail_list = [](const char* group_topic) -> std::string {
+            return std::string(R"("availability":[{"topic":"rack-solar/status",)") +
+                   R"("payload_available":"online","payload_not_available":"offline"},{"topic":")" +
+                   std::string(group_topic) +
+                   R"(","payload_available":"online","payload_not_available":"offline"}],"availability_mode":"all")";
+        };
+        const std::string pv_avail = make_avail_list("rack-solar/epever/pv/status");
+        const std::string controller_avail = make_avail_list("rack-solar/epever/controller/status");
+        const std::string battery_avail = make_avail_list("rack-solar/epever/battery/status");
 
         struct SensorDef { const char* id; const char* name; const char* unit; const char* dc; const char* sc; const char* avail; };
         const SensorDef sensors[] = {
-            {"epever_solar_voltage",   "EPEVER Solar Voltage",      "V",   "voltage",     "measurement",      pv_avail},
-            {"epever_pv_current",      "EPEVER PV Current",         "A",   "current",     "measurement",      pv_avail},
-            {"epever_solar_power",     "EPEVER Solar Power",        "W",   "power",       "measurement",      pv_avail},
-            {"epever_battery_capacity","EPEVER Battery Capacity",   "%",   "battery",     "measurement",      controller_avail},
-            {"epever_device_temp",     "EPEVER Device Temperature", "°C",  "temperature", "measurement",      controller_avail},
-            {"epever_battery_voltage", "EPEVER Battery Voltage",   "V",   "voltage",     "measurement",      battery_avail},
-            {"epever_battery_current", "EPEVER Battery Current",   "A",   "current",     "measurement",      battery_avail},
-            {"epever_total_energy",    "EPEVER Total Energy",      "kWh", "energy",      "total_increasing", battery_avail},
+            {"epever_solar_voltage",   "EPEVER Solar Voltage",      "V",   "voltage",     "measurement",      pv_avail.c_str()},
+            {"epever_pv_current",      "EPEVER PV Current",         "A",   "current",     "measurement",      pv_avail.c_str()},
+            {"epever_solar_power",     "EPEVER Solar Power",        "W",   "power",       "measurement",      pv_avail.c_str()},
+            {"epever_battery_capacity","EPEVER Battery Capacity",   "%",   "battery",     "measurement",      controller_avail.c_str()},
+            {"epever_device_temp",     "EPEVER Device Temperature", "°C",  "temperature", "measurement",      controller_avail.c_str()},
+            {"epever_battery_voltage", "EPEVER Battery Voltage",   "V",   "voltage",     "measurement",      battery_avail.c_str()},
+            {"epever_battery_current", "EPEVER Battery Current",   "A",   "current",     "measurement",      battery_avail.c_str()},
+            {"epever_total_energy",    "EPEVER Total Energy",      "kWh", "energy",      "total_increasing", battery_avail.c_str()},
         };
         for (int i = 0; i < 8; i++) {
             char uid[64], st[96];

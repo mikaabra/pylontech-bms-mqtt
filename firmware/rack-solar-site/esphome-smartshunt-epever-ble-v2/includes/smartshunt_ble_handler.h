@@ -121,6 +121,9 @@ public:
         ESP_LOGI("mqtt", "Publishing diagnostic discovery...");
         char topic[160], payload[768];
         const char* device_json = R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})";
+        // diagnostics report channel state as their VALUE (STALE/OK, DISCONNECTED...):
+        // gating their availability on the channel topic would hide exactly that
+        // message, so they watch the device last-will topic only
         const char* diag_avail = R"("availability_topic":"rack-solar/status","payload_available":"online","payload_not_available":"offline")";
 
         const char* diag_sensors[][5] = {
@@ -154,7 +157,11 @@ public:
         PublishPacer pacer;
         pacer.yield_every = 10;
         const char* device_json = R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})";
-        const char* avail = R"("availability_topic":"rack-solar/smartshunt/status","payload_available":"online","payload_not_available":"offline")";
+        // both the client last-will topic (device death) and the channel
+        // availability topic (BLE data gone stale) gate HA availability
+        std::string avail = std::string(R"("availability":[{"topic":"rack-solar/status",)") +
+            R"("payload_available":"online","payload_not_available":"offline"},{"topic":"rack-solar/smartshunt/status",)" +
+            R"("payload_available":"online","payload_not_available":"offline"}],"availability_mode":"all")";
 
         // 6 SmartShunt BLE sensors
         const char* sensors[][5] = {
@@ -172,7 +179,7 @@ public:
             snprintf(st, sizeof(st), "rack-solar/smartshunt/%s", sensors[i][0] + 3);
             snprintf(topic, sizeof(topic), "homeassistant/sensor/rack_solar/%s/config", sensors[i][0]);
             if (build_ha_sensor_payload(payload, sizeof(payload), sensors[i][1], st, uid,
-                                         sensors[i][2], sensors[i][3], sensors[i][4], avail, device_json)) {
+                                         sensors[i][2], sensors[i][3], sensors[i][4], avail.c_str(), device_json)) {
                 esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
                 pacer.pace();
             }
