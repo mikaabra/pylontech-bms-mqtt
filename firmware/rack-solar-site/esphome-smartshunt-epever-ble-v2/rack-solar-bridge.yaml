@@ -153,12 +153,16 @@ globals:
   - id: mqtt_disconnect_count
     type: int
     initial_value: '0'
-  # millis() of the last MQTT reconnect; yaml-lambda diagnostics with
-  # change-only dedup republish once within 6s after this (they cannot
-  # be reset by the handlers, so lost changes get re-sent this way)
+  # millis() of the last MQTT reconnect (uint32: millis() must never be
+  # stored in a signed int or it goes negative after 24.8 days and the
+  # window math breaks), plus a pending flag so the pre-first-reconnect
+  # state is explicit instead of a sentinel value
   - id: mqtt_reconnect_ms
-    type: int
+    type: uint32_t
     initial_value: '0'
+  - id: mqtt_reconnected
+    type: bool
+    initial_value: 'false'
 
 text_sensor:
   - platform: version
@@ -188,11 +192,11 @@ text_sensor:
       then:
         - lambda: |-
             static std::string last_val;
-            bool force = id(mqtt_reconnect_ms) > 0 && (int)(millis() - id(mqtt_reconnect_ms)) < 6000;
+            bool force = force_after_reconnect(id(mqtt_reconnected), id(mqtt_reconnect_ms), millis());
             if (x != last_val || force) {
               last_val = x;
               if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
-                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/smartshunt_stale"), x);
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/smartshunt_stale"), x, (uint8_t)0, true);
             }
 
   - platform: template
@@ -209,11 +213,11 @@ text_sensor:
       then:
         - lambda: |-
             static std::string last_val;
-            bool force = id(mqtt_reconnect_ms) > 0 && (int)(millis() - id(mqtt_reconnect_ms)) < 6000;
+            bool force = force_after_reconnect(id(mqtt_reconnected), id(mqtt_reconnect_ms), millis());
             if (x != last_val || force) {
               last_val = x;
               if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
-                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/epever_stale"), x);
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/epever_stale"), x, (uint8_t)0, true);
             }
 
   - platform: template
@@ -229,11 +233,11 @@ text_sensor:
       then:
         - lambda: |-
             static std::string last_val;
-            bool force = id(mqtt_reconnect_ms) > 0 && (int)(millis() - id(mqtt_reconnect_ms)) < 6000;
+            bool force = force_after_reconnect(id(mqtt_reconnected), id(mqtt_reconnect_ms), millis());
             if (x != last_val || force) {
               last_val = x;
               if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected())
-                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/ble_connection_status"), x);
+                esphome::mqtt::global_mqtt_client->publish(std::string("rack-solar/ble_connection_status"), x, (uint8_t)0, true);
             }
 
 sensor:
@@ -608,7 +612,8 @@ interval:
               // but value updates lost during the outage must be re-sent.
               ((SmartShuntBLEHandler*)id(handler_sm))->on_short_reconnect();
               ((EPEverHandler*)id(handler_ep))->on_short_reconnect();
-              id(mqtt_reconnect_ms) = (int)millis();
+              id(mqtt_reconnect_ms) = millis();
+              id(mqtt_reconnected) = true;
             }
             id(mqtt_was_connected) = true;
             id(mqtt_disconnect_count) = 0;
@@ -621,7 +626,8 @@ interval:
           }
           if (!id(discovery_published) && connected) {
             id(discovery_published) = true;
-            id(mqtt_reconnect_ms) = (int)millis();
+            id(mqtt_reconnect_ms) = millis();
+            id(mqtt_reconnected) = true;
             ESP_LOGI("mqtt", "Publishing discovery...");
             ((SmartShuntBLEHandler*)id(handler_sm))->on_mqtt_connect();
             ((EPEverHandler*)id(handler_ep))->on_mqtt_connect();
