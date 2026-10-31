@@ -206,8 +206,8 @@ public:
         float v2 = can_le_u16(x[6], x[7]) / 1000.0f;
 
         uint32_t now = millis();
-        uint32_t temp_heartbeat = (now - last_temp_publish_ >= 60000);
-        uint32_t cell_heartbeat = (now - last_cell_publish_ >= 60000);
+        bool temp_heartbeat = (now - last_temp_publish_ >= 60000);
+        bool cell_heartbeat = (now - last_cell_publish_ >= 60000);
         char val[16];
 
         // -40..100C sanity gate matches the RS485 handler; readings outside it

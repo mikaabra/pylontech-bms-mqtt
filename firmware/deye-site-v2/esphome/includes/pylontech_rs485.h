@@ -399,6 +399,11 @@ public:
             float batt_min = 99.0f, batt_max = 0.0f;
 
             if (batteries_[batt].has_analog) {
+                // Residuals accepted by design: totals can still include up to 10
+                // stale polls (~8 min) before the alarm clears a dead battery's
+                // data, and that battery's own HA entities keep their last values
+                // (they gate on the shared channel availability topic, so
+                // battery%d/poll_alarm is the visible sign of the failure).
                 for (int cell = 0; cell < 16; cell++) {
                     float v = batteries_[batt].cell_voltages[cell];
                     if (v > 0.1f) {

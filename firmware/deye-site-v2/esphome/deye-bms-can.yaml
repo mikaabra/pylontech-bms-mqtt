@@ -30,10 +30,6 @@ esphome:
     priority: -100
     then:
       - lambda: |-
-          id(logger_level_global).set_log_level(ESPHOME_LOG_LEVEL_WARN);
-          id(logger_level) = "WARN";
-          id(debug_level_sensor).publish_state("WARN");
-      - lambda: |-
           id(pylontech_can) = (void*) new PylontechCAN("${can_prefix}", ${num_batteries}, "${device_name}/status");
           id(pylontech_rs485) = (void*) new PylontechRS485(id(rs485_uart), "${rs485_prefix}", ${num_batteries}, ${pylontech_addr}, "${device_name}/status");
 
@@ -43,9 +39,11 @@ esp32:
     type: esp-idf
 
 logger:
-  # compile-time level is a ceiling for set_log_level; DEBUG here so the
-  # Toggle Debug Logging button can raise the runtime level from boot-time WARN
+  # level is the compile-time ceiling; using initial_level instead of an
+  # on_boot downshift, the device boots at WARN with DEBUG compiled in,
+  # which the Toggle Debug Logging button can raise at runtime
   level: DEBUG
+  initial_level: WARN
   id: logger_level_global
 
 wifi:
@@ -167,6 +165,9 @@ interval:
       - lambda: |-
           if (!id(pylontech_can) || !id(pylontech_rs485)) return;
           bool connected = id(mqtt_client).is_connected();
+          // Note: this poll runs every 3s, so a disconnect shorter than one
+          // poll period is invisible here - values lost in such a gap wait
+          // for the change/hysteresis heartbeats (60s numerics, 5min strings).
           if (connected) {
             if (id(mqtt_was_connected) && id(mqtt_disconnect_count) > 0) {
               // Short gap (below the 6s debounce): discovery survives retained,
