@@ -188,10 +188,41 @@ static void test_alarm_full() {
     check_str(out.warnings, "cell_overvolt_alarm,cell_overvolt_protect,pack_overvolt_protect",
               "alarm full: warnings (overvolt = warnings)");
     check_str(out.alarms, "cell_undervolt_protect,charge_overcurrent,pack_undervolt",
-              "alarm full: alarms (undervolt protects only)");
+              "alarm full: alarms (uv protects + charge/module statuses)");
     check(out.cw_active, "alarm full: cw active");
     check_str(out.cw_cells, "1,3,16", "alarm full: cw cells");
     check_str(out.state, "Discharge,Charge,Full", "alarm full: state");
+}
+
+static void test_alarm_module_overvolt() {
+    // module-voltage status 0x02 raises pack_overvolt as an ALARM (the
+    // voltage-status byte treats overvolt as warnings - two different
+    // sources, see the decode comment)
+    std::string data = std::string(ALARM_FULL);
+    data.replace(50, 2, "02");  // module voltage byte: 0x01 -> 0x02
+    BatteryData out;
+    check(rs485_parse_alarm_info(data, out), "alarm module-overvolt: parse ok");
+    check_str(out.alarms, "cell_undervolt_protect,charge_overcurrent,pack_overvolt",
+              "alarm module-overvolt: pack_overvolt is an alarm from the status byte");
+    check_str(out.overvolt_cells, "3", "alarm module-overvolt: rest of decode unchanged");
+}
+
+static void test_alarm_state_bits() {
+    // 0x10 = Standby
+    std::string standby = std::string(ALARM_FULL);
+    standby.replace(76, 2, "10");
+    BatteryData out;
+    check(rs485_parse_alarm_info(standby, out), "alarm states: standby parse ok");
+    check_str(out.state, "Standby", "alarm states: 0x10 -> Standby");
+
+    // 0x20 = Shutdown per PROTOCOL_REFERENCE.md, but the decoder stops at
+    // bit 4 (0x10), so a shutdown pack with no other bits shows Idle.
+    // Documents the known gap; the shutdown fix (reviewer round, pending
+    // captured real frames) must update this assertion to "Shutdown".
+    std::string shutdown = std::string(ALARM_FULL);
+    shutdown.replace(76, 2, "20");
+    check(rs485_parse_alarm_info(shutdown, out), "alarm states: shutdown parse ok");
+    check_str(out.state, "Idle", "alarm states: bit 5 (Shutdown) not decoded yet - known gap");
 }
 
 static void test_alarm_balance_gated() {
@@ -208,9 +239,11 @@ static void test_alarm_balance_gated() {
 }
 
 static void test_alarm_truncated_sections_default() {
-    // cut before the CW and balancing bytes: absent sections read as their
-    // defaults (documented alarm-path residual), parse still succeeds
-    std::string data = std::string(ALARM_FULL).substr(0, 67);
+    // cut at a byte boundary before the CW and balancing bytes: absent
+    // sections read as their defaults (documented alarm-path residual),
+    // parse still succeeds. When the alarm-truncation fix lands, this test
+    // must flip to asserting a parse failure.
+    std::string data = std::string(ALARM_FULL).substr(0, 66);
     BatteryData out;
     check(rs485_parse_alarm_info(data, out), "alarm truncated: parse ok");
     check(!out.cw_active, "alarm truncated: cw defaults off");
@@ -242,6 +275,8 @@ int main() {
     test_analog_truncated_atomic();
     test_analog_bad_hex();
     test_alarm_full();
+    test_alarm_module_overvolt();
+    test_alarm_state_bits();
     test_alarm_balance_gated();
     test_alarm_truncated_sections_default();
     test_alarm_bad_hex();

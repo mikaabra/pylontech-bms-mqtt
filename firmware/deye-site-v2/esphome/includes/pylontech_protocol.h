@@ -344,10 +344,18 @@ inline Rs485AnalogResult rs485_parse_analog_info(const std::string& data, Batter
 // byte where a field is expected; sections completely absent (short frame)
 // read as their defaults and still return true - this is the documented
 // alarm-path behavior (see "residual" note in pylontech_rs485.h publish_data
-// and the truncation follow-up recorded in the project ledger). Known
-// asymmetry, deliberate: only cell/pack undervolt PROTECT bits and the
-// charge-overcurrent/module-voltage statuses raise alarms; overvolt states
-// are warnings because they fire routinely at full charge.
+// and the truncation follow-up recorded in the project ledger).
+//
+// Alarm/warning split, two distinct sources (do not conflate them):
+// - voltage-status byte (ext_bit+8): the undervolt PROTECT bits (0x08/0x80)
+//   raise alarms; the other six bits are warnings, including all overvolt
+//   states - those fire routinely at full charge on these packs.
+// - status bytes (status_pos): charge status 0x02 raises charge_overcurrent
+//   and module-voltage 0x01/0x02 raises pack_undervolt/pack_overvolt, all
+//   as alarms in both directions.
+// The full-charge behavior of the status bytes is a pending check against
+// captured real frames (see the capture follow-up in the project ledger);
+// the code-as-documented split above is what ships today.
 inline bool rs485_parse_alarm_info(const std::string& data, BatteryData& out) {
     bool parse_ok = true;
     unsigned long hex_val;
