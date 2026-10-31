@@ -398,7 +398,7 @@ The vendor tool also probes MODBUS RTU in its scan loop (FC 0x04, register 0x800
 | `47` | read | int-parameter block | response LENID `A222` (273 info bytes = RTN + 272 = 136 × u16 slots); partial alignment below |
 | `49` | **write** | set one int parameter | INFO = `ParamIndex u16 BE` + `Value u16 BE` (4 bytes / 8 chars) |
 | `C9` | read | serial number | response contains ASCII SN |
-| `4F` | ? | knock/keepalive | zero-length INFO |
+| `4F` | probe | get protocol version | the scan-loop knock `~2600464F0000…`; per the official Pylontech V3.5 CID2 table, CID2 `0x4F` = "get communication protocol version" — the tool asking the battery which dialect it speaks |
 | `52` | probe | identity read | used with VER/CID1 `FF` and pack index 01–0F; answered with model/manufacturer strings |
 
 Response frames: VER `80`, ADR `00`, CID1 `D5`, CID2 echo `00` (RTN OK), LENID, INFO, CHKSUM. Write ack: `~8000D5000000FD9F\r` (LENID `0000`, empty INFO, RTN OK).
@@ -464,14 +464,56 @@ The full write path was then executed against the live stack: **pack 01, param 0
 1. The current single RS485 channel of the Waveshare ESP32-S3-RS485-CAN stays on the to-inverter port (polling + CAN must not regress).
 2. In-situ configuration needs a **second RS485 transceiver** (external MAX3485-class on free GPIOs; ESP32-S3 has a spare UART) tapped onto the battery-battery chain.
 3. Injected frames are ~30 ms at 9600 against ~400 ms measured idle per poll slot. Gap-injection validated experimentally (probe above); a client that passively times the poll cadence before sending is the safe design, with single retry on no-ack.
-4. Remaining unknowns: (a) ~~CID2 49 write in-stack~~ — **resolved 2026-10-31**, executed and verified (see above); (b) the D547 parameter-block layout beyond the balance region (indices 0–5 plus the 0x49–0x4F neighborhood confirmed; full scripted decode against the repo XML pending); (c) current/capacity field scales in the CID2 42 tail.
+4. Remaining unknowns: (a) ~~CID2 49 write in-stack~~ — **resolved 2026-10-31**, executed and verified (see above); (b) the D547 parameter-block layout beyond the balance region (indices 0–5 plus the 0x49–0x4F neighborhood confirmed; full scripted decode against the repo XML pending); (c) current/capacity field scales in the CID2 42 tail; (d) the CID2 and exact framing of the teleControl write (`SYS_OFF`/`Recovery`) — expected from a capture of the vendor tool's power buttons; (e) whether `SYS_OFF` on these packs is reboot-under-load or true sleep (one in-stack experiment, only after (d)).
+
+### Control register and remote reset (teleControl)
+
+The XML `teleControl_Group` defines a **2-byte control block** (`teleCtrlByteNum: 2`):
+
+| Bit | Name | Type | Meaning |
+|-----|------|------|---------|
+| 0 | DISCHG Ctrl | OnOff | Discharge FET |
+| 1 | CHG_Ctrl | OnOff | Charge FET |
+| 2 | LMCHG_Ctrl | OnOff | Charge-limiter FET |
+| 3 | Heat_Ctrl | OnOff | Heater |
+| 4 | **SYS_OFF** | Simple | Shut the pack down |
+| 5 | **Recovery** | Simple | Bring it back |
+
+Remote reset is therefore designed into the BMS. **The exact CID2 carrying this write on the BMS073 variant has not yet been observed.** Family evidence for its shape and semantics:
+
+- V-KING/TAICO spec: CID2 `E2` = "MOS / current-limit control", write, INFO = pack + 2-byte mask — matches the 2-byte control-block shape
+- Pylontech V3.5 (official family doc): CID2 `0x95` = per-battery turnoff; RTN codes `01`=VER error, `02`=CHKSUM error, `03`=LCHKSUM error, `04`=CID2 invalid, `06`=invalid INFO data
+- PACE BMSes (same ecosystem, per esphome-pace-bms documentation): **a shutdown command sent while the pack is actively charging or discharging causes the BMS to reinitialize and immediately wake back up — effectively a remote reboot.** A shutdown sent to an idle pack puts it into genuine sleep, with documented wake paths: charge activation, **communication activation** (frames on the bus), or manual reset — matching the `Recovery` bit and the "Communication Wake Up" parameter (bit_para, ByteIndex 5 bit 7)
+
+**Targets for the eventual automation:** capture the vendor tool's power-off/power-on buttons (same USBPcap method as the parameter-write capture) to pin the exact frames; run one deliberate in-stack reboot experiment on a pack *that is charging/discharging at the moment of reset*; only then schedule preventive reboots. Two sequencing constraints: never `SYS_OFF` an idle pack without a prepared wake (Recovery frame or incoming charge current), and treat a pack that doesn't rejoin within a few seconds as failed-reset — don't retry blind.
+
+### Known family behavior: the periodic-reset problem
+
+The production stack's symptom — packs need a reset every couple of months — is a documented pattern across this whole battery family, not specific to these units:
+
+- **Pylontech** (DIY Solar Forum, 2023): batteries stick in idle at/near 100% SOC and refuse to discharge until the red power button resets them; a later inverter firmware fix reportedly "pings the batteries with a low-level charge to keep them from going to sleep"
+- **Shoto** (Power Forum, "Shoto battery problems endless" thread, same brand as these packs): master pack showing dead until a 2-minute button-hold reset
+- Vendor-confirmed BMS logic (Victron community): no charge/discharge for 3 days → pack auto-shutdowns into sleep; the master then reports internal alarms to the inverter
+
+Implication: a scheduled, staggered, one-pack-at-a-time **reboot-under-load** via the Link bus is a sanctioned preventive for a known family weakness — and the config bridge makes it a HA automation instead of a battery-shed ritual.
+
+### Config-bridge deployment note
+
+- **Dedicated second Waveshare ESP32-S3-RS485-CAN is the recommended form** (onboard RS485 → Link bus; CAN port unused): one device per role per fleet convention, and a config tool must not share a fault domain with the production battery monitor.
+- Full-time passive listening on the Link bus is free (a receiver never keys the transmitter) and yields per-pack telemetry at the master's 624 ms slot cadence — including balance FET and CW flags (the CID2 `44` response family layout from section 2; exact D5-`44` INFO mapping to be decoded when balancing actually runs), which directly supports the pack-balancing workflow as HA history.
+- The config dialect is proven on this bus end-to-end (write → ack → read-back, 2026-10-31); remaining implementation risk is confined to the un-observed teleControl write.
 
 ### References for this section
 
 - Capture: `usb-bms-bqadmin-update-3421-then-3420.pcapng` (kept out of the repo; analysis transcripts summarized above)
-- `BMS073-H17-BL08-16S-en-US.xml` (repo root) — vendor tool protocol profile: telemetry layouts, int/bit parameter tables, index 0x4C
+- `BMS073-H17-BL08-16S-en-US.xml` (repo root) — vendor tool protocol profile: telemetry layouts, int/bit parameter tables, teleControl group, index 0x4C
 - [taico-bms-unleashed V-KING/TAICO protocol spec](https://github.com/Gesiima/taico-bms-unleashed/blob/main/VKING_BMS_Protokoll_Spezifikation.md) — same protocol family, independently reverse-engineered; documents the CID2 command set (42/44/47/49/4B/4C/4D/4E/E2/E5/E9/EB/ED/EF/F1/F2) and the local-only GUI password design
 - Shoto SDA10-48100 BMS Modbus RTU protocol v0.3 (Scribd) — the MODBUS dialect probed by the tool; register 0x8000 = identification block, addresses 0–15 via DIP switch
+- [Pylontech RS485 protocol V3.5 (PDF)](https://www.basenpower.com/wp-content/uploads/2026/07/PYLON-485-ProtocolV3.5.pdf) — official family CID2 table: `0x4F` get-protocol-version, `0x95` per-battery turnoff, RTN codes
+- [esphome-pace-bms (nkinnan)](https://github.com/nkinnan/esphome-pace-bms) — ESPHome component for PACE-family BMSes; documents the shutdown command's reboot-when-under-load semantics
+- [esphome-pace-bms (syssi)](https://github.com/syssi/esphome-pace-bms/) — PACE_MODBUS variant, tested-hardware list, ESP32+RS485 wiring reference
+- [Pylontech batteries in protect mode, will not discharge without reset (DIY Solar Forum, 2023)](https://diysolarforum.com/threads/pylontech-batteries-apparently-in-protect-mode-will-not-discharge-without-reset.62153/) — family periodic-reset reports
+- Shoto battery problems thread (Power Forum, powerforum.co.za/topic/10636) — Shoto-specific master-pack reset cases
 
 ## EPever Inverter Protocols
 
