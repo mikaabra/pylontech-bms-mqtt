@@ -233,7 +233,15 @@ public:
                                     }
                                 }
                                 ESP_LOGI("rs485", "Batt %d: %.3fV %.2fA SOC=%.0f%%", batt, batteries_[batt].voltage, batteries_[batt].current, batteries_[batt].soc);
+                            } else {
+                                // checksum-valid frame without a data section: still a failed poll
+                                ESP_LOGW("rs485", "Batt %d analog response data too short: %d bytes", batt, (int)data.length());
+                                handle_analog_failure(batt);
                             }
+                        } else {
+                            // length <= 18 passes validation but carries no data: still a failed poll
+                            ESP_LOGW("rs485", "Batt %d analog response too short: %d bytes", batt, (int)response.length());
+                            handle_analog_failure(batt);
                         }
                     }
                     current_batt_ = (batt + 1) % num_batteries_;
