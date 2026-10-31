@@ -203,15 +203,15 @@ public:
         float v2 = can_le_u16(x[6], x[7]) / 1000.0f;
 
         uint32_t now = millis();
-        bool heartbeat = (now - last_extremes_publish_ >= 60000);
+        uint32_t temp_heartbeat = (now - last_temp_publish_ >= 60000);
+        uint32_t cell_heartbeat = (now - last_cell_publish_ >= 60000);
         char val[16];
-        bool any_published = false;
 
         if (tmin >= -10.0f && tmax <= 50.0f) {
             bool temp_changed = hys_temp_min_.first ||
                                 (fabs(tmin - hys_temp_min_.last_val) >= 0.5f) ||
                                 (fabs(tmax - hys_temp_max_.last_val) >= 0.5f);
-            if (temp_changed || heartbeat) {
+            if (temp_changed || temp_heartbeat) {
                 snprintf(val, sizeof(val), "%.1f", tmin);
                 publish_topic("/ext/temp_min", val);
                 snprintf(val, sizeof(val), "%.1f", tmax);
@@ -220,7 +220,7 @@ public:
                 hys_temp_min_.first = false;
                 hys_temp_max_.last_val = tmax;
                 hys_temp_max_.first = false;
-                any_published = true;
+                last_temp_publish_ = now;
             }
         }
 
@@ -241,7 +241,7 @@ public:
             bool cell_changed = hys_cell_v_min_.first ||
                                 (fabs(vmin - hys_cell_v_min_.last_val) >= 0.005f) ||
                                 (fabs(vmax - hys_cell_v_max_.last_val) >= 0.005f);
-            if (cell_changed || heartbeat) {
+            if (cell_changed || cell_heartbeat) {
                 float delta = vmax - vmin;
                 snprintf(val, sizeof(val), "%.3f", vmin);
                 publish_topic("/ext/cell_v_min", val);
@@ -253,12 +253,8 @@ public:
                 hys_cell_v_min_.first = false;
                 hys_cell_v_max_.last_val = vmax;
                 hys_cell_v_max_.first = false;
-                any_published = true;
+                last_cell_publish_ = now;
             }
-        }
-
-        if (any_published) {
-            last_extremes_publish_ = now;
         }
     }
 
@@ -592,7 +588,8 @@ private:
     HysteresisFloat hys_temp_max_;
     HysteresisFloat hys_cell_v_min_;
     HysteresisFloat hys_cell_v_max_;
-    uint32_t last_extremes_publish_ = 0;
+    uint32_t last_temp_publish_ = 0;
+    uint32_t last_cell_publish_ = 0;
 
     bool prot_overvolt_ = false;
     bool prot_undervolt_ = false;
@@ -635,7 +632,8 @@ private:
         last_flags_value_ = 0;
         last_flags_publish_ = 0;
         last_soc_publish_ = 0;
-        last_extremes_publish_ = 0;
+        last_temp_publish_ = 0;
+        last_cell_publish_ = 0;
         last_charge_state_ = 0xFF;
         last_charge_publish_ = 0;
         last_decoded_state_ = 0;
