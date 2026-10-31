@@ -215,14 +215,13 @@ static void test_alarm_state_bits() {
     check(rs485_parse_alarm_info(standby, out), "alarm states: standby parse ok");
     check_str(out.state, "Standby", "alarm states: 0x10 -> Standby");
 
-    // 0x20 = Shutdown per PROTOCOL_REFERENCE.md, but the decoder stops at
-    // bit 4 (0x10), so a shutdown pack with no other bits shows Idle.
-    // Documents the known gap; the shutdown fix (reviewer round, pending
-    // captured real frames) must update this assertion to "Shutdown".
+    // 0x20 = Shutdown, decoded from the documented operating-state table in
+    // PROTOCOL_REFERENCE.md. No captured frame has shown the bit set yet, so
+    // it is unconfirmed on hardware; the capture issue (#36) should validate.
     std::string shutdown = std::string(ALARM_FULL);
     shutdown.replace(76, 2, "20");
     check(rs485_parse_alarm_info(shutdown, out), "alarm states: shutdown parse ok");
-    check_str(out.state, "Idle", "alarm states: bit 5 (Shutdown) not decoded yet - known gap");
+    check_str(out.state, "Shutdown", "alarm states: bit 5 (Shutdown) decoded from documented layout");
 }
 
 static void test_alarm_balance_gated() {
@@ -241,8 +240,8 @@ static void test_alarm_balance_gated() {
 static void test_alarm_truncated_sections_default() {
     // cut at a byte boundary before the CW and balancing bytes: absent
     // sections read as their defaults (documented alarm-path residual),
-    // parse still succeeds. When the alarm-truncation fix lands, this test
-    // must flip to asserting a parse failure.
+    // parse still succeeds. When the alarm-truncation fix lands (#37), this
+    // test must flip to asserting a parse failure.
     std::string data = std::string(ALARM_FULL).substr(0, 66);
     BatteryData out;
     check(rs485_parse_alarm_info(data, out), "alarm truncated: parse ok");

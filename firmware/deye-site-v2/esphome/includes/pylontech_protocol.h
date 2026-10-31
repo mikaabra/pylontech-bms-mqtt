@@ -343,8 +343,8 @@ inline Rs485AnalogResult rs485_parse_analog_info(const std::string& data, Batter
 // *_mosfet, warnings, alarms, cw_*, state). Returns false on any non-hex
 // byte where a field is expected; sections completely absent (short frame)
 // read as their defaults and still return true - this is the documented
-// alarm-path behavior (see "residual" note in pylontech_rs485.h publish_data
-// and the truncation follow-up recorded in the project ledger).
+// alarm-path behavior (see the "residual" note in pylontech_rs485.h
+// publish_data; the fix is tracked in #37).
 //
 // Alarm/warning split, two distinct sources (do not conflate them):
 // - voltage-status byte (ext_bit+8): the undervolt PROTECT bits (0x08/0x80)
@@ -352,9 +352,9 @@ inline Rs485AnalogResult rs485_parse_analog_info(const std::string& data, Batter
 //   states - those fire routinely at full charge on these packs.
 // - status bytes (status_pos): charge status 0x02 raises charge_overcurrent
 //   and module-voltage 0x01/0x02 raises pack_undervolt/pack_overvolt, all
-//   as alarms in both directions.
+// as alarms in both directions.
 // The full-charge behavior of the status bytes is a pending check against
-// captured real frames (see the capture follow-up in the project ledger);
+// captured real frames (tracked in #36);
 // the code-as-documented split above is what ships today.
 inline bool rs485_parse_alarm_info(const std::string& data, BatteryData& out) {
     bool parse_ok = true;
@@ -488,6 +488,10 @@ inline bool rs485_parse_alarm_info(const std::string& data, BatteryData& out) {
                         if (last_byte & 0x04) { if (!state_str.empty()) state_str += ","; state_str += "Float"; }
                         if (last_byte & 0x08) { if (!state_str.empty()) state_str += ","; state_str += "Full"; }
                         if (last_byte & 0x10) { if (!state_str.empty()) state_str += ","; state_str += "Standby"; }
+                        // bit 5 Shutdown: decoded from the documented operating-state
+                        // table in PROTOCOL_REFERENCE.md; not yet confirmed on hardware
+                        // (no captured frame has shown the bit set - see #36)
+                        if (last_byte & 0x20) { if (!state_str.empty()) state_str += ","; state_str += "Shutdown"; }
                     }
                 }
             }
