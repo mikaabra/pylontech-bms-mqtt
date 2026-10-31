@@ -445,14 +445,26 @@ Passive read-only sniff of the assembled stack's battery-battery bus (10 minutes
 - **Pack 01 answered in ~15 ms** with the standard `B07E` analog block (battery number `0001`, RTN `00`) — packs accept third-party client frames while stacked.
 - **The master was undisturbed:** its next poll left on schedule 360 ms later, no retry, and its own poll of pack 01 shortly after returned matching cell data.
 
-Conclusion: in-situ configuration is proven at the protocol level for reads; the identical envelope applies to writes (CID2 `49`). The one remaining unexecuted experiment is a real parameter write in-stack — planned as the next genuine configuration change (with read-back verification), not a synthetic test.
+Conclusion: in-situ configuration is proven at the protocol level for reads; the identical envelope applies to writes (CID2 `49`).
+
+### Executed in-stack parameter write (2026-10-31)
+
+The full write path was then executed against the live stack: **pack 01, param 0x4C (Start Balance Voltage), 3.420 V → 3.430 V** (`0x0D5C` → `0x0D66`), the user's requested change.
+
+1. **Write** (gap-injected, single frame): `~8000D5498008014C0D66FBCA\r`
+   → ack `~8000D5000000FD9F\r` (RTN `00`, byte-identical to the tool-session ack format). Exactly **one** ack arrived — on a 4-pack bus, a broadcast write would have produced overlapping acks from all packs, so this also confirms pack-addressed semantics for the INFO `[pack][param][value]` parse (the tool's standalone write INFO `004C0D5D` is the same shape with pack `00` — the standalone battery self-identified as battery `00`).
+2. **Targeted short reads are unsupported**: CID2 `47` with extended INFO (`014C`) is silently ignored — the only parameter read is the full `A222` block (546-char INFO, ~590 ms on the wire at 9600).
+3. **Read-back**: the block read overruns the ~445 ms idle window by ~180 ms, colliding with the master's next poll — accepted once, knowing the stack natively tolerates dropped slots (the 1264 ms double-slots in healthy operation). Result: response INFO = battery number (`01`) + parameter array; **`0D66` present at exactly the predicted slot 308, old `0D5C` gone**, checksum garbled only in the tail *after* the balance region by the predicted collision. Total disruption: one garbled master slot, immediate recovery (19/19 exchanges in the following health window, all four packs on cadence).
+4. **In-stack 47-response layout note**: response INFO begins with the **battery number** (`01…`) followed directly by the parameter array — the standalone capture's leading `00` was the same field (battery `00`).
+
+**In-situ configuration is now proven end-to-end on the live stack: gap-injected write → ack → read-back confirmation, stacked and operating.** Remaining work is purely implementation: the Mac-side tool and/or the ESP32 second-UART feature both have a verified protocol and a measured bus to run on.
 
 ### ESP32 in-situ configuration — design implications
 
 1. The current single RS485 channel of the Waveshare ESP32-S3-RS485-CAN stays on the to-inverter port (polling + CAN must not regress).
 2. In-situ configuration needs a **second RS485 transceiver** (external MAX3485-class on free GPIOs; ESP32-S3 has a spare UART) tapped onto the battery-battery chain.
 3. Injected frames are ~30 ms at 9600 against ~400 ms measured idle per poll slot. Gap-injection validated experimentally (probe above); a client that passively times the poll cadence before sending is the safe design, with single retry on no-ack.
-4. Remaining unknowns: (a) whether a CID2 49 **write** sticks on a slave pack without disturbing the master's view of the stack (deferred to the next real configuration change, per above); (b) the D547 parameter-block layout beyond indices 0–5 (scripted decode against the repo XML pending); (c) current/capacity field scales in the CID2 42 tail.
+4. Remaining unknowns: (a) ~~CID2 49 write in-stack~~ — **resolved 2026-10-31**, executed and verified (see above); (b) the D547 parameter-block layout beyond the balance region (indices 0–5 plus the 0x49–0x4F neighborhood confirmed; full scripted decode against the repo XML pending); (c) current/capacity field scales in the CID2 42 tail.
 
 ### References for this section
 
