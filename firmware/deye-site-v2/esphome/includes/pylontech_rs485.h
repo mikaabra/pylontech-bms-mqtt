@@ -184,7 +184,9 @@ public:
                                         int reported_temps = num_temps;
                                         for (int t = 0; t < num_temps && t < 6 && data.length() >= idx + 4; t++) {
                                             if (!parse_hex(data.substr(idx, 4), hex_val)) { parse_ok = false; break; }
-                                            temp_cell_temps[t] = (hex_val - 2731) / 10.0f;
+                                            // temps are 0.1K units; cast before the 273.1K offset or
+                                            // sub-zero values wrap in unsigned arithmetic
+                                            temp_cell_temps[t] = ((int32_t)hex_val - 2731) / 10.0f;
                                             idx += 4;
                                         }
                                         idx += (reported_temps > 6) ? (reported_temps - 6) * 4 : 0;
