@@ -132,6 +132,7 @@ public:
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         ESP_LOGI("mqtt", "Publishing diagnostic discovery...");
         char topic[160], payload[768];
+        PublishPacer pacer;
         const char* device_json = R"("device":{"identifiers":["rack_solar_bridge"],"name":"Rack Solar Bridge","model":"Waveshare ESP32-S3","manufacturer":"ESPHome"})";
         // diagnostics report channel state as their VALUE (STALE/OK, DISCONNECTED...):
         // gating their availability on the channel topic would hide exactly that
@@ -157,8 +158,8 @@ public:
                                         diag_sensors[i][2], diag_sensors[i][3], diag_sensors[i][4],
                                         diag_avail, device_json, "", "diagnostic")) {
                 esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                pacer.pace();
             }
-            if (i % 5 == 4) yield();
         }
         ESP_LOGI("mqtt", "Diagnostic discovery published");
     }
