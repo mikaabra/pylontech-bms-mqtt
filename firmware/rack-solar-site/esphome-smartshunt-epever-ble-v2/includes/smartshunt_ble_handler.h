@@ -118,6 +118,13 @@ public:
         publish_diagnostic_discovery();
     }
 
+    // short MQTT gap (< 6s debounce): discovery survives (retained), but
+    // value updates lost during the outage must be re-sent
+    void on_short_reconnect() {
+        availability_.on_connect(esphome::mqtt::global_mqtt_client);
+        reset_hysteresis();
+    }
+
     void publish_diagnostic_discovery() {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         ESP_LOGI("mqtt", "Publishing diagnostic discovery...");

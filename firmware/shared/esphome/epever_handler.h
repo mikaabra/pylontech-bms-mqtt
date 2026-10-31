@@ -122,6 +122,16 @@ public:
         publish_discovery();
     }
 
+    // short MQTT gap (< 6s debounce): discovery survives (retained), but
+    // value updates lost during the outage must be re-sent
+    void on_short_reconnect() {
+        pv_avail_.on_connect(esphome::mqtt::global_mqtt_client);
+        controller_avail_.on_connect(esphome::mqtt::global_mqtt_client);
+        battery_avail_.on_connect(esphome::mqtt::global_mqtt_client);
+        overall_avail_.on_connect(esphome::mqtt::global_mqtt_client);
+        reset_hysteresis();
+    }
+
     void publish_discovery() {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
         char topic[160], payload[768];
