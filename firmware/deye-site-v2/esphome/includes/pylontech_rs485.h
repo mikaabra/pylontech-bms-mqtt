@@ -137,11 +137,18 @@ public:
                                 float temp_current = 0.0f, temp_voltage = 0.0f;
                                 float temp_remain_ah = 0.0f, temp_total_ah = 0.0f;
                                 int temp_cycles = 0;
+                                // completeness tracking: a truncated frame must not be committed,
+                                // or missing fields overwrite good values with zeros
+                                int cells_read = 0, temps_read = 0;
+                                int num_temps = 0;
+                                bool temp_count_read = false;
+                                bool current_read = false, voltage_read = false, remain_read = false, total_read = false, cycles_read = false;
 
                                 for (int cell = 0; cell < num_cells && cell < 16 && data.length() >= idx + 4; cell++) {
                                     if (!parse_hex(data.substr(idx, 4), hex_val)) { parse_ok = false; break; }
                                     temp_cell_voltages[cell] = hex_val / 1000.0f;
                                     idx += 4;
+                                    cells_read++;
                                 }
                                 if (!parse_ok) {
                                     ESP_LOGW("rs485", "Batt %d analog: bad hex cell voltage", batt);
@@ -155,8 +162,9 @@ public:
                                 if (data.length() >= idx + 2) {
                                     if (!parse_hex(data.substr(idx, 2), hex_val)) { parse_ok = false; }
                                     else {
-                                        int num_temps = (int)hex_val;
+                                        num_temps = (int)hex_val;
                                         idx += 2;
+                                        temp_count_read = true;
                                         int reported_temps = num_temps;
                                         for (int t = 0; t < num_temps && t < 6 && data.length() >= idx + 4; t++) {
                                             if (!parse_hex(data.substr(idx, 4), hex_val)) { parse_ok = false; break; }
@@ -164,6 +172,7 @@ public:
                                             // sub-zero values wrap in unsigned arithmetic
                                             temp_cell_temps[t] = ((int32_t)hex_val - 2731) / 10.0f;
                                             idx += 4;
+                                            temps_read++;
                                         }
                                         idx += (reported_temps > 6) ? (reported_temps - 6) * 4 : 0;
                                     }
@@ -183,27 +192,50 @@ public:
                                         if (raw > 0x7FFF) raw -= 0x10000;
                                         temp_current = raw / 100.0f;
                                         idx += 4;
+                                        current_read = true;
                                     }
                                 }
                                 if (parse_ok && data.length() >= idx + 4) {
                                     if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
-                                    else { temp_voltage = hex_val / 100.0f; idx += 4; }
+                                    else { temp_voltage = hex_val / 100.0f; idx += 4; voltage_read = true; }
                                 }
                                 if (parse_ok && data.length() >= idx + 4) {
                                     if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
-                                    else { temp_remain_ah = hex_val / 100.0f; idx += 4; }
+                                    else { temp_remain_ah = hex_val / 100.0f; idx += 4; remain_read = true; }
                                 }
-                                if (parse_ok) idx += 2;
+                                if (parse_ok && remain_read) idx += 2;
                                 if (parse_ok && data.length() >= idx + 4) {
                                     if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
-                                    else { temp_total_ah = hex_val / 100.0f; idx += 4; }
+                                    else { temp_total_ah = hex_val / 100.0f; idx += 4; total_read = true; }
                                 }
                                 if (parse_ok && data.length() >= idx + 4) {
                                     if (!parse_hex(data.substr(idx, 4), hex_val)) parse_ok = false;
-                                    else { temp_cycles = (int)hex_val; }
+                                    else { temp_cycles = (int)hex_val; cycles_read = true; }
                                 }
                                 if (!parse_ok) {
                                     ESP_LOGW("rs485", "Batt %d analog: bad hex in current/voltage/ah/cycles", batt);
+                                    handle_analog_failure(batt);
+                                    current_batt_ = (batt + 1) % num_batteries_;
+                                    last_analog_poll_ = now;
+                                    state_ = 0;
+                                    return;
+                                }
+
+                                // all reported sections must have been read before committing;
+                                // a truncated frame would otherwise zero out live values and
+                                // clear an active poll alarm
+                                bool frame_complete = parse_ok
+                                    && cells_read == (num_cells < 16 ? num_cells : 16)
+                                    && temp_count_read
+                                    && temps_read == (num_temps < 6 ? num_temps : 6)
+                                    && current_read && voltage_read && remain_read
+                                    && total_read && cycles_read;
+                                if (!frame_complete) {
+                                    ESP_LOGW("rs485", "Batt %d analog frame truncated: %d/%d cells, %d/%d temps, cur=%d v=%d rem=%d tot=%d cyc=%d",
+                                             batt, cells_read, num_cells, temps_read, num_temps,
+                                             current_read ? 1 : 0, voltage_read ? 1 : 0,
+                                             remain_read ? 1 : 0, total_read ? 1 : 0,
+                                             cycles_read ? 1 : 0);
                                     handle_analog_failure(batt);
                                     current_batt_ = (batt + 1) % num_batteries_;
                                     last_analog_poll_ = now;
