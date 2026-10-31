@@ -491,9 +491,11 @@ inline bool rs485_parse_alarm_info(const std::string& data, BatteryData& out) {
                         // bit 5 Shutdown: 0x20 in the vendor parameter file's
                         // mode-text table (BMS073-H17-BL08-16S-en-US.xml, same
                         // sequence as Charge/Float/Full/Standby - stronger
-                        // evidence than our own doc). Normal traffic never
-                        // shows the bit, so it stays unconfirmed on hardware
-                        // unless a pack is ever seen in shutdown (#36)
+                        // evidence than our own doc). Normal traffic isn't
+                        // expected to show the bit (no real frames captured
+                        // yet; the #36 captures are what test it), so it
+                        // stays unconfirmed on hardware unless a pack is
+                        // ever seen in shutdown
                         if (last_byte & 0x20) { if (!state_str.empty()) state_str += ","; state_str += "Shutdown"; }
                     }
                 }
