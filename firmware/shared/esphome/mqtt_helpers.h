@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <cstdarg>
 #include <cstring>
+#include "esphome/core/application.h"
 
 inline bool safe_snprintf(char* buf, size_t size, const char* fmt, ...) {
     va_list args;
@@ -21,6 +22,9 @@ struct PublishPacer {
     void pace() {
         count++;
         if (count % yield_every == 0) {
+            // yield() alone is a scheduler hint (vPortYield) and does not
+            // guarantee a task-watchdog reset; App.feed_wdt() does
+            App.feed_wdt();
             yield();
         }
     }
