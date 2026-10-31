@@ -194,8 +194,11 @@ public:
         last_can_rx_ = millis(); has_can_rx_ = true;
         availability_.mark_online(esphome::mqtt::global_mqtt_client);
 
-        float t1 = can_le_u16(x[0], x[1]) / 10.0f;
-        float t2 = can_le_u16(x[2], x[3]) / 10.0f;
+        // 0x370 temperatures are int16 0.1C, two's complement like the signed
+        // 0x356 fields in the Pylontech V1.2 spec; decode signed so sub-zero
+        // values don't wrap to ~6500C and trip the sanity gate
+        float t1 = ((int16_t)can_le_u16(x[0], x[1])) / 10.0f;
+        float t2 = ((int16_t)can_le_u16(x[2], x[3])) / 10.0f;
         float tmin = (t1 <= t2) ? t1 : t2;
         float tmax = (t1 > t2) ? t1 : t2;
 
@@ -207,7 +210,9 @@ public:
         uint32_t cell_heartbeat = (now - last_cell_publish_ >= 60000);
         char val[16];
 
-        if (tmin >= -10.0f && tmax <= 50.0f) {
+        // -40..100C sanity gate matches the RS485 handler; readings outside it
+        // indicates a broken sensor, not an extreme battery - filter silently
+        if (tmin >= -40.0f && tmax <= 100.0f) {
             bool temp_changed = hys_temp_min_.first ||
                                 (fabs(tmin - hys_temp_min_.last_val) >= 0.5f) ||
                                 (fabs(tmax - hys_temp_max_.last_val) >= 0.5f);
