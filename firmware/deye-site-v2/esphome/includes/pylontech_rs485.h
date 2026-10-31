@@ -1073,6 +1073,8 @@ private:
                         if (!parse_hex(data.substr(ext_bit_start + 8, 2), hex_val)) parse_ok = false;
                         else {
                             int voltage_status = (int)hex_val;
+                            // asymmetry is deliberate: overvolt protects fire routinely at full
+                            // charge (informational per the Python prototype), undervolt are alarms
                             if (voltage_status & 0x01) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "cell_overvolt_alarm"; }
                             if (voltage_status & 0x02) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "cell_overvolt_protect"; }
                             if (voltage_status & 0x04) { if (!warnings_str.empty()) warnings_str += ","; warnings_str += "cell_undervolt_alarm"; }
