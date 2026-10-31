@@ -33,7 +33,8 @@ HEADER_CHARS = 12        # VER+ADR+CID1+CID2 (8) + LENID (4) before INFO
 # it is maintained per field. Signed set (high bit set, negative is the only
 # plausible reading): the discharge-current alarm/protect family 0x31/0x32/
 # 0x37/0x39/0x3B (-100/-105/-110/-120/-412 A at rest) and the PCS fields
-# 0x5C/0x79 (which carry the 0xD8F0 unset-marker pattern). Explicitly
+# 0x5C/0x79 (0x5C decodes -1000 A, mirroring 0x5B's +1000 A charge limit -
+# an ordinary limit, not a marker). Explicitly
 # unsigned despite a high raw: 0x59/0x5A, the PCS charge/discharge cut-off
 # voltages 55.5 V / 44.5 V. test_bms073 walks every raw >= 0x8000 against
 # this classification so a newly-high index cannot pass unclassified.
