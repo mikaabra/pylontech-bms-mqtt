@@ -73,11 +73,13 @@ public:
     }
 
     void handle_battery_voltage(float x) {
-        if (!std::isfinite(x) || x < 15.0f || x > 30.0f) return;
+        // reject only impossible values; a deep-discharge collapse below the
+        // nominal window is a real fault the dashboards must see, not garbage
+        if (!std::isfinite(x) || x < 0.0f || x > 75.0f) return;
         last_battery_rx_ = millis(); has_battery_rx_ = true;
         battery_avail_.mark_online(esphome::mqtt::global_mqtt_client);
         refresh_overall();
-        if (hys_batt_v_.check(x, 0.1f, 15.0f, 30.0f)) {
+        if (hys_batt_v_.check(x, 0.1f, 0.0f, 75.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.2f", x);
             publish_topic("battery_voltage", val);
         }

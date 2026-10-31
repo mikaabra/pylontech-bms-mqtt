@@ -23,7 +23,9 @@ public:
     SmartShuntBLEHandler() : availability_("rack-solar/smartshunt/status") {}
 
     void handle_battery_voltage(float x) {
-        if (hys_volt_.check(x, 0.1f, 15.0f, 35.0f)) {
+        // reject only impossible values; a deep-discharge collapse below the
+        // nominal window is a real fault the dashboards must see, not garbage
+        if (hys_volt_.check(x, 0.1f, 0.0f, 100.0f)) {
             char val[16]; snprintf(val, sizeof(val), "%.2f", x);
             publish_topic("battery_voltage", val);
         }
@@ -206,7 +208,7 @@ private:
     uint32_t ble_last_message_time_ = 0;
 
     // Hysteresis for 6 BLE sensors
-    HysteresisFloat hys_volt_;         // battery_voltage: 0.1V, 15-35V
+    HysteresisFloat hys_volt_;         // battery_voltage: 0.1V, 0-100V (impossible-only gate)
     HysteresisFloat hys_current_;       // battery_current: 0.1A, -200 to 200A
     HysteresisInt   hys_soc_;           // state_of_charge: 1%, 0-100
     HysteresisFloat hys_power_;         // instantaneous_power: 5W, -10000 to 10000W
