@@ -79,6 +79,14 @@ Bitfield indicating various protection and alarm states. This message is depreca
 #### 0x35C - Battery Charge Request Flags (V1.2)
 **Length:** 1-2 bytes (only byte 0 is used)
 
+> **Observed on the production stack (2026-10):** the Shoto SDA10-48200 packs
+> send 0x35C as **8-byte** frames, and deye-bms-can (which requires 8 bytes)
+> logged zero frame-size errors over 14 days / 6.1M frames while
+> `deye_bms/can/charge_enabled` & co updated live. A strict 1-2 byte
+> Pylontech V1.2 pack (per Setfire captures) would be silently rejected by
+> the 8-byte check — if the fleet ever mixes vendors, watch
+> `deye_bms/diag/error_count` rising.
+
 **Byte 0 bit mapping (verified against [Setfire Labs documentation](https://www.setfirelabs.com/energy-monitoring/pylontech-battery-can-comms-v1-2-vs-v1-3)):**
 
 | Bit | Mask | Field Name | Meaning |
