@@ -127,16 +127,8 @@ public:
                         ESP_LOGW("rs485", "Batt %d analog poll failed: %s", batt, error.c_str());
                         handle_analog_failure(batt);
                     } else {
-                        if (batteries_[batt].analog_poll_failures > 0 || batteries_[batt].analog_poll_alarm) {
-                            batteries_[batt].analog_poll_failures = 0;
-                            if (batteries_[batt].analog_poll_alarm) {
-                                batteries_[batt].analog_poll_alarm = false;
-                                publish_poll_alarm(batt, false);
-                            }
-                        }
                         last_analog_rx_ = now;
                         has_analog_rx_ = true;
-                        batteries_[batt].has_analog = true;
                         availability_.mark_online(esphome::mqtt::global_mqtt_client);
 
                         if (response.length() > 18) {
@@ -246,6 +238,17 @@ public:
                                 if (batteries_[batt].total_ah > 0) {
                                     batteries_[batt].soc = (batteries_[batt].remain_ah / batteries_[batt].total_ah) * 100.0f;
                                 }
+                                batteries_[batt].has_analog = true;
+                                // reset the failure counter only once the data is
+                                // fully parsed, or "valid frame, bad data" retries
+                                // never accumulate to the alarm threshold
+                                if (batteries_[batt].analog_poll_failures > 0 || batteries_[batt].analog_poll_alarm) {
+                                    batteries_[batt].analog_poll_failures = 0;
+                                    if (batteries_[batt].analog_poll_alarm) {
+                                        batteries_[batt].analog_poll_alarm = false;
+                                        publish_poll_alarm(batt, false);
+                                    }
+                                }
                                 ESP_LOGI("rs485", "Batt %d: %.3fV %.2fA SOC=%.0f%%", batt, batteries_[batt].voltage, batteries_[batt].current, batteries_[batt].soc);
                             }
                         }
@@ -347,19 +350,19 @@ public:
                             ESP_LOGW("rs485", "Batt %d alarm response too short: %d bytes data", batt, data.length());
                             handle_alarm_failure(batt);
                         } else {
-                            if (batteries_[batt].alarm_poll_failures > 0 || batteries_[batt].alarm_poll_alarm) {
-                                batteries_[batt].alarm_poll_failures = 0;
-                                if (batteries_[batt].alarm_poll_alarm) {
-                                    batteries_[batt].alarm_poll_alarm = false;
-                                    publish_alarm_poll_alarm(batt, false);
-                                }
-                            }
                             batteries_[batt].has_alarm = true;
                             has_any_alarm_ = true;
                             if (!parse_alarm_data(batt, data)) {
                                 ESP_LOGW("rs485", "Batt %d alarm hex parse failure", batt);
                                 batteries_[batt].has_alarm = false;
                                 handle_alarm_failure(batt);
+                            } else if (batteries_[batt].alarm_poll_failures > 0 || batteries_[batt].alarm_poll_alarm) {
+                                // reset only after a fully parsed response (see analog path)
+                                batteries_[batt].alarm_poll_failures = 0;
+                                if (batteries_[batt].alarm_poll_alarm) {
+                                    batteries_[batt].alarm_poll_alarm = false;
+                                    publish_alarm_poll_alarm(batt, false);
+                                }
                             }
                         }
                     }
