@@ -4,12 +4,17 @@
 Replaces rs485_set_both.py, which wrote to live packs on bare execution.
 
     python3 rs485_write_param.py --pack 01 --mv 3420        # param 0x4C, 3.420 V
-    python3 rs485_write_param.py --pack 02 --param 4C --raw 0D66
 
 Safety gates (deliberate friction — the bus has no authentication):
-  - --pack is required and validated (01-FF, per observed Link addressing)
-  - allowlist: only parameter 0x4C is writable by default, range-checked
-    3.300-3.600 V; any other --param requires --force and prints a warning
+  - --pack is required, validated against the observed Link addressing
+    (01-04 only: FF is the broadcast address the vendor tool uses for
+    identity probes, and 00 is the standalone-mode self-address — a write
+    to either would go somewhere untested)
+  - write allowlist: only parameter 0x4C, range-checked 3.400-3.500 V
+    (3.3 V is normal resting voltage; 3.6 V is above the 3.55 V cell alarm).
+    Extending the tool to another parameter means adding it here with its
+    own range — there is deliberately no --force.
+  - duplicated XML indices (0-2) and live values (0x45) are always refused
   - interactive confirmation before transmitting (--yes to skip)
   - one frame, injected into a >=150 ms bus gap; ack collected; traffic
     health-checked afterwards
@@ -27,32 +32,34 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 import bms073
 import linkbus
 
-ALLOWED_PARAMS = {0x4C: ("Start Balance Voltage", 3300, 3600)}   # index: (name, min mV, max mV)
+ALLOWED_PARAMS = {0x4C: ("Start Balance Voltage", 3400, 3500)}   # index: (name, min mV, max mV)
+PACK_RANGE = range(1, 5)           # observed slave addresses 01-04
 
 
 def parse_args(argv):
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("--pack", required=True, help="target pack as 2 hex chars, e.g. 01")
+    p.add_argument("--pack", required=True, help="target pack, 01-04 (observed Link addresses)")
     p.add_argument("--param", default="4C", help="parameter index as hex, default 4C")
     p.add_argument("--mv", type=int, help="value in parameter-native mV (for 0x4C)")
     p.add_argument("--raw", help="value as 4 hex chars, e.g. 0D66")
-    p.add_argument("--force", action="store_true",
-                   help="allow parameters outside the allowlist")
     p.add_argument("--yes", action="store_true", help="skip the confirmation prompt")
     return p.parse_args(argv)
 
 
-def validate(args) -> tuple[int, int, str]:
+def validate(args) -> tuple[int, int, int]:
     try:
         pack = int(args.pack, 16)
     except ValueError:
         sys.exit(f"--pack must be hex: {args.pack!r}")
-    if not 1 <= pack <= 0xFF:
-        sys.exit(f"--pack out of observed range 01-FF: {args.pack!r}")
+    if pack not in PACK_RANGE:
+        sys.exit(f"--pack must be 01-04 (observed Link addresses); "
+                 f"{args.pack!r} is broadcast/self-address territory")
     try:
         param = int(args.param, 16)
     except ValueError:
         sys.exit(f"--param must be hex: {args.param!r}")
+    if not 0x00 <= param <= 0xFF:
+        sys.exit(f"--param must fit one byte (write INFO is [pack][param][value]): {args.param!r}")
     if args.raw and args.mv is not None:
         sys.exit("give either --raw or --mv, not both")
     if args.mv is not None:
@@ -72,11 +79,11 @@ def validate(args) -> tuple[int, int, str]:
         _, lo, hi = ALLOWED_PARAMS[param]
         if not lo <= value <= hi:
             sys.exit(f"{name}: {value} mV outside allowed range {lo}-{hi} mV")
-    elif not args.force:
+    else:
         sys.exit(f"parameter {name} is not on the write allowlist "
-                 f"({', '.join(f'{k:#04x}' for k in ALLOWED_PARAMS)}); "
-                 f"re-check the XML/protection impact first, then pass --force")
-    if param in (0x45,) or param in bms073.duplicate_xml_indices():
+                 f"({', '.join(f'{k:#04x}' for k in ALLOWED_PARAMS)}); extend "
+                 f"ALLOWED_PARAMS with its own range check - there is no --force by design")
+    if param == 0x45 or param in bms073.duplicate_xml_indices():
         sys.exit(f"parameter {name} is excluded: live value / duplicated XML index")
     return pack, param, value
 
@@ -90,7 +97,7 @@ def main(argv=None) -> int:
     print(f"target: pack {pack:02X}, param {param:#04x} ({name}), "
           f"raw {value:#06x} ({value * scale:g} {table.get(param, {}).get('unit', '')})")
     if not args.yes:
-        answer = input(f"transmit this write to the LIVE Link bus? type WRITE to continue: ")
+        answer = input("transmit this write to the LIVE Link bus? type WRITE to continue: ")
         if answer != "WRITE":
             print("aborted, nothing sent")
             return 1
