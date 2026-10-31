@@ -130,7 +130,8 @@ public:
 
         uint8_t prot1 = x[1];
         prot_charge_overcurrent_ = (prot1 & 0x01) != 0;
-        // Pylontech CAN V1.2 Table 2: system error is bit 3, not bit 7
+        // Pylontech CAN V1.2 Table 2: system error is bit 3, not bit 7.
+        // Unverified on Shoto packs - see PROTOCOL_REFERENCE.md; raw /flags is ground truth
         prot_system_error_ = (prot1 & 0x08) != 0;
 
         uint8_t warn2 = x[2];
@@ -142,7 +143,8 @@ public:
 
         uint8_t warn3 = x[3];
         warn_high_charge_current_ = (warn3 & 0x01) != 0;
-        // Pylontech CAN V1.2 Table 4: internal comms fail is bit 3, not bit 7
+        // Pylontech CAN V1.2 Table 4: internal comms fail is bit 3, not bit 7.
+        // Unverified on Shoto packs - see PROTOCOL_REFERENCE.md; raw /flags is ground truth
         warn_comms_fail_ = (warn3 & 0x08) != 0;
 
         module_count_ = x[4];
@@ -196,7 +198,9 @@ public:
 
         // 0x370 temperatures are int16 0.1C, two's complement like the signed
         // 0x356 fields in the Pylontech V1.2 spec; decode signed so sub-zero
-        // values don't wrap to ~6500C and trip the sanity gate
+        // values don't wrap to ~6500C and trip the sanity gate. Signedness is
+        // an assumption - untestable without a real fault/sub-zero weather;
+        // positive readings are identical either way.
         float t1 = ((int16_t)can_le_u16(x[0], x[1])) / 10.0f;
         float t2 = ((int16_t)can_le_u16(x[2], x[3])) / 10.0f;
         float tmin = (t1 <= t2) ? t1 : t2;

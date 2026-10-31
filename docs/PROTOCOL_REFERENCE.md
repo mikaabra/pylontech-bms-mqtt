@@ -65,14 +65,36 @@ Comprehensive documentation of CAN and RS485 protocols for Pylontech-compatible 
 | 4-5 | Temperature | °C | ÷10 | Pack temperature |
 
 #### 0x359 - Protection & Alarm Flags (V1.2)
-**Length:** 7 bytes
+**Length:** 7 bytes (bytes 4-7: module count, "P", "N", status)
 
-Bitfield indicating various protection and alarm states. This message is deprecated in V1.3 protocol.
+Bitfield per the official Pylontech CAN V1.2 PDF (2018-04-08):
 
-| Byte | Bits | Meaning |
-|------|------|---------|
-| 0-3 | Various | Protection flags |
-| 4-6 | Various | Alarm indicators |
+| Byte | Bit | Flag |
+|------|-----|-------|
+| 0 | 7 | Discharge overcurrent (protection) |
+| 0 | 4 | Cell undertemp (protection) |
+| 0 | 3 | Cell overtemp (protection) |
+| 0 | 2 | Cell/module undervolt (protection) |
+| 0 | 1 | Cell/module overvolt (protection) |
+| 1 | 3 | **System error (protection)** |
+| 1 | 0 | Charge overcurrent (protection) |
+| 2 | 7 | Discharge high current (alarm) |
+| 2 | 4 | Cell low temp (alarm) |
+| 2 | 3 | Cell high temp (alarm) |
+| 2 | 2 | Cell/module low volt (alarm) |
+| 2 | 1 | Cell/module high volt (alarm) |
+| 3 | 3 | **Internal communication fail (alarm)** |
+| 3 | 0 | Charge high current (alarm) |
+
+> **Unconfirmed on this hardware:** the production packs are Shoto
+> SDA10-48200, not Pylontech, and they already deviate from the spec on
+> 0x35C frame length. The byte 0/2 mappings match observed behavior,
+> but the byte 1 bit 3 (system error) and byte 3 bit 3 (comms fail)
+> positions could not be verified without a real fault. The raw
+> `deye_bms/flags` topic (16-bit-per-byte dump of 0x359) is published
+> unchanged and is the ground truth to check against an actual fault
+> event. Do not rely on the two decoded binary sensors as the only
+> protection alert.
 
 **Note:** V1.3 replaces 0x359 with 0x35A for compatibility with SMA/Victron protocols.
 
@@ -129,6 +151,9 @@ Contains manufacturer name string, typically "PYLON   " (padded with spaces).
 | 6-7 | Max Cell Voltage | V | ÷1000 |
 
 **Note:** This message ID may be specific to Shoto/Deye batteries and not standard Pylontech.
+The firmware decodes the temperatures as int16 0.1C two's complement (consistent with the signed
+0x356 fields in Pylontech V1.2) — an assumption that cannot change any positive reading either way,
+but sub-zero behavior will only be verifiable at freezing temperatures.
 
 ### Protocol Versions
 
