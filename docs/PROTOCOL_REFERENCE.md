@@ -8,9 +8,10 @@ Comprehensive documentation of CAN and RS485 protocols for Pylontech-compatible 
 
 1. [Pylontech CAN Protocol](#pylontech-can-protocol)
 2. [Pylontech RS485 Protocol](#pylontech-rs485-protocol)
-3. [EPever Inverter Protocols](#epever-inverter-protocols)
-4. [EPever BMS-Link Converter](#epever-bms-link-converter)
-5. [Protocol Translator Design Notes](#protocol-translator-design-notes)
+3. [BMS073 Configuration Protocol (Richpower, battery-battery port)](#bms073-configuration-protocol-richpower-battery-battery-port)
+4. [EPever Inverter Protocols](#epever-inverter-protocols)
+5. [EPever BMS-Link Converter](#epever-bms-link-converter)
+6. [Protocol Translator Design Notes](#protocol-translator-design-notes)
 
 ---
 
@@ -341,6 +342,109 @@ if status_pos + 22 <= len(data_hex):
 - A cell may have CW=Y but not be actively balancing yet
 
 ---
+
+## BMS073 Configuration Protocol (Richpower, battery-battery port)
+
+**Source of evidence:** USB capture (`~/Downloads/usb-bms-bqadmin-update-3421-then-3420.pcapng`, 2026-10-26) of the Windows vendor configuration utility, taken with USBPcap inside a UTM Windows VM on an FTDI-based USB-RS485 dongle, battery in standalone (single-battery) mode. Serialized byte streams extracted via Wireshark's FTDI dissector (`ftdi-ft.if_a_tx_payload` / `if_a_rx_payload`); all frames below verbatim from that capture.
+
+**Identified hardware (from the BMS's own identity response):** model **`073-BLC06`**, manufacturer **`JS-Richpower Co,Ltd`**. Serial number read (CID2 0xC9): `JG2406190021 0013`. This is the same BMS073 family as `BMS073-H17-BL08-16S-en-US.xml` (repo root) — the vendor tool's own protocol profile, whose parameter table indexes the write command below.
+
+### Relationship to the Pylontech RS485 dialect
+
+Same YD/T 1363.3 "PACE/Seplos/Pylontech" family as section 2: identical SOI (`~`) / EOI (CR), identical ASCII-hex INFO encoding, identical CHKSUM and LENID formulas. Different endpoint constants:
+
+| Dialect | VER | CID1 | Used by | Physical port |
+|----------|-----|------|---------|---------------|
+| Pylontech polling | `20` | `46` | deye-bms-can (this repo), inverters | to-inverter RJ45 (RS485 pins 7/8) |
+| BMS073 configuration | `80` | `D5` | vendor Windows tool | battery-battery (Link) ports |
+
+The vendor tool also probes MODBUS RTU in its scan loop (FC 0x04, register 0x8000, qty 31, slave addresses 00–0F — the identification block of Shoto Modbus protocol v0.3); in standalone mode the battery never answered those probes, only the ASCII dialect.
+
+### Physical layer
+
+- 9600 8N1 (tool sets both 9600 and 19200 during its scan; connection at 9600)
+- Battery-battery (Link) RS485 ports only. The manufacturer states this protocol is **not** served on the to-inverter RS485/CAN port. *(Statement verified as coming from the vendor; not independently tested.)*
+
+### Frame format (verified across every frame in the capture)
+
+```
+~  [VER][ADR][CID1][CID2][LENID:4][INFO:N ascii-hex][CHKSUM:4]  CR
+```
+
+- VER `80`, ADR `00`, CID1 `D5` for all established-session frames
+- LENID = LCHKSUM nibble + 3-hex length, counting INFO **ASCII characters** (same formula as section 2):
+  - `E002` = 2-char INFO (read with 1-byte pack index)
+  - `8008` = 8-char INFO (single-parameter write)
+  - `0000` = zero-length INFO (write acknowledgment)
+  - observed on responses: `A222` (0x222 = 546 chars, parameter block), `B07E`, `9052`, `C022`
+- CHKSUM = two's complement of the ASCII-character sum between `~` and the checksum, 4 hex digits — same function as `rs485_calc_chksum()` in `pylontech_protocol.h`; verified correct on every frame type including both writes and the acks.
+
+### Observed command sequence
+
+1. **Scan loop** (~12 s period, repeating while no battery responds):
+   - identity probes `~FF00FF52E002<xx>…` — VER `FF`, CID1 `FF`, CID2 `52`, INFO = pack address `01`–`0F`, then two broadcast probes `~FF00FF52E002FF…`
+   - MODBUS RTU probes (`00`–`0F`, FC 04 @ 0x8000) — never answered in this mode
+   - periodic zero-length knock `~2600464F0000…` (VER `26`, CID2 `4F`)
+2. **Connection** — after ~95 s of scanning the BMS answers the broadcast probe with its identity (model / manufacturer strings above)
+3. **Poll cycle** (~2 s): CID2 `42` (analog values) and `44` (status/alarms); at connect also `47` (int-parameter block) and `C9` (serial number)
+4. **Writes** — no login, no handshake: command → ack. Full-session capture contains **zero password exchange** (see below).
+
+### Command table (observed)
+
+| CID2 | Direction | Purpose | INFO notes |
+|------|-----------|---------|------------|
+| `42` | read | analog values | request INFO = pack index (`00`); response INFO: RTN `00`, battery number, cell count `0010` (=16), 16 × u16 cell mV BE, temp count `06`, 6 × u16 temp 0.1K BE, then tail fields |
+| `44` | read | status/alarms | response mostly zeros in this session (no active faults); layout per XML `teleSignal` blocks, details pending |
+| `47` | read | int-parameter block | response LENID `A222` (273 info bytes = RTN + 272 = 136 × u16 slots); partial alignment below |
+| `49` | **write** | set one int parameter | INFO = `ParamIndex u16 BE` + `Value u16 BE` (4 bytes / 8 chars) |
+| `C9` | read | serial number | response contains ASCII SN |
+| `4F` | ? | knock/keepalive | zero-length INFO |
+| `52` | probe | identity read | used with VER/CID1 `FF` and pack index 01–0F; answered with model/manufacturer strings |
+
+Response frames: VER `80`, ADR `00`, CID1 `D5`, CID2 echo `00` (RTN OK), LENID, INFO, CHKSUM. Write ack: `~8000D5000000FD9F\r` (LENID `0000`, empty INFO, RTN OK).
+
+### Parameter write — captured verbatim
+
+```
+TX  ~8000D549 8008 004C 0D5D FBBE CR     → param 0x004C = 0x0D5D (3421)
+RX  ~8000D5 00 0000 FD9F CR               → OK
+TX  ~8000D549 8008 004C 0D5C FBBF CR     → param 0x004C = 0x0D5C (3420)
+RX  ~8000D5 00 0000 FD9F CR               → OK
+```
+
+Per `BMS073-H17-BL08-16S-en-US.xml`, parameter index **0x4C = "Start Balance Voltage", scale 0.001 V** — i.e. the tool set the balancing start threshold to 3.421 V, then corrected it to 3.420 V (matches the user's account of what was clicked). The XML's full `int_para` table (indices 0x00–0x7C + 3 calibration entries; bit-params as a separate flag table) is the vendor's own parameter map for this dialect.
+
+### Partial parameter-block alignment (CID2 47 response)
+
+First six u16 slots after the RTN byte read `0DDE 0D48 0C1C 0B54 0E42 0D48` (3550 / 3400 / 3100 / 2900 / 3648 / 3400 mV), which aligns exactly with XML parameter indices 0–5: Cell Over Voltage Alarm 3.550 V, alarm release 3.400 V, under-voltage alarm release 3.100 V, under-voltage alarm 2.900 V, **over-voltage protect 3.648 V** (classic LFP value), protect release 3.400 V. Alignment past index 5 is **not yet verified** — several plausible values appear further in (300 = 30.0 °C, 10000 = "100.00"–scaled capacity, 3.420 V again where the balance voltage lives at index 0x4C within the same block), but the layout must be confirmed by a scripted decode against the XML table before any of it is trusted.
+
+### CID2 42 (analog) INFO layout — verified portions
+
+16 × u16 big-endian cell millivolts (`0CF9` = 3.321 V etc., matching the XML `teleMeter` cells at scale 0.001 V) and 6 × u16 big-endian temperatures in 0.1 K (`0B42` = 2882 → 15.1 °C via `rs485_temp_to_celsius`) are directly confirmed. Pack voltage follows the temps as u16 at 0.01 V (`14C3` = 53.15 V, consistent with the cell average at that moment). The current field (`FCEE`, signed) and the capacity/cycle fields are present but their scale/sign need one more decode pass; do not trust eyeball values for those fields.
+
+### The `bqadmin` login
+
+The vendor tool requires a `bqadmin` password in its UI before allowing parameter changes. **The password never appears on the wire** — the capture covers the entire session from port-open through both writes, and contains no login or challenge exchange of any kind. This matches the same tool family's documented behavior (V-KING/TAICO BMS: "GUI password is only a local lock of the manufacturer UI and is not sent on the wire"). Consequence: any device physically on the battery-battery bus can read and write all parameters; the password protects nothing.
+
+### Topology facts (verified against this repo's firmware)
+
+- `deye-bms-can` **actively polls** the stack master at Pylontech address 2 with the section-2 dialect: `rs485_make_cmd()` builds `~20 02 46 <cid2> E002 <pack-index>` frames; CID2 0x42 every 10 s and 0x44 every 30 s per pack (`pylontech_rs485.h`), with the master responding on behalf of the slaves. CAN is listen-only on the same comm port. **The ESP32 is on the master's to-inverter port, not the battery-battery bus** (user-confirmed wiring).
+- The battery-battery (Link) chain is a separate physical bus carrying the stack's own master↔slave traffic — plus this configuration dialect.
+- The config protocol is addressable (probe INFO carries pack addresses 01–0F, 15-pack range), suggesting per-pack messaging in-stack is at least designed for. Whether the packs answer the config dialect while the stack is assembled and operating is **untested** — the one experiment that must pass before any in-situ use.
+
+### ESP32 in-situ configuration — design implications
+
+1. The current single RS485 channel of the Waveshare ESP32-S3-RS485-CAN stays on the to-inverter port (polling + CAN must not regress).
+2. In-situ configuration needs a **second RS485 transceiver** (external MAX3485-class on free GPIOs; ESP32-S3 has a spare UART) tapped onto the battery-battery chain.
+3. On that bus the ESP32 must contend with the stack master's own polling — writes are single frames (~100 ms) with acks, retry-tolerant, but a gap-injecting sender (the passive RX already sees the poll cadence) is the safe design.
+4. Unknowns to resolve by experiment, in order: (a) do packs answer CID2 42/47/49 while stacked and addressed by index? (b) does the stack master tolerate foreign frames on its bus (worst case: one CRC-retry)? (c) does a parameter write stick on a slave pack without disturbing the master's view of the stack?
+
+### References for this section
+
+- Capture: `usb-bms-bqadmin-update-3421-then-3420.pcapng` (kept out of the repo; analysis transcripts summarized above)
+- `BMS073-H17-BL08-16S-en-US.xml` (repo root) — vendor tool protocol profile: telemetry layouts, int/bit parameter tables, index 0x4C
+- [taico-bms-unleashed V-KING/TAICO protocol spec](https://github.com/Gesiima/taico-bms-unleashed/blob/main/VKING_BMS_Protokoll_Spezifikation.md) — same protocol family, independently reverse-engineered; documents the CID2 command set (42/44/47/49/4B/4C/4D/4E/E2/E5/E9/EB/ED/EF/F1/F2) and the local-only GUI password design
+- Shoto SDA10-48100 BMS Modbus RTU protocol v0.3 (Scribd) — the MODBUS dialect probed by the tool; register 0x8000 = identification block, addresses 0–15 via DIP switch
 
 ## EPever Inverter Protocols
 
