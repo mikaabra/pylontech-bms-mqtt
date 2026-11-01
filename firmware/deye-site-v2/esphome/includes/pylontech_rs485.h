@@ -317,6 +317,7 @@ public:
 
     void publish_data() {
         char topic[80], payload[32];
+        BcScopeGuard bc_sweep_guard_;
 
         uint32_t now = millis();
         bool force_heartbeat = (now - last_heartbeat_ >= 300000);
@@ -564,6 +565,7 @@ public:
 
     void check_stale() {
         bc_mark(BC_CHECK_STALE);
+        BcScopeGuard bc_stale_guard_;
         uint32_t now = millis();
         if (!has_analog_rx_) {
             if (!availability_.stale) availability_.mark_stale(esphome::mqtt::global_mqtt_client);
