@@ -437,6 +437,101 @@ static void test_mute_freezes() {
     check(has_event(ev, EventKind::RingReleased), "released after mute recovery + delay");
 }
 
+// Round 4, reviewer case: packs 1 AND 2 both mute - one pack recovering
+// must NOT release the window while the other still holds its mute; the
+// pre-incident context survives until the last trigger clears.
+static void test_partial_release_two_mutes() {
+    BmsLinkCore c;
+    uint32_t t = 1000;
+    send(c, poll_req(1, "42"), t);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
+    t += 624;
+    for (int i = 0; i < 3; i++) {  // three unanswered pack-1 polls
+        send(c, poll_req(1, "42"), t);
+        t += 624;
+    }
+    // the next request closes pack 1's third unanswered slot: mute + freeze
+    send(c, poll_req(2, "42"), t);   // t = 3496
+    t += 624;
+    check(c.pack(1).muting, "pack1 muted");
+    check(c.ring_frozen(), "pack1 mute froze the ring");
+    std::string frozen = c.dump_bounded();
+    // three unanswered pack-2 polls, closed by a pack-1 request: pack 2 mutes too
+    for (int i = 0; i < 3; i++) {
+        send(c, poll_req(2, "42"), t);
+        t += 624;
+    }
+    send(c, poll_req(1, "42"), t);   // t = 5992: closes pack-2 slot -> both muted
+    check(c.pack(2).muting, "pack2 muted");
+    check(c.ring_frozen(), "still frozen with both muted");
+
+    // pack 1 ANSWERS: partial recovery - the window must hold
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
+    check(!c.pack(1).muting, "pack1 recovered");
+    auto ev = c.drain_events();
+    check(has_event(ev, EventKind::PackRecover, 1), "pack1 recovery event emitted");
+    check(c.ring_frozen(), "window HELD: pack 2 still muting");
+    c.tick(t + 15 + kReleaseDelayTick() + 1000);
+    ev = c.drain_events();
+    check(!has_event(ev, EventKind::RingReleased), "no release while a mute still holds");
+    check(c.dump_bounded() == frozen, "pre-incident context intact through the partial recovery");
+
+    // pack 2 answers: the last trigger clears -> re-open + release
+    uint32_t t2 = t + 624;
+    send(c, poll_req(2, "42"), t2);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t2 + 15);
+    check(!c.ring_frozen(), "all clear: ring re-opened");
+    ev = c.drain_events();
+    check(has_event(ev, EventKind::PackRecover, 2), "pack2 recovery event emitted");
+    c.tick(t2 + 15 + kReleaseDelayTick());
+    ev = c.drain_events();
+    check(has_event(ev, EventKind::RingReleased), "released after the last trigger cleared");
+}
+
+// Round 4, reviewer case 2: the watchdog clears while a pack is still
+// mute - the recovery event fires, but the window holds until the pack
+// answers.
+static void test_watchdog_clear_with_mute_holds() {
+    BmsLinkCore c;
+    uint32_t t = 1000;
+    send(c, poll_req(3, "42"), t);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
+    t += 624;
+    for (int i = 0; i < 3; i++) {  // pack 3 goes mute
+        send(c, poll_req(3, "42"), t);
+        t += 624;
+    }
+    send(c, poll_req(1, "42"), t);  // closes pack 3's third slot: mute + freeze
+    check(c.pack(3).muting, "pack3 muted");
+    check(c.ring_frozen(), "pack3 mute froze the ring");
+    std::string frozen = c.dump_bounded();
+    // total silence: the watchdog trips on top of the mute
+    c.tick(t + 2100);
+    check(c.watchdog_tripped(), "watchdog tripped on top of the mute");
+    check(c.ring_frozen(), "still frozen");
+    // the master returns but only pack 1 answers: watchdog clears, pack 3 stays mute
+    uint32_t rec = t + 2600;
+    send(c, poll_req(1, "42"), rec);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", rec + 15);
+    check(!c.watchdog_tripped(), "watchdog clear");
+    check(c.pack(3).muting, "pack3 STILL muting");
+    auto ev = c.drain_events();
+    check(has_event(ev, EventKind::WatchdogRecover), "watchdog recovery event emitted");
+    check(c.ring_frozen(), "window HELD: watchdog cleared but pack 3 still mute");
+    c.tick(rec + 15 + kReleaseDelayTick() + 1000);
+    ev = c.drain_events();
+    check(!has_event(ev, EventKind::RingReleased), "no release while the pack mute holds");
+    check(c.dump_bounded() == frozen, "pre-incident context intact until the pack answered");
+    // pack 3 finally answers: the last trigger clears -> release
+    uint32_t t3 = rec + 624;
+    send(c, poll_req(3, "42"), t3);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t3 + 15);
+    check(!c.ring_frozen(), "all clear: ring re-opened");
+    c.tick(t3 + 15 + kReleaseDelayTick());
+    ev = c.drain_events();
+    check(has_event(ev, EventKind::RingReleased), "released after the last trigger cleared");
+}
+
 int main() {
     test_lenid4();
     test_real_frames_parse_clean();
@@ -454,6 +549,8 @@ int main() {
     test_ring_bounds();
     test_incident_freeze();
     test_mute_freezes();
+    test_partial_release_two_mutes();
+    test_watchdog_clear_with_mute_holds();
     test_retrip_cancels_release();
 
     if (failures == 0) {

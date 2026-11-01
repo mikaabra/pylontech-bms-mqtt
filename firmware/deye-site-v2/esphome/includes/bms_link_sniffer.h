@@ -96,8 +96,9 @@ private:
             case linksniff::EventKind::PackRecover:    kind = "pack-recover"; break;
             case linksniff::EventKind::RingReleased:
                 // incident window re-opened by recovery; the dump below
-                // publishes the full arc (pre-incident context, trigger,
-                // post-recovery traffic)
+                // publishes what the window covered: the frozen head
+                // (pre-incident context + trigger) plus the post-recovery
+                // entries that fit (~11 s on the healthy cadence)
                 kind = "ring-released";
                 break;
         }
@@ -119,10 +120,11 @@ private:
         if (anomaly_dump_ && (e.kind == linksniff::EventKind::WatchdogTrip ||
                               e.kind == linksniff::EventKind::PackMute ||
                               e.kind == linksniff::EventKind::RingReleased)) {
-            // trip/mute: the freshly frozen window; release: the full arc -
-            // the core re-opened the ring at recovery, so post-recovery
-            // traffic is included; a re-trip cancels the release and the
-            // newest incident owns the capture
+            // trip/mute: the freshly frozen window; release: the window as
+            // covered - the core re-opened the ring at recovery (only when
+            // every trigger cleared), so post-recovery entries that fit are
+            // included; a re-trip cancels the release and the newest
+            // incident owns the capture
             anomaly_dump_->publish_state(core_.dump_bounded());
         }
     }

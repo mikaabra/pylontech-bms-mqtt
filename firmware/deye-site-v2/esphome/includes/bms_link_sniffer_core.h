@@ -186,8 +186,10 @@ public:
             in_frame_ = false;
         }
         // incident window release: recovery re-opened the ring; after the
-        // delay the wrapper publishes the full arc (pre-incident context,
-        // the trigger, the post-recovery traffic). A new trip during the
+        // delay the wrapper publishes what the window covered: the frozen
+        // head (pre-incident context + trigger note) plus the post-recovery
+        // entries that fit (~11 s of traffic on the healthy 624 ms cadence
+        // - 18 of 32 slots measured on a live dump). A new trip during the
         // delay cancels this via freeze_ring().
         if (release_pending_ && (int32_t)(t_ms - release_at_ms_) >= 0) {
             release_pending_ = false;
@@ -251,9 +253,23 @@ public:
     // overwrite the pre-incident window; they are counted instead. The
     // Dump button (wrapper) publishes the frozen window and releases.
     void reopen_ring_after_incident_(uint32_t t_ms) {
+        // round 4 (reviewer): a single recovery must not release the
+        // window while another fault is still active - pack 1 answering
+        // with pack 2 still mute, or the watchdog clearing with a pack
+        // still muting, would overwrite the pre-incident window before
+        // the incident is over. Re-open ONLY when every trigger cleared.
+        if (any_incident_active()) return;
         ring_frozen_ = false;
         release_pending_ = true;
         release_at_ms_ = t_ms + kRingReleaseDelayMs;
+    }
+    // true while any incident trigger still holds: watchdog tripped or
+    // any pack muting
+    bool any_incident_active() const {
+        if (watchdog_tripped_) return true;
+        for (int p = 1; p <= 4; p++)
+            if (packs_[p].muting) return true;
+        return false;
     }
     void freeze_ring() { ring_frozen_ = true; release_pending_ = false; }
     // operator override for the ring-dump button
