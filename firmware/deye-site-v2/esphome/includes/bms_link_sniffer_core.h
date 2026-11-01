@@ -647,6 +647,11 @@ public:
 
     // explicit one-shot trigger (the Send button). Validation failures go to
     // Denied with the reason; nothing is queued or auto-retried afterwards.
+    // Pressing Send while an operation is in flight RESETS it: the pending
+    // one-shot (including its ack wait) is abandoned and a fresh initial +
+    // retry budget starts. Any straggler ack from the abandoned window is no
+    // longer ack_expected(), so the core routes it to the unexpected-ack
+    // anomaly - visible in Last Anomaly, not silently consumed.
     bool request(uint8_t pack, uint8_t param, uint16_t value_mv, uint32_t now) {
         (void)now;
         std::string why;
@@ -708,7 +713,9 @@ private:
         }
         if (core_.watchdog_tripped()) return;  // bus in unknown state: hold fire
         if (need_clean_slot_) {
-            if (core_.last_pair_ms() > failed_at_ms_) {
+            // subtract-compare keeps the ordering correct across the
+            // uint32 millis() wrap (49.7 days)
+            if ((int32_t)(core_.last_pair_ms() - failed_at_ms_) > 0) {
                 need_clean_slot_ = false;  // one clean slot observed since failure
             } else {
                 return;
@@ -723,7 +730,8 @@ private:
             return;
         }
         tx_count_++;
-        ack_deadline_ms_ = t_ms + kAckDeadlineMs;
+        tx_started_ms_ = t_ms;  // deadline check uses (t - tx_started) so the
+                                 // uint32 wrap cannot invert the comparison
         status_ = Status::WaitAck;
         line_ = "sent, waiting for ack (frame " + std::to_string(frame.size()) + " chars)";
     }
@@ -734,7 +742,7 @@ private:
             line_ = "aborted: write enable switched off";
             return;
         }
-        if (t_ms < ack_deadline_ms_) return;
+        if (t_ms - tx_started_ms_ < kAckDeadlineMs) return;
         // deadline passed: any RX during our window that was not the ack is
         // collision evidence (the master's poll arrived inside our slot)
         bool traffic = core_.last_rx_ms() > tx_started_ms_;
@@ -772,7 +780,6 @@ private:
     bool need_clean_slot_ = false;
     uint32_t failed_at_ms_ = 0;
     uint32_t tx_started_ms_ = 0;
-    uint32_t ack_deadline_ms_ = 0;
     uint32_t tx_count_ = 0;
     uint32_t collision_count_ = 0;
     int last_ack_latency_ms_ = 0;

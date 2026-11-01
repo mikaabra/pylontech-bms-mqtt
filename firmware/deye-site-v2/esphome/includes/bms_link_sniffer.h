@@ -133,6 +133,11 @@ private:
                 // entries that fit (~11 s on the healthy cadence)
                 kind = "ring-released";
                 break;
+            case linksniff::EventKind::AckForWrite:
+                // healthy expected event: Write Status already reports the
+                // ack; it must not appear on the Last Anomaly feed
+                anomaly_like = false;
+                break;
         }
         if (!anomaly_like) return;
         char line[160];

@@ -310,6 +310,52 @@ static void test_watchdog_holds_fire() {
     check(bus.tx_log.size() == 1, "fired after recovery + silence");
 }
 
+// The WriteController's deadline and clean-slot orderings must use
+// subtract-compare idioms so the uint32 millis() wrap (49.7 days) cannot
+// invert them. This scenario runs a full inject -> ack -> retry cycle
+// straddling the wrap seam: TX fires before 0xFFFFFFFF, the ack lands
+// after wrap, the retry's failure timestamp and clean slot both land
+// after wrap.
+static void test_millis_wraparound() {
+    BmsLinkCore c;
+    FakeBus bus;
+    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    c.set_ack_waiter(&w);
+
+    send(c, poll_req(1, "42"), 0xFFFFF900u);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", 0xFFFFF915u);
+
+    check(w.request(0x01, 0x4C, 3420, 0xFFFFFF80u), "arm accepted before wrap");
+    w.tick(0xFFFFFFC0u);  // 683 ms silence -> fires, 64 ms before the wrap
+    check(bus.tx_log.size() == 1, "fired before wrap");
+    check(w.status() == WriteController::Status::WaitAck, "waiting across seam");
+
+    // ack 64 ms after wrap: 128 ms total < 130 ms deadline
+    send(c, std::string(REAL_ACK) + "\r", 0x40);
+    auto ev = c.drain_events();
+    check(w.status() == WriteController::Status::Acked, "ack across seam consumed");
+    check(has_event(ev, EventKind::AckForWrite), "ack event, not anomaly");
+    check(!has_event(ev, EventKind::AnomalyAck), "no unexpected-ack misfire");
+    check(w.tx_count() == 1, "no spurious retry before the ack");
+
+    // second one-shot: failure before ack, retry's clean slot after wrap
+    check(w.request(0x02, 0x4C, 3425, 0x200), "re-arm after wrap");
+    w.tick(0x2A0);  // 480 ms since the ack -> fires
+    check(bus.tx_log.size() == 2, "second attempt fired after wrap");
+    w.tick(0x327);  // 135 ms elapsed -> deadline, no ack
+    check(w.status() == WriteController::Status::Armed, "retry armed after wrap");
+    check(w.tx_count() == 2, "still two attempts");
+
+    // clean pair post-wrap clears the hold despite failed_at < wrap pixels
+    send(c, poll_req(2, "42"), 0x500);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", 0x515);
+    w.tick(0x640);  // clean slot seen + 301 ms silence -> retry fires
+    check(bus.tx_log.size() == 3, "wrap did not strand the clean-slot hold");
+    send(c, std::string(REAL_ACK) + "\r", 0x680);
+    check(w.status() == WriteController::Status::Acked, "retry acked after wrap");
+    check(c.anomalies_total() == 0, "whole wrap cycle healthy");
+}
+
 int main() {
     test_builder_byte_exact();
     test_allowlist_gate();
@@ -321,6 +367,7 @@ int main() {
     test_enable_off_aborts();
     test_uart_fail_aborts();
     test_watchdog_holds_fire();
+    test_millis_wraparound();
 
     if (failures == 0) {
         printf("test_bms_link_sniffer_inject: ALL PASS\n");
