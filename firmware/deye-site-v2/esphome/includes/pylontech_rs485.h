@@ -771,6 +771,26 @@ public:
                 }
             }
         }
+
+        // Device WARN+ log tail (yaml log_topic → deye_bms/logs). Recorded by
+        // the HA recorder so warning ramps ahead of a watchdog hang survive
+        // the night without any connected log client. Availability gates on
+        // the MQTT client status topic only: the RS485 channel-stale marker
+        // must not suppress log capture while the device is alive and logging.
+        {
+            char st[64], uid[64], log_avail[192];
+            snprintf(st, sizeof(st), "deye_bms/logs");
+            snprintf(uid, sizeof(uid), "pylontech_rs485_bms_log_tail");
+            snprintf(log_avail, sizeof(log_avail),
+                     R"json("availability":{"topic":"%s","payload_available":"online","payload_not_available":"offline"})json",
+                     device_status_topic_.c_str());
+            snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/bms_log_tail/config");
+            if (build_ha_sensor_payload(payload, sizeof(payload), "BMS Log Tail", st, uid, "", "", "",
+                                        log_avail, device_json.c_str(), "mdi:text-box", "diagnostic")) {
+                esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                pacer.pace();
+            }
+        }
     }
 
 private:
