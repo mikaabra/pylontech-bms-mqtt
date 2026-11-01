@@ -222,9 +222,9 @@ interval:
               id(discovery_published) = can_ok && rs485_ok;
               if (!id(discovery_published)) ESP_LOGW("discovery", "pass incomplete (pool or budget), resuming next tick");
             }
-            if (id(discovery_published) && !bc_publish_report_direct()) {
-              // crash-report publish rejected: stays pending, retried next tick
-            }
+            // rejected crash-report publish simply stays pending; the next
+            // tick retries it until accepted
+            if (id(discovery_published)) bc_publish_report_direct();
           } else if (id(mqtt_was_connected)) {
             id(mqtt_disconnect_count)++;
             if (id(mqtt_disconnect_count) >= 2) {

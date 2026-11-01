@@ -657,12 +657,13 @@ public:
             char st[96];
             ord++;
             if (ord > disc_pos_) {
-                if (strcmp(stack_sensors[i][0], "stack_cell_delta") == 0)
-                snprintf(st, sizeof(st), "%s/stack/cell_delta_mv", mqtt_prefix_.c_str());
-            else
-                snprintf(st, sizeof(st), "%s/stack/%s", mqtt_prefix_.c_str(), stack_sensors[i][0] + 6);
-            snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", stack_sensors[i][0]);
-            if (build_ha_sensor_payload(payload, sizeof(payload), stack_sensors[i][1], st, uid, stack_sensors[i][2], stack_sensors[i][3], stack_sensors[i][4], avail_str.c_str(), device_json.c_str())) {
+                if (strcmp(stack_sensors[i][0], "stack_cell_delta") == 0) {
+                    snprintf(st, sizeof(st), "%s/stack/cell_delta_mv", mqtt_prefix_.c_str());
+                } else {
+                    snprintf(st, sizeof(st), "%s/stack/%s", mqtt_prefix_.c_str(), stack_sensors[i][0] + 6);
+                }
+                snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", stack_sensors[i][0]);
+                if (build_ha_sensor_payload(payload, sizeof(payload), stack_sensors[i][1], st, uid, stack_sensors[i][2], stack_sensors[i][3], stack_sensors[i][4], avail_str.c_str(), device_json.c_str())) {
                     if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
                 }
                 disc_pos_ = ord;
@@ -722,12 +723,12 @@ public:
                 ord++;
                 if (ord > disc_pos_) {
                     if (strcmp(batt_sensor_names[i][0], "cell_delta") == 0) {
-                    snprintf(st, sizeof(st), "%s/cell_delta_mv", state_prefix);
-                }
-                snprintf(uid, sizeof(uid), "pylontech_rs485_%s", obj_id);
+                        snprintf(st, sizeof(st), "%s/cell_delta_mv", state_prefix);
+                    }
+                    snprintf(uid, sizeof(uid), "pylontech_rs485_%s", obj_id);
 
-                snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
-                if (build_ha_sensor_payload(payload, sizeof(payload), name, st, uid, batt_sensor_names[i][2], batt_sensor_names[i][3], batt_sensor_names[i][4], avail_str.c_str(), device_json.c_str())) {
+                    snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
+                    if (build_ha_sensor_payload(payload, sizeof(payload), name, st, uid, batt_sensor_names[i][2], batt_sensor_names[i][3], batt_sensor_names[i][4], avail_str.c_str(), device_json.c_str())) {
                         if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
                     }
                     disc_pos_ = ord;

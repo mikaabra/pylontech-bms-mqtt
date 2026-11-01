@@ -296,12 +296,9 @@ public:
             received_0x35C_ = false;
         }
 
-        if (!availability_.stale) {
-            if (now - last_status_heartbeat_ >= 600000) {
-                esphome::mqtt::global_mqtt_client->publish(can_prefix_ + "/status", std::string("online"), (uint8_t)0, true);
-                last_status_heartbeat_ = now;
-            }
-        }
+        // the availability topic is maintained solely by the checked
+        // AvailabilityTracker heartbeat (10s, both states) — the former
+        // 10-minute duplicate publish here was unchecked and bypassed it
     }
 
     void publish_diagnostics() {
@@ -397,7 +394,6 @@ public:
     void on_mqtt_connect() {
         reset_value_hysteresis();
         last_diag_publish_ = 0;
-        last_status_heartbeat_ = 0;
         received_0x359_ = false;
         received_0x35C_ = false;
     }
@@ -650,7 +646,6 @@ private:
     bool has_can_rx_ = false;
     int frame_count_ = 0;
     int error_count_ = 0;
-    uint32_t last_status_heartbeat_ = 0;
     bool received_0x359_ = false;
     bool received_0x35C_ = false;
 

@@ -123,9 +123,10 @@ inline bool bc_reason_is_routine_() {
 }
 
 // Per-boot: build the snapshot report once. Shared by the serial pass at
-// boot (ESP_LOGE below) and the direct broker publish after discovery
-// completes.
-inline void bc_build_report_(char *buf, size_t buf_size, bool routine) {
+// boot (ESP_LOG* below) and the direct broker publish after discovery
+// completes. Returns false only if the format outgrew the buffer — callers
+// must not publish a truncated report.
+inline bool bc_build_report_(char *buf, size_t buf_size, bool routine) {
     const char *names[] = {"none", "idle", "tx_analog", "wait_analog",
                            "tx_alarm", "wait_alarm", "pub_data", "pub_stack",
                            "pub_disc", "check_stale", "can_frame", "can_diag",
@@ -133,13 +134,14 @@ inline void bc_build_report_(char *buf, size_t buf_size, bool routine) {
     const char *name = bc_snap_stage_ <= BC_SWEEP_BATT ? names[bc_snap_stage_] : "?";
     const char *max_name = bc_snap_max_pub_stage_ <= BC_SWEEP_BATT ? names[bc_snap_max_pub_stage_] : "?";
     const char *suffix = routine ? " (routine reset, not a crash)" : "";
-    snprintf(buf, buf_size,
-             "prior session ended in stage %u(%s) aux=%u marks=%lu last_pub_ms=%lu "
-             "max_pub_ms=%lu(max stage %u(%s) aux %u) stage_ms=%lu reset_reason=%d%s",
-             bc_snap_stage_, name, bc_snap_aux_, (unsigned long) bc_snap_mark_count_,
-             (unsigned long) bc_snap_last_pub_ms_, (unsigned long) bc_snap_max_pub_ms_,
-             bc_snap_max_pub_stage_, max_name, bc_snap_max_pub_aux_,
-             (unsigned long) bc_snap_stage_ms_, bc_snap_reset_reason_, suffix);
+    int n = snprintf(buf, buf_size,
+                     "prior session ended in stage %u(%s) aux=%u marks=%lu last_pub_ms=%lu "
+                     "max_pub_ms=%lu(max stage %u(%s) aux %u) stage_ms=%lu reset_reason=%d%s",
+                     bc_snap_stage_, name, bc_snap_aux_, (unsigned long) bc_snap_mark_count_,
+                     (unsigned long) bc_snap_last_pub_ms_, (unsigned long) bc_snap_max_pub_ms_,
+                     bc_snap_max_pub_stage_, max_name, bc_snap_max_pub_aux_,
+                     (unsigned long) bc_snap_stage_ms_, bc_snap_reset_reason_, suffix);
+    return n >= 0 && (size_t) n < buf_size;
 }
 
 // Serial pass at boot: keep the snapshot pending so the post-discovery
@@ -147,7 +149,14 @@ inline void bc_build_report_(char *buf, size_t buf_size, bool routine) {
 // ERROR, routine resets at INFO so they stay distinguishable.
 inline void bc_log_snapshot_serial_() {
     char buf[288];
-    bc_build_report_(buf, sizeof(buf), bc_reason_is_routine_());
+    bool fit = bc_build_report_(buf, sizeof(buf), bc_reason_is_routine_());
+    if (!fit) {
+        // serial pass still shows the (null-terminated) excerpt: a truncated
+        // report is better than a missing one, and the flag names the bug
+        ESP_LOGE("breadcrumbs", "report overgrew buffer (format regression), excerpt follows");
+        ESP_LOGE("breadcrumbs", "%s", buf);
+        return;
+    }
     if (bc_reason_is_routine_()) {
         ESP_LOGI("breadcrumbs", "%s", buf);
     } else {
@@ -205,7 +214,13 @@ inline bool bc_publish_report_direct() {
     if (!bc_have_snapshot_) return true;  // nothing pending
     if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return false;
     char buf[288];
-    bc_build_report_(buf, sizeof(buf), bc_reason_is_routine_());
+    if (!bc_build_report_(buf, sizeof(buf), bc_reason_is_routine_())) {
+        // never publish a truncated report; the serial pass already showed
+        // the excerpt, so consume the record rather than retrying forever
+        ESP_LOGE("breadcrumbs", "report overgrew buffer; discarding record (format regression)");
+        bc_have_snapshot_ = false;
+        return true;
+    }
     if (!esphome::mqtt::global_mqtt_client->publish("deye_bms/logs", std::string(buf))) return false;
     bc_have_snapshot_ = false;
     return true;
