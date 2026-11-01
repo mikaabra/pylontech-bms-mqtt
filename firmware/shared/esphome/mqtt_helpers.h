@@ -32,8 +32,12 @@ struct PublishPacer {
         // mqtt task performs the network write. Without pacing, a discovery
         // stream (~300 messages) outruns the drain task and exhausts the
         // ~29-slot pool even on a healthy LAN, so every burst drops. One
-        // millisecond per publish keeps the producer at or below the drain
-        // rate; checked enqueue results catch what the pacing misses.
+        // millisecond per publish spreads the enqueue so the pool drains as
+        // it fills on a healthy link — it does NOT bound the producer below
+        // the drain rate when the link itself is slow (2026-11-01: paced
+        // heartbeat bursts still overflowed the pool while the broker
+        // session stayed up — issue #53). Checked enqueue results are what
+        // actually catch refusals.
         delay(1);
 #endif
     }
