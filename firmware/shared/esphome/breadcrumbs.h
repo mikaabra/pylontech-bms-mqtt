@@ -87,11 +87,15 @@ inline void bc_mark(uint8_t stage, uint8_t aux = 0) {
 }
 
 // Scope guard for section-style loop callbacks such as tick(): marks
-// BC_IDLE on every scope exit including early returns — unless the loop
-// never comes back, which leaves the section's entry mark as the panic
-// answer. Use one per callback scope, after the entry mark.
+// BC_IDLE and clears the section origin on every scope exit including
+// early returns — unless the loop never comes back, which leaves the
+// section's entry mark as the panic answer. bc_pub_end cannot do the
+// clearing: it also runs mid-section for each publish.
 struct BcScopeGuard {
-    ~BcScopeGuard() { bc_mark(BC_IDLE); }
+    ~BcScopeGuard() {
+        bc_mark(BC_IDLE);
+        bc_section_ = 0;
+    }
 };
 
 // Called by the publish chokepoints just before the blocking socket write;

@@ -113,12 +113,25 @@ int main() {
         g_ms = 6050;
         (void) leaked;  // destructor never runs: "hang inside the scope"
         g_reset_reason = ESP_RST_TASK_WDT;
+        assert(bc_section_ == BC_WAIT_ALARM);  // leaked guard kept the origin
         bc_setup();
         delete leaked;  // test hygiene only; the snapshot is already taken
     }
     assert(count_logs("ERROR", "ended in stage 5(wait_alarm)") == 1);
     assert(bc_snap_stage_ms_ == 6010);  // written at mark time, not hang time
-    bc_report_to_broker(true);
+
+    // Guard clears the section origin: a publish from an unmarked caller
+    // after a section exits must not inherit the stale section aux.
+    bc_mark(BC_CAN_FRAME, 0x51);
+    {
+        BcScopeGuard section_clears;
+        (void) section_clears;
+    }
+    assert(bc_section_ == 0);
+    bc_pub_begin();
+    assert(bc_aux_ == 0);  // origin is scope-bounded now
+    g_ms = 6900;
+    bc_pub_end();
 
     // Session 7: unknown and non-enum'd reasons are NOT routine — ERROR, no
     // routine label. Only SW/POWERON/DEEPSLEEP get the benign treatment.

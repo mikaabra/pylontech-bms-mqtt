@@ -22,6 +22,7 @@ public:
 
     void handle_0x351(const std::vector<uint8_t>& x) {
         bc_mark(BC_CAN_FRAME, 0x51);
+        BcScopeGuard bc_frame_guard_;
         frame_count_++;
 
         if (x.size() < 8) { error_count_++; return; }
@@ -76,6 +77,7 @@ public:
 
     void handle_0x355(const std::vector<uint8_t>& x) {
         bc_mark(BC_CAN_FRAME, 0x55);
+        BcScopeGuard bc_frame_guard_;
         frame_count_++;
 
         if (x.size() < 4) { error_count_++; return; }
@@ -112,6 +114,7 @@ public:
 
     void handle_0x359(const std::vector<uint8_t>& x) {
         bc_mark(BC_CAN_FRAME, 0x59);
+        BcScopeGuard bc_frame_guard_;
         frame_count_++;
 
         if (x.size() < 8) { error_count_++; return; }
@@ -169,6 +172,7 @@ public:
 
     void handle_0x35C(const std::vector<uint8_t>& x) {
         bc_mark(BC_CAN_FRAME, 0x5C);
+        BcScopeGuard bc_frame_guard_;
         frame_count_++;
 
         if (x.size() < 8) { error_count_++; return; }
@@ -195,6 +199,7 @@ public:
 
     void handle_0x370(const std::vector<uint8_t>& x) {
         bc_mark(BC_CAN_FRAME, 0x70);
+        BcScopeGuard bc_frame_guard_;
         frame_count_++;
 
         if (x.size() < 8) { error_count_++; return; }
@@ -275,6 +280,7 @@ public:
 
     void check_stale() {
         bc_mark(BC_CHECK_STALE);
+        BcScopeGuard bc_stale_guard_;
         uint32_t now = millis();
 
         if (!has_can_rx_) {
@@ -300,6 +306,7 @@ public:
 
     void publish_diagnostics() {
         bc_mark(BC_CAN_DIAG);
+        BcScopeGuard bc_diag_guard_;
         char payload[16];
         uint32_t now = millis();
 
