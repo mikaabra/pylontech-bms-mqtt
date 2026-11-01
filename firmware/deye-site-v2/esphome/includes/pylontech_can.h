@@ -396,6 +396,7 @@ public:
         last_diag_publish_ = 0;
         received_0x359_ = false;
         received_0x35C_ = false;
+        restart_discovery();
     }
 
     void restart_discovery() { disc_pos_ = 0; }
@@ -630,7 +631,11 @@ public:
             }
             disc_pos_ = ord;
         }
-        disc_pos_ = 0;
+        // done streams keep disc_pos_ at the end: a re-call skips every
+        // site and returns true consuming no budget. Restarting the cursor
+        // here would replay the whole stream every tick and starve the
+        // second handler (review blocker 1). Only on_mqtt_connect (new
+        // connection) and restart_discovery (button) rewind it.
         return true;
     }
 

@@ -24,10 +24,10 @@ struct AvailabilityTracker {
     }
 
     void mark_online(esphome::mqtt::MQTTClientComponent* mqtt) {
-        if (last_online) { stale = false; return; }  // no-op once confirmed
-        if (!publish_stamp_(mqtt, "online")) return;  // keep last_online false: next rx retries
+        stale = false;  // data-age truth, never broker-dependent
+        if (last_online) return;  // stamp already confirmed online
+        if (!publish_stamp_(mqtt, "online")) return;  // next rx retries
         last_online = true;
-        stale = false;
     }
 
     void mark_stale(esphome::mqtt::MQTTClientComponent* mqtt) {

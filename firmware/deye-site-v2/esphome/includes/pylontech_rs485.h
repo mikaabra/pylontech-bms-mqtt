@@ -320,6 +320,21 @@ public:
         BcScopeGuard bc_sweep_guard_;
 
         uint32_t now = millis();
+
+        // 30s repair pass (review items 3+5): retained idempotent stamps —
+        // the channel availability plus both alarm latches for every pack.
+        // A dropped alarm ON would hide a dead pack until reconnect and a
+        // dropped OFF would stick; the runtime transition publishes stay for
+        // latency, this bounds their repair at one sweep. CAN heals its
+        // stamp in 10s via publish_diagnostics; this gives RS485 parity.
+        if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected()) {
+            availability_.heartbeat(esphome::mqtt::global_mqtt_client);
+            for (int batt = 0; batt < num_batteries_; batt++) {
+                publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm);
+                publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm);
+            }
+        }
+
         bool force_heartbeat = (now - last_heartbeat_ >= 300000);
         if (force_heartbeat) {
             last_heartbeat_ = now;
@@ -583,6 +598,7 @@ public:
     void on_mqtt_connect() {
         reset_all_hysteresis();
         has_any_alarm_ = false;
+        restart_discovery();
     }
 
     void restart_discovery() { disc_pos_ = 0; }
@@ -851,7 +867,11 @@ public:
                 disc_pos_ = ord;
             }
         }
-        disc_pos_ = 0;
+        // done streams keep disc_pos_ at the end: a re-call skips every
+        // site and returns true consuming no budget. Restarting the cursor
+        // here would replay the whole stream every tick and starve the
+        // second handler (review blocker 1). Only on_mqtt_connect (new
+        // connection) and restart_discovery (button) rewind it.
         return true;
     }
 

@@ -28,3 +28,16 @@ inline uint32_t millis() { return g_ms; }
 #define ESP_LOGE(tag, ...) BC_CAPTURE_LOG_("ERROR", tag, __VA_ARGS__)
 #define ESP_LOGW(tag, ...) BC_CAPTURE_LOG_("WARN", tag, __VA_ARGS__)
 #define ESP_LOGI(tag, ...) BC_CAPTURE_LOG_("INFO", tag, __VA_ARGS__)
+
+namespace esphome {
+// ESPHome's App is a global OBJECT, not a type; publish paths call
+// App.feed_wdt() on it unqualified
+inline struct AppStub {
+  void feed_wdt() {}
+} App;
+inline void yield() {}
+}  // namespace esphome
+
+// The firmware's handlers see these symbols unqualified via esphome.h's
+// using-directive; mirror that for the host-side headers.
+using namespace esphome;
