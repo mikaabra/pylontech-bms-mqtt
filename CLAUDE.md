@@ -15,7 +15,7 @@ All data published to MQTT with Home Assistant auto-discovery.
 | Device | Firmware | Status |
 |--------|----------|--------|
 | `deye-bms-can.local` | `firmware/deye-site-v2/esphome/deye-bms-can.yaml` | **ACTIVE** — production, ESPHome 2026.9.1, encrypted OTA, async MQTT (`idf_send_async`, issue #42 fix merged 1919071), flashed + stall-test accepted 2026-11-01, #42 closed |
-| — (board ordered) | `firmware/deye-site-v2/esphome/bms-link-sniffer.yaml` | **PENDING** — second Waveshare ESP32-S3-RS485-CAN for the BMS073 Link bus. RX-only listener (#58): yaml has no tx_pin; DE/RE held low by an internal ALWAYS_OFF pin-holder switch. Guarded balance-voltage write client (#59) drafts on top. Flash + clip-on on arrival |
+| — (board ordered) | `firmware/deye-site-v2/esphome/bms-link-sniffer.yaml` | **PENDING** — second Waveshare ESP32-S3-RS485-CAN for the BMS073 Link bus. Two-phase: rx-only listener (#58, PR part 1 — no tx_pin; DE/RE held low while the firmware runs only) + guarded balance-voltage write client (#59, PR part 2 — tx via flow_control, Link Write Enable switch ALWAYS_OFF, single-entry allowlist 0x4C 3400-3500 mV, one-shot button, MQTT-command-free controls). Deployment gated on the pre-bus glitch sniff (boots/OTA/forced safe mode — GPIO21 is unclaimed through reset) + 120 Ω termination check, per the checklists in the PRs |
 | `rack-solar-bridge.local` | `firmware/rack-solar-site/esphome-smartshunt-epever-ble-v2/rack-solar-bridge.yaml` | **ACTIVE** — production (BLE SmartShunt + EPEVER), flashed 2026-11-01 with shared availability.h state-flip-on-success semantics (first on-device run; post-flash verified: all 6 stamps online, single clean reboot, data live). Async MQTT NOT yet adopted — see issue #45 |
 | — | `firmware/rack-solar-site/esphome-smartshunt-epever-v2/` | **NOT DEPLOYED** — VE.Direct variant, not in use (user confirmed). Do not flash. |
 | — | `firmware/rack-solar-site/esphome-smartshunt-epever/` | **LEGACY v1** — superseded |
@@ -55,7 +55,7 @@ Desktop oracle tests run directly with clang, no esphome toolchain needed:
 
 ```bash
 cd firmware/deye-site-v2/esphome
-for t in test_breadcrumbs test_discovery_driver test_rs485_info_decode test_rs485_temp_decode; do
+for t in test_breadcrumbs test_discovery_driver test_rs485_info_decode test_rs485_temp_decode test_bms_link_sniffer_core; do
   clang++ -std=gnu++20 -Wall -Wextra -I. -Itests/stubs -Iincludes tests/$t.cpp -o /tmp/$t && /tmp/$t
 done
 ```

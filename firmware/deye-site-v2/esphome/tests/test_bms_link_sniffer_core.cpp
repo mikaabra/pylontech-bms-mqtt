@@ -332,6 +332,59 @@ static void test_ring_bounds() {
     }
 }
 
+// Incident capture: the ring freezes on the two events this device
+// exists to catch. Post-freeze anomalies must not overwrite the window;
+// the Dump button (core: resume_ring) releases it.
+static void test_incident_freeze() {
+    BmsLinkCore c;
+    uint32_t t = 1000;
+    for (int i = 0; i < 3; i++) {
+        send(c, poll_req(2, "42"), t);
+        send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
+        t += 624;
+    }
+    uint32_t last = t - 624;
+    c.tick(last + 2100);  // bus silence trips the watchdog
+    check(c.watchdog_tripped(), "watchdog tripped");
+    check(c.ring_frozen(), "watchdog trip froze the ring");
+    std::string frozen = c.dump_bounded();
+    check(frozen.find("(watchdog)") != std::string::npos,
+          "freeze marker is the newest ring entry");
+    check(frozen.find("…") != std::string::npos || frozen.size() > 0,
+          "frozen window carries pre-incident context");
+
+    // post-freeze anomaly: counted, not recorded; window stays stable
+    send(c, std::string(REAL_WRITE_INSTACK) + "\r", last + 2500);
+    check(c.ring_dropped() == 1, "post-freeze anomaly counted as dropped");
+    check(c.dump_bounded() == frozen, "ring window stable under freeze");
+
+    // recovery does NOT auto-release; the operator does
+    send(c, poll_req(2, "42"), last + 3000);
+    check(c.ring_frozen(), "recovery keeps the freeze (operator releases)");
+
+    c.resume_ring();
+    check(!c.ring_frozen(), "resume releases the freeze");
+    send(c, std::string(REAL_WRITE_INSTACK) + "\r", last + 4000);
+    std::string resumed = c.dump_bounded();
+    check(resumed != frozen || c.ring_dropped() >= 1,
+          "post-resume anomaly recorded into the ring");
+}
+
+static void test_mute_freezes() {
+    BmsLinkCore c;
+    uint32_t t = 1000;
+    send(c, poll_req(3, "42"), t);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
+    t += 624;
+    for (int i = 0; i < 3; i++) {  // 3 unanswered polls of pack 3
+        send(c, poll_req(3, "42"), t);
+        t += 624;
+    }
+    send(c, poll_req(1, "42"), t);  // next request closes the muted slot
+    check(c.ring_frozen(), "pack mute froze the ring");
+    check(!c.pack(3).responding, "pack3 muted");
+}
+
 int main() {
     test_lenid4();
     test_real_frames_parse_clean();
@@ -347,6 +400,8 @@ int main() {
     test_bare_ack_and_unpaired();
     test_watchdog();
     test_ring_bounds();
+    test_incident_freeze();
+    test_mute_freezes();
 
     if (failures == 0) {
         printf("test_bms_link_sniffer_core: ALL PASS\n");

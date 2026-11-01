@@ -41,8 +41,12 @@ public:
         for (const auto& e : core_.drain_events()) publish_event(e);
     }
 
+    // Dump button: publish the ring and release a freeze. Auto-publish
+    // (below) never resumes - the operator decides when the incident
+    // window is no longer needed.
     void publish_dump() {
         if (anomaly_dump_) anomaly_dump_->publish_state(core_.dump_bounded());
+        core_.resume_ring();
     }
 
     // ---- getters for template-sensor lambdas ----
@@ -92,6 +96,10 @@ private:
             case linksniff::EventKind::PackRecover:    kind = "pack-recover"; break;
         }
         if (!anomaly_like) return;
+        // anomalies ride the WARN log stream too (bms_link/logs on the
+        // broker) so months-unattended incidents reach the recorder via
+        // the Log Tail entity even if discovery or push entities glitch
+        ESP_LOGW("link", "%s", e.detail.c_str());
         char line[160];
         if (e.pack)
             snprintf(line, sizeof line, "[%lu.%03lu] pack %d %s: %s",
@@ -102,6 +110,12 @@ private:
                      (unsigned long)(e.t_ms / 1000), (unsigned long)(e.t_ms % 1000),
                      kind, e.detail.c_str());
         last_anomaly_->publish_state(line);
+        if (anomaly_dump_ && (e.kind == linksniff::EventKind::WatchdogTrip ||
+                              e.kind == linksniff::EventKind::PackMute)) {
+            // keep the pre-incident window intact; operator releases via
+            // the Dump button
+            anomaly_dump_->publish_state(core_.dump_bounded());
+        }
     }
 
     esphome::uart::UARTComponent* uart_;

@@ -187,6 +187,7 @@ public:
             push_event(EventKind::WatchdogTrip, t_ms, 0, "no request for >2 s");
             anomalies_++;
             ring_now(t_ms, "(watchdog)");
+            freeze_ring();  // after the marker: the pre-incident window + freeze note is the frozen head
         }
     }
 
@@ -230,6 +231,16 @@ public:
         rate_anchor_total_ = frames_total_;
         return r;
     }
+
+    // Incident capture: the ring freezes on the two events we exist to
+    // catch (slot-watchdog trip = master-side outage, pack mute = the
+    // every-couple-months lockup). While frozen, new entries do NOT
+    // overwrite the pre-incident window; they are counted instead. The
+    // Dump button (wrapper) publishes the frozen window and releases.
+    void freeze_ring() { ring_frozen_ = true; }
+    void resume_ring() { ring_frozen_ = false; }
+    bool ring_frozen() const { return ring_frozen_; }
+    uint32_t ring_dropped() const { return ring_dropped_; }
 
     // last anomaly line (Last Anomaly entity) — built on drain by the wrapper
     std::vector<LinkEvent> drain_events() {
@@ -386,6 +397,7 @@ private:
             if (s.unanswered >= kPackMuteSlots && !s.muting) {
                 s.muting = true;
                 s.responding = false;
+                freeze_ring();
                 push_event(EventKind::PackMute, last_request_start_ms_, open_req_.pack,
                            "mute after " + std::to_string(s.unanswered) + " polls");
                 anomalies_++;
@@ -423,6 +435,10 @@ private:
     }
 
     void ring_now(uint32_t t_ms, const std::string& hex) {
+        if (ring_frozen_) {
+            ring_dropped_++;
+            return;
+        }
         RingEntry e;
         e.t_ms = t_ms;
         if (hex.size() > kRingHexBudget) {
@@ -482,6 +498,8 @@ private:
     RingEntry   ring_[kRingSlots];
     size_t      ring_head_ = 0;
     size_t      ring_count_ = 0;
+    bool        ring_frozen_ = false;
+    uint32_t    ring_dropped_ = 0;
     std::vector<GapSample> gap_ring_;
     size_t      gap_head_ = 0;
 

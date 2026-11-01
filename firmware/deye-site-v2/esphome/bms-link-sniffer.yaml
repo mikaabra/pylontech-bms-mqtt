@@ -6,10 +6,19 @@
 # pack-to-pack RS485 chain of the 5-pack Richpower BMS073 stack.
 #   RS485: RX=GPIO18, 9600 baud (TX=GPIO17 and DE/RE=GPIO21 are unused here)
 #
-# RX-ONLY GUARANTEE (part 1): this yaml declares no tx_pin and no
-# flow_control_pin — ESPHome cannot key DE via the UART driver. DE/RE is
-# hardwired to GPIO21 on this board, so that pin is claimed by an internal
-# ALWAYS_OFF gpio switch holding it LOW: receive enabled, driver disabled.
+# RX-ONLY GUARANTEE (part 1) — scoped honestly: WHILE THE FIRMWARE RUNS,
+# this yaml declares no tx_pin and no flow_control_pin, so ESPHome cannot
+# key DE via the UART driver, and DE/RE (hardwired to GPIO21 on this
+# board) is claimed by an internal ALWAYS_OFF gpio switch held LOW:
+# receive enabled, driver disabled.
+# That claim does NOT extend to reset: GPIO21 is unclaimed through the
+# ROM bootloader, chip reset, and safe mode — safe-mode entry returns
+# from main() before components set up, so a boot loop can leave the pin
+# floating for up to ~5 minutes. Only the board's own pull state covers
+# that window, and it is UNMEASURED. The pre-bus glitch sniff (reboots,
+# OTA, forced safe-mode boot — deployment checklist in the PR) is the
+# measurement; if it shows DE floating high, fit an external pulldown on
+# GPIO21 before permanent clip-on.
 # Part 2 (#59) replaces the pin-holder with uart flow_control in its own
 # reviewed change; until then there is no write path anywhere in the tree.
 #
@@ -85,6 +94,14 @@ mqtt:
     topic: bms_link/logs
     level: WARN
     retain: false
+  # feed the WARN stream back into a native text sensor so the always-on
+  # HA recorder keeps every anomaly line even if a push entity glitches
+  # (the deye device's Log Tail pattern)
+  on_message:
+    - topic: bms_link/logs
+      then:
+        - lambda: |-
+            id(link_log_tail).publish_state(x);
 
 api:
   reboot_timeout: 0s
@@ -352,6 +369,13 @@ binary_sensor:
     lambda: 'return id(mqtt_client).is_connected();'
 
 text_sensor:
+  - platform: template
+    name: "Link Log Tail"
+    id: link_log_tail
+    icon: "mdi:math-log"
+    entity_category: diagnostic
+    update_interval: never
+
   - platform: template
     name: "Link Last Anomaly"
     id: link_last_anomaly
