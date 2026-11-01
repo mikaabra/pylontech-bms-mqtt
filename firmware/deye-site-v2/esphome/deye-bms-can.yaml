@@ -68,6 +68,12 @@ mqtt:
   port: 1883
   username: !secret mqtt_user
   password: !secret mqtt_password
+  # Async enqueue: the loop only copies into the 29-slot pool; a dedicated
+  # mqtt task performs the network writes. The loop can no longer block in
+  # esp_mqtt_client_publish (the 2026-11-01 watchdog hang class, issue #42).
+  # Dropped enqueues are detected via checked discovery results + hysteresis
+  # heartbeats.
+  idf_send_async: true
 
   birth_message:
     topic: ${device_name}/status
@@ -179,6 +185,9 @@ globals:
   - id: mqtt_disconnect_count
     type: int
     initial_value: '0'
+  - id: discovery_started
+    type: bool
+    initial_value: 'false'
 
 interval:
   - interval: 3s
@@ -195,23 +204,44 @@ interval:
               // but value updates lost during the outage must be re-sent.
               ((PylontechCAN*)id(pylontech_can))->on_short_reconnect();
               ((PylontechRS485*)id(pylontech_rs485))->on_short_reconnect();
+              // An in-flight discovery also rewinds: the drain task may have
+              // discarded up to 29 accepted-but-unsent messages during the
+              // gap, and resuming mid-cursor would leave permanent holes.
+              if (!id(discovery_published)) {
+                ((PylontechCAN*)id(pylontech_can))->restart_discovery();
+                ((PylontechRS485*)id(pylontech_rs485))->restart_discovery();
+              }
             }
             id(mqtt_was_connected) = true;
             id(mqtt_disconnect_count) = 0;
+            // crash report before discovery (review item 6): budgeted
+            // discovery no longer floods the pool, and a crash loop shorter
+            // than discovery convergence still gets its report out. A
+            // rejected publish stays pending; every connected tick retries it.
+            bc_publish_report_direct();
+            if (!id(discovery_started)) {
+              id(discovery_started) = true;
+              ESP_LOGI("mqtt", "Publishing discovery...");
+              // once per connection: state resets (including the discovery
+              // cursor) only; publishing lives in the resumable stream below
+              ((PylontechCAN*)id(pylontech_can))->on_mqtt_connect();
+              ((PylontechRS485*)id(pylontech_rs485))->on_mqtt_connect();
+            }
+            if (!id(discovery_published)) {
+              PublishBudget budget(20);
+              bool can_ok = ((PylontechCAN*)id(pylontech_can))->publish_discovery(budget);
+              bool rs485_ok = ((PylontechRS485*)id(pylontech_rs485))->publish_discovery(budget);
+              id(discovery_published) = can_ok && rs485_ok;
+              if (!id(discovery_published)) ESP_LOGW("discovery", "pass incomplete (pool or budget), resuming next tick");
+            }
           } else if (id(mqtt_was_connected)) {
             id(mqtt_disconnect_count)++;
             if (id(mqtt_disconnect_count) >= 2) {
               id(discovery_published) = false;
+              id(discovery_started) = false;
               id(mqtt_was_connected) = false;
             }
           }
-          if (!id(discovery_published) && connected) {
-            id(discovery_published) = true;
-            ESP_LOGI("mqtt", "Publishing discovery...");
-            ((PylontechCAN*)id(pylontech_can))->on_mqtt_connect();
-            ((PylontechRS485*)id(pylontech_rs485))->on_mqtt_connect();
-          }
-          bc_report_to_broker(connected);
   - interval: 5s
     then:
       - lambda: |-
@@ -280,8 +310,14 @@ button:
     on_press:
       - lambda: |-
           if (!id(pylontech_can) || !id(pylontech_rs485)) return;
-          ((PylontechCAN*)id(pylontech_can))->publish_discovery();
-          ((PylontechRS485*)id(pylontech_rs485))->publish_discovery();
+          ((PylontechCAN*)id(pylontech_can))->restart_discovery();
+          ((PylontechRS485*)id(pylontech_rs485))->restart_discovery();
+          PublishBudget budget(250);
+          ((PylontechCAN*)id(pylontech_can))->publish_discovery(budget);
+          if (budget.remaining > 0) ((PylontechRS485*)id(pylontech_rs485))->publish_discovery(budget);
+          // an incomplete blast (pool rejection) must not strand the sweep:
+          // let the 3s tick resume the cursor until the pass completes clean
+          id(discovery_published) = false;
 
   - platform: template
     name: "Toggle Debug Logging"

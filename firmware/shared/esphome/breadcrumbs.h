@@ -3,6 +3,7 @@
 #include "esp_attr.h"
 #include "esp_system.h"
 #include "esphome/core/application.h"
+#include "esphome/components/mqtt/mqtt_client.h"
 
 // Forensic breadcrumbs for the loop-blocking watchdog panics (see the
 // 2026-11-01 incident): the task watchdog watches the ESPHome loop task and
@@ -60,8 +61,8 @@ inline uint8_t bc_section_ = 0;
 
 // RAM snapshot of the previous session, taken at boot before the live record
 // is reset; the broker pass reports the snapshot, not the overwritten live
-// values. bc_have_snapshot_ is cleared ONLY in bc_report_to_broker(), so
-// the report still flows after MQTT connects.
+// values; the snapshot stays pending until the direct post-discovery
+// publish is accepted.
 inline bool bc_have_snapshot_ = false;
 inline uint8_t bc_snap_stage_ = BC_NONE;
 inline uint8_t bc_snap_aux_ = 0;
@@ -72,10 +73,6 @@ inline uint32_t bc_snap_max_pub_ms_ = 0;
 inline uint8_t bc_snap_max_pub_stage_ = BC_NONE;
 inline uint8_t bc_snap_max_pub_aux_ = 0;
 inline int bc_snap_reset_reason_ = 0;
-
-// Per-boot guard for the broker pass; reset by bc_setup() so each session
-// gets exactly one delivery attempt.
-inline bool bc_broker_attempted_ = false;
 
 inline void bc_mark(uint8_t stage, uint8_t aux = 0) {
     if (bc_magic_ != BC_MAGIC) return;  // not set up (garbage after power-on)
@@ -125,39 +122,45 @@ inline bool bc_reason_is_routine_() {
            bc_snap_reset_reason_ == ESP_RST_DEEPSLEEP;
 }
 
-// Emit the boot snapshot. Serial pass at boot keeps the snapshot pending so
-// the broker pass can deliver it to the recorder once MQTT connects;
-// non-routine resets log at ERROR, routine resets (OTA, manual) at
-// INFO/WARN so they stay distinguishable in HA despite both landing there.
-inline void bc_log_snapshot_(bool to_broker) {
+// Per-boot: build the snapshot report once. Shared by the serial pass at
+// boot (ESP_LOG* below) and the direct broker publish after discovery
+// completes. Returns false only if the format outgrew the buffer — callers
+// must not publish a truncated report.
+inline bool bc_build_report_(char *buf, size_t buf_size, bool routine) {
     const char *names[] = {"none", "idle", "tx_analog", "wait_analog",
                            "tx_alarm", "wait_alarm", "pub_data", "pub_stack",
                            "pub_disc", "check_stale", "can_frame", "can_diag",
                            "pub_avail", "sweep_batt"};
     const char *name = bc_snap_stage_ <= BC_SWEEP_BATT ? names[bc_snap_stage_] : "?";
     const char *max_name = bc_snap_max_pub_stage_ <= BC_SWEEP_BATT ? names[bc_snap_max_pub_stage_] : "?";
-    const bool routine = bc_reason_is_routine_();
-    if (!routine) {
-        ESP_LOGE("breadcrumbs",
-                 "prior session ended in stage %u(%s) aux=%u marks=%lu last_pub_ms=%lu max_pub_ms=%lu(max stage %u(%s) aux %u) stage_ms=%lu reset_reason=%d",
-                 bc_snap_stage_, name, bc_snap_aux_, (unsigned long) bc_snap_mark_count_,
-                 (unsigned long) bc_snap_last_pub_ms_, (unsigned long) bc_snap_max_pub_ms_,
-                 bc_snap_max_pub_stage_, max_name, bc_snap_max_pub_aux_,
-                 (unsigned long) bc_snap_stage_ms_, bc_snap_reset_reason_);
-    } else if (to_broker) {
-        ESP_LOGW("breadcrumbs",
-                 "prior session ended in stage %u(%s) aux=%u marks=%lu last_pub_ms=%lu max_pub_ms=%lu(max stage %u(%s) aux %u) stage_ms=%lu reset_reason=%d (routine reset, not a crash)",
-                 bc_snap_stage_, name, bc_snap_aux_, (unsigned long) bc_snap_mark_count_,
-                 (unsigned long) bc_snap_last_pub_ms_, (unsigned long) bc_snap_max_pub_ms_,
-                 bc_snap_max_pub_stage_, max_name, bc_snap_max_pub_aux_,
-                 (unsigned long) bc_snap_stage_ms_, bc_snap_reset_reason_);
+    const char *suffix = routine ? " (routine reset, not a crash)" : "";
+    int n = snprintf(buf, buf_size,
+                     "prior session ended in stage %u(%s) aux=%u marks=%lu last_pub_ms=%lu "
+                     "max_pub_ms=%lu(max stage %u(%s) aux %u) stage_ms=%lu reset_reason=%d%s",
+                     bc_snap_stage_, name, bc_snap_aux_, (unsigned long) bc_snap_mark_count_,
+                     (unsigned long) bc_snap_last_pub_ms_, (unsigned long) bc_snap_max_pub_ms_,
+                     bc_snap_max_pub_stage_, max_name, bc_snap_max_pub_aux_,
+                     (unsigned long) bc_snap_stage_ms_, bc_snap_reset_reason_, suffix);
+    return n >= 0 && (size_t) n < buf_size;
+}
+
+// Serial pass at boot: keep the snapshot pending so the post-discovery
+// broker pass can deliver it into the HA recorder; non-routine resets at
+// ERROR, routine resets at INFO so they stay distinguishable.
+inline void bc_log_snapshot_serial_() {
+    char buf[288];
+    bool fit = bc_build_report_(buf, sizeof(buf), bc_reason_is_routine_());
+    if (!fit) {
+        // serial pass still shows the (null-terminated) excerpt: a truncated
+        // report is better than a missing one, and the flag names the bug
+        ESP_LOGE("breadcrumbs", "report overgrew buffer (format regression), excerpt follows");
+        ESP_LOGE("breadcrumbs", "%s", buf);
+        return;
+    }
+    if (bc_reason_is_routine_()) {
+        ESP_LOGI("breadcrumbs", "%s", buf);
     } else {
-        ESP_LOGI("breadcrumbs",
-                 "prior session ended in stage %u(%s) aux=%u marks=%lu last_pub_ms=%lu max_pub_ms=%lu(max stage %u(%s) aux %u) stage_ms=%lu reset_reason=%d (routine reset, not a crash)",
-                 bc_snap_stage_, name, bc_snap_aux_, (unsigned long) bc_snap_mark_count_,
-                 (unsigned long) bc_snap_last_pub_ms_, (unsigned long) bc_snap_max_pub_ms_,
-                 bc_snap_max_pub_stage_, max_name, bc_snap_max_pub_aux_,
-                 (unsigned long) bc_snap_stage_ms_, bc_snap_reset_reason_);
+        ESP_LOGE("breadcrumbs", "%s", buf);
     }
 }
 
@@ -199,19 +202,28 @@ inline void bc_setup() {
     bc_max_pub_stage_ = BC_NONE;
     bc_max_pub_aux_ = 0;
     bc_section_ = 0;
-    bc_log_snapshot_(false);
-    bc_broker_attempted_ = false;
+    bc_log_snapshot_serial_();
 }
 
-// Call from the 3s interval with the MQTT connection state. On first
-// connect per boot, emit the snapshot through the logger so the mqtt
-// log_topic carries it into the HA recorder — the only place the snapshot
-// flag is consumed.
-inline void bc_report_to_broker(bool mqtt_connected) {
-    if (bc_broker_attempted_ || !mqtt_connected || !bc_have_snapshot_) return;
-    bc_broker_attempted_ = true;
+// Call from the 3s interval AFTER discovery has completed. Publishing the
+// report straight to the log-tail topic (not through the logger, which has
+// no retry) is checked: the snapshot stays pending until the publish is
+// accepted into the queue, so a crash record cannot be lost to a full pool
+// at the worst moment. Rides with the Log Tail entity into the recorder.
+inline bool bc_publish_report_direct() {
+    if (!bc_have_snapshot_) return true;  // nothing pending
+    if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return false;
+    char buf[288];
+    if (!bc_build_report_(buf, sizeof(buf), bc_reason_is_routine_())) {
+        // never publish a truncated report; the serial pass already showed
+        // the excerpt, so consume the record rather than retrying forever
+        ESP_LOGE("breadcrumbs", "report overgrew buffer; discarding record (format regression)");
+        bc_have_snapshot_ = false;
+        return true;
+    }
+    if (!esphome::mqtt::global_mqtt_client->publish("deye_bms/logs", std::string(buf))) return false;
     bc_have_snapshot_ = false;
-    bc_log_snapshot_(true);
+    return true;
 }
 
 }  // namespace esphome

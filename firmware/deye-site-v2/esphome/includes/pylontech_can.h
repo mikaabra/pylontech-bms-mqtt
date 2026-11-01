@@ -296,12 +296,9 @@ public:
             received_0x35C_ = false;
         }
 
-        if (!availability_.stale) {
-            if (now - last_status_heartbeat_ >= 600000) {
-                esphome::mqtt::global_mqtt_client->publish(can_prefix_ + "/status", std::string("online"), (uint8_t)0, true);
-                last_status_heartbeat_ = now;
-            }
-        }
+        // the availability topic is maintained solely by the checked
+        // AvailabilityTracker heartbeat (10s, both states) — the former
+        // 10-minute duplicate publish here was unchecked and bypassed it
     }
 
     void publish_diagnostics() {
@@ -309,6 +306,10 @@ public:
         BcScopeGuard bc_diag_guard_;
         char payload[16];
         uint32_t now = millis();
+
+        // both-state heartbeat (10s cadence): a dropped availability stamp
+        // has no other retry path on the CAN channel
+        availability_.heartbeat(esphome::mqtt::global_mqtt_client);
 
         if (received_0x35C_) {
             uint8_t charge_state = 0;
@@ -388,16 +389,17 @@ public:
         }
     }
 
+    // Once per connection: state resets only; publishing lives in the
+    // resumable checked stream of publish_discovery().
     void on_mqtt_connect() {
-        availability_.on_connect(esphome::mqtt::global_mqtt_client);
         reset_value_hysteresis();
         last_diag_publish_ = 0;
-        last_status_heartbeat_ = 0;
         received_0x359_ = false;
         received_0x35C_ = false;
-
-        publish_discovery();
+        restart_discovery();
     }
+
+    void restart_discovery() { disc_pos_ = 0; }
 
     // short MQTT gap (< 6s debounce): discovery survives (retained), but
     // value updates lost during the outage must be re-sent
@@ -406,13 +408,22 @@ public:
         reset_value_hysteresis();
     }
 
-    void publish_discovery() {
-        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
+    bool publish_discovery(PublishBudget &budget) {
+        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return false;
         bc_mark(BC_PUB_DISC);
+        BcScopeGuard bc_disc_guard_;
+        int ord = 0;
+
+        // Availability stamp leads the checked stream; the cursor skips
+        // sites an earlier pass already landed.
+        ord++;
+        if (ord > disc_pos_) {
+            if (!budget.take() || !availability_.on_connect(esphome::mqtt::global_mqtt_client)) return false;
+            disc_pos_ = ord;
+        }
 
         char topic[160];
         char payload[768];
-        PublishPacer pacer;
 
         const char* device_json = R"("device":{"identifiers":["deye_bms_can"],"name":"Deye BMS CAN","manufacturer":"Pylontech","model":"BMS CAN"})";
         // both the client last-will topic (device death) and the channel
@@ -422,15 +433,21 @@ public:
             can_prefix_ + R"(/status","payload_available":"online","payload_not_available":"offline"}],"availability_mode":"all")";
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soc/config");
-        if (build_ha_sensor_payload(payload, sizeof(payload), "BMS SOC", (can_prefix_ + "/soc").c_str(), "deye_bms_can_soc", "%", "battery", "measurement", avail_str.c_str(), device_json)) {
-            esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-            pacer.pace();
+        ord++;
+        if (ord > disc_pos_) {
+            if (build_ha_sensor_payload(payload, sizeof(payload), "BMS SOC", (can_prefix_ + "/soc").c_str(), "deye_bms_can_soc", "%", "battery", "measurement", avail_str.c_str(), device_json)) {
+                if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+            }
+            disc_pos_ = ord;
         }
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_soh/config");
-        if (build_ha_sensor_payload(payload, sizeof(payload), "BMS SOH", (can_prefix_ + "/soh").c_str(), "deye_bms_can_soh", "%", "battery", "measurement", avail_str.c_str(), device_json, "mdi:battery-heart-variant")) {
-            esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-            pacer.pace();
+        ord++;
+        if (ord > disc_pos_) {
+            if (build_ha_sensor_payload(payload, sizeof(payload), "BMS SOH", (can_prefix_ + "/soh").c_str(), "deye_bms_can_soh", "%", "battery", "measurement", avail_str.c_str(), device_json, "mdi:battery-heart-variant")) {
+                if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+            }
+            disc_pos_ = ord;
         }
 
         const char* limit_sensors[][4] = {
@@ -445,9 +462,12 @@ public:
             char st[80];
             snprintf(st, sizeof(st), "%s/limit/%s", can_prefix_.c_str(), limit_sensors[i][0]);
             snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_%s/config", limit_sensors[i][0]);
-            if (build_ha_sensor_payload(payload, sizeof(payload), limit_sensors[i][1], st, uid, limit_sensors[i][2], limit_sensors[i][3], "measurement", avail_str.c_str(), device_json)) {
-                esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-                pacer.pace();
+            ord++;
+            if (ord > disc_pos_) {
+                if (build_ha_sensor_payload(payload, sizeof(payload), limit_sensors[i][1], st, uid, limit_sensors[i][2], limit_sensors[i][3], "measurement", avail_str.c_str(), device_json)) {
+                    if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+                }
+                disc_pos_ = ord;
             }
         }
 
@@ -464,52 +484,76 @@ public:
             char st[80];
             snprintf(st, sizeof(st), "%s/ext/%s", can_prefix_.c_str(), ext_sensors[i][0]);
             snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_%s/config", ext_sensors[i][0]);
-            if (build_ha_sensor_payload(payload, sizeof(payload), ext_sensors[i][1], st, uid, ext_sensors[i][2], ext_sensors[i][3], "measurement", avail_str.c_str(), device_json)) {
-                esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-                pacer.pace();
+            ord++;
+            if (ord > disc_pos_) {
+                if (build_ha_sensor_payload(payload, sizeof(payload), ext_sensors[i][1], st, uid, ext_sensors[i][2], ext_sensors[i][3], "measurement", avail_str.c_str(), device_json)) {
+                    if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+                }
+                disc_pos_ = ord;
             }
         }
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_flags/config");
-        if (build_ha_sensor_payload(payload, sizeof(payload), "BMS Flags Raw", (can_prefix_ + "/flags").c_str(), "deye_bms_can_flags", "", "", "", avail_str.c_str(), device_json, "mdi:flag", "diagnostic")) {
-            esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-            pacer.pace();
+        ord++;
+        if (ord > disc_pos_) {
+            if (build_ha_sensor_payload(payload, sizeof(payload), "BMS Flags Raw", (can_prefix_ + "/flags").c_str(), "deye_bms_can_flags", "", "", "", avail_str.c_str(), device_json, "mdi:flag", "diagnostic")) {
+                if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+            }
+            disc_pos_ = ord;
         }
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_free_heap/config");
-        if (build_ha_sensor_payload(payload, sizeof(payload), "ESP Free Heap", (can_prefix_ + "/diag/free_heap").c_str(), "deye_bms_can_free_heap", "bytes", "", "", avail_str.c_str(), device_json, "mdi:memory", "diagnostic")) {
-            esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-            pacer.pace();
+        ord++;
+        if (ord > disc_pos_) {
+            if (build_ha_sensor_payload(payload, sizeof(payload), "ESP Free Heap", (can_prefix_ + "/diag/free_heap").c_str(), "deye_bms_can_free_heap", "bytes", "", "", avail_str.c_str(), device_json, "mdi:memory", "diagnostic")) {
+                if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+            }
+            disc_pos_ = ord;
         }
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_frame_count/config");
-        if (build_ha_sensor_payload(payload, sizeof(payload), "CAN Frame Count", (can_prefix_ + "/diag/frame_count").c_str(), "deye_bms_can_frame_count", "", "", "", avail_str.c_str(), device_json, "mdi:counter", "diagnostic")) {
-            esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-            pacer.pace();
+        ord++;
+        if (ord > disc_pos_) {
+            if (build_ha_sensor_payload(payload, sizeof(payload), "CAN Frame Count", (can_prefix_ + "/diag/frame_count").c_str(), "deye_bms_can_frame_count", "", "", "", avail_str.c_str(), device_json, "mdi:counter", "diagnostic")) {
+                if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+            }
+            disc_pos_ = ord;
         }
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_error_count/config");
-        if (build_ha_sensor_payload(payload, sizeof(payload), "CAN Error Count", (can_prefix_ + "/diag/error_count").c_str(), "deye_bms_can_error_count", "", "", "", avail_str.c_str(), device_json, "mdi:alert-circle", "diagnostic")) {
-            esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-            pacer.pace();
+        ord++;
+        if (ord > disc_pos_) {
+            if (build_ha_sensor_payload(payload, sizeof(payload), "CAN Error Count", (can_prefix_ + "/diag/error_count").c_str(), "deye_bms_can_error_count", "", "", "", avail_str.c_str(), device_json, "mdi:alert-circle", "diagnostic")) {
+                if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+            }
+            disc_pos_ = ord;
         }
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_module_count/config");
-        if (build_ha_sensor_payload(payload, sizeof(payload), "CAN Module Count", (can_prefix_ + "/can/module_count").c_str(), "deye_bms_can_module_count", "", "", "", avail_str.c_str(), device_json, "mdi:battery-multiple")) {
-            esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-            pacer.pace();
+        ord++;
+        if (ord > disc_pos_) {
+            if (build_ha_sensor_payload(payload, sizeof(payload), "CAN Module Count", (can_prefix_ + "/can/module_count").c_str(), "deye_bms_can_module_count", "", "", "", avail_str.c_str(), device_json, "mdi:battery-multiple")) {
+                if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+            }
+            disc_pos_ = ord;
         }
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_status_byte7/config");
-        if (build_ha_sensor_payload(payload, sizeof(payload), "CAN Status Byte 7", (can_prefix_ + "/can/status_byte7").c_str(), "deye_bms_can_status_byte7", "", "", "", avail_str.c_str(), device_json, "mdi:information-outline", "diagnostic")) {
-            esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-            pacer.pace();
+        ord++;
+        if (ord > disc_pos_) {
+            if (build_ha_sensor_payload(payload, sizeof(payload), "CAN Status Byte 7", (can_prefix_ + "/can/status_byte7").c_str(), "deye_bms_can_status_byte7", "", "", "", avail_str.c_str(), device_json, "mdi:information-outline", "diagnostic")) {
+                if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+            }
+            disc_pos_ = ord;
         }
 
         snprintf(topic, sizeof(topic), "homeassistant/sensor/deye_bms/can_alarm_summary/config");
-        if (build_ha_sensor_payload(payload, sizeof(payload), "CAN Alarm Summary", (can_prefix_ + "/can/alarm_summary").c_str(), "deye_bms_can_alarm_summary", "", "", "", avail_str.c_str(), device_json, "mdi:alert")) {
-            esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-            pacer.pace();
+        ord++;
+        if (ord > disc_pos_) {
+            if (build_ha_sensor_payload(payload, sizeof(payload), "CAN Alarm Summary", (can_prefix_ + "/can/alarm_summary").c_str(), "deye_bms_can_alarm_summary", "", "", "", avail_str.c_str(), device_json, "mdi:alert")) {
+                if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+            }
+            disc_pos_ = ord;
         }
 
         const char* bin_names[][3] = {
@@ -523,9 +567,12 @@ public:
             char st[80];
             snprintf(st, sizeof(st), "%s/can/%s", can_prefix_.c_str(), bin_names[i][0]);
             snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_%s/config", bin_names[i][0]);
-            if (build_ha_binary_sensor_payload(payload, sizeof(payload), bin_names[i][1], st, uid, "", bin_names[i][2], "1", "0", avail_str.c_str(), device_json)) {
-                esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-                pacer.pace();
+            ord++;
+            if (ord > disc_pos_) {
+                if (build_ha_binary_sensor_payload(payload, sizeof(payload), bin_names[i][1], st, uid, "", bin_names[i][2], "1", "0", avail_str.c_str(), device_json)) {
+                    if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+                }
+                disc_pos_ = ord;
             }
         }
 
@@ -544,9 +591,12 @@ public:
             char st[80];
             snprintf(st, sizeof(st), "%s/can/%s", can_prefix_.c_str(), prot_names[i][0]);
             snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_%s/config", prot_names[i][0]);
-            if (build_ha_binary_sensor_payload(payload, sizeof(payload), prot_names[i][1], st, uid, "problem", prot_names[i][2], "1", "0", avail_str.c_str(), device_json)) {
-                esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-                pacer.pace();
+            ord++;
+            if (ord > disc_pos_) {
+                if (build_ha_binary_sensor_payload(payload, sizeof(payload), prot_names[i][1], st, uid, "problem", prot_names[i][2], "1", "0", avail_str.c_str(), device_json)) {
+                    if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+                }
+                disc_pos_ = ord;
             }
         }
 
@@ -564,18 +614,29 @@ public:
             char st[80];
             snprintf(st, sizeof(st), "%s/can/%s", can_prefix_.c_str(), warn_names[i][0]);
             snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_%s/config", warn_names[i][0]);
-            if (build_ha_binary_sensor_payload(payload, sizeof(payload), warn_names[i][1], st, uid, "", warn_names[i][2], "1", "0", avail_str.c_str(), device_json)) {
-                esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-                pacer.pace();
+            ord++;
+            if (ord > disc_pos_) {
+                if (build_ha_binary_sensor_payload(payload, sizeof(payload), warn_names[i][1], st, uid, "", warn_names[i][2], "1", "0", avail_str.c_str(), device_json)) {
+                    if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+                }
+                disc_pos_ = ord;
             }
         }
 
         snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/deye_bms/can_warn_comms_fail/config");
-        if (build_ha_binary_sensor_payload(payload, sizeof(payload), "CAN Warning Comms Fail", (can_prefix_ + "/can/warn_comms_fail").c_str(), "deye_bms_can_warn_comms_fail", "problem", "mdi:lan-disconnect", "1", "0", avail_str.c_str(), device_json)) {
-            esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
-            pacer.pace();
+        ord++;
+        if (ord > disc_pos_) {
+            if (build_ha_binary_sensor_payload(payload, sizeof(payload), "CAN Warning Comms Fail", (can_prefix_ + "/can/warn_comms_fail").c_str(), "deye_bms_can_warn_comms_fail", "problem", "mdi:lan-disconnect", "1", "0", avail_str.c_str(), device_json)) {
+                if (!budget.take() || !esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true)) return false;
+            }
+            disc_pos_ = ord;
         }
-        bc_mark(BC_IDLE);
+        // done streams keep disc_pos_ at the end: a re-call skips every
+        // site and returns true consuming no budget. Restarting the cursor
+        // here would replay the whole stream every tick and starve the
+        // second handler (review blocker 1). Only on_mqtt_connect (new
+        // connection) and restart_discovery (button) rewind it.
+        return true;
     }
 
 private:
@@ -583,12 +644,13 @@ private:
     int num_batteries_;
     std::string device_status_topic_;
     AvailabilityTracker availability_;
+    PublishPacer can_pacer_;
+    int disc_pos_ = 0;
 
     uint32_t last_can_rx_ = 0;
     bool has_can_rx_ = false;
     int frame_count_ = 0;
     int error_count_ = 0;
-    uint32_t last_status_heartbeat_ = 0;
     bool received_0x359_ = false;
     bool received_0x35C_ = false;
 
@@ -643,6 +705,7 @@ private:
         bc_pub_begin();
         esphome::mqtt::global_mqtt_client->publish(can_prefix_ + suffix, std::string(value));
         bc_pub_end();
+        can_pacer_.pace();
     }
 
     void reset_value_hysteresis() {
