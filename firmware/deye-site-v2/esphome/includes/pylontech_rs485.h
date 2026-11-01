@@ -49,7 +49,8 @@ public:
     void tick() {
         uint32_t now = millis();
         static const uint8_t phase_by_state[5] = {BC_IDLE, BC_TX_ANALOG, BC_WAIT_ANALOG, BC_TX_ALARM, BC_WAIT_ALARM};
-        bc_mark(phase_by_state[state_], current_batt_);
+        bc_mark(phase_by_state[state_], state_ >= 3 ? (uint8_t) alarm_batt_ : (uint8_t) current_batt_);
+        BcScopeGuard bc_tick_guard_;
 
         switch (state_) {
         case 0: {
@@ -335,6 +336,7 @@ public:
         int valid_batts = 0;
 
         for (int batt = 0; batt < num_batteries_; batt++) {
+            bc_mark(BC_SWEEP_BATT, (uint8_t) batt);
             float batt_min = 99.0f, batt_max = 0.0f;
 
             if (batteries_[batt].has_analog) {
@@ -502,6 +504,7 @@ public:
         }
 
         if (stack_cell_min < 99.0f && valid_batts > 0) {
+            bc_mark(BC_PUB_STACK);
             stack_voltage /= valid_batts;
 
             if (hyst_stack_cell_min_.check(stack_cell_min, 0.005f, 0.0f, 5.0f, 60000)) {
@@ -626,6 +629,7 @@ public:
             {"stack_alarms", "Stack Alarms", "", "", ""},
         };
         for (int i = 0; i < 12; i++) {
+            bc_mark(BC_PUB_DISC, (uint8_t) i);
             char uid[64];
             snprintf(uid, sizeof(uid), "pylontech_rs485_%s", stack_sensors[i][0]);
             char st[96];
@@ -657,6 +661,7 @@ public:
         }
 
         for (int batt = 0; batt < num_batteries_; batt++) {
+            bc_mark(BC_PUB_DISC, (uint8_t) (0x10 + batt));
             char prefix[16], state_prefix[48];
             snprintf(prefix, sizeof(prefix), "batt%d", batt);
             snprintf(state_prefix, sizeof(state_prefix), "%s/battery%d", mqtt_prefix_.c_str(), batt);
@@ -796,6 +801,7 @@ public:
                 pacer.pace();
             }
         }
+        bc_mark(BC_IDLE);
     }
 
 private:
@@ -852,8 +858,9 @@ private:
 
     void publish_raw(const char* topic, const char* value) {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
-        bc_mark(BC_PUB_DATA);
+        bc_pub_begin();
         esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(value));
+        bc_pub_end();
         raw_pacer_.pace();
     }
 
@@ -862,13 +869,17 @@ private:
         snprintf(topic, sizeof(topic), "%s/battery%d/poll_alarm", mqtt_prefix_.c_str(), batt);
         // std::string payload is required: a const char* literal here is
         // ambiguous and GCC silently binds it as payload_length (qos=1, no retain).
+        bc_pub_begin();
         esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(alarm ? "ON" : "OFF"), (uint8_t)0, true);
+        bc_pub_end();
     }
 
     void publish_alarm_poll_alarm(int batt, bool alarm) {
         char topic[80];
         snprintf(topic, sizeof(topic), "%s/battery%d/alarm_poll_alarm", mqtt_prefix_.c_str(), batt);
+        bc_pub_begin();
         esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(alarm ? "ON" : "OFF"), (uint8_t)0, true);
+        bc_pub_end();
     }
 
     void handle_analog_failure(int batt) {

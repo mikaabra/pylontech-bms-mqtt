@@ -1,6 +1,7 @@
 #pragma once
 #include <string>
 #include "esphome/components/mqtt/mqtt_client.h"
+#include "breadcrumbs.h"
 
 #ifdef USE_MQTT
 
@@ -11,10 +12,16 @@ struct AvailabilityTracker {
 
     explicit AvailabilityTracker(const char* topic) : status_topic(topic) {}
 
+    void publish_stamp_(esphome::mqtt::MQTTClientComponent* mqtt, const char* payload) {
+        bc_pub_begin(BC_PUB_AVAIL);
+        mqtt->publish(status_topic, std::string(payload), (uint8_t)0, true);
+        bc_pub_end();
+    }
+
     void mark_online(esphome::mqtt::MQTTClientComponent* mqtt) {
         stale = false;
         if (!last_online) {
-            mqtt->publish(status_topic, std::string("online"), (uint8_t)0, true);
+            publish_stamp_(mqtt, "online");
             last_online = true;
         }
     }
@@ -23,7 +30,7 @@ struct AvailabilityTracker {
         if (!stale) {
             stale = true;
             if (last_online) {
-                mqtt->publish(status_topic, std::string("offline"), (uint8_t)0, true);
+                publish_stamp_(mqtt, "offline");
                 last_online = false;
             }
         }
@@ -31,10 +38,10 @@ struct AvailabilityTracker {
 
     void on_connect(esphome::mqtt::MQTTClientComponent* mqtt) {
         if (!stale) {
-            mqtt->publish(status_topic, std::string("online"), (uint8_t)0, true);
+            publish_stamp_(mqtt, "online");
             last_online = true;
         } else {
-            mqtt->publish(status_topic, std::string("offline"), (uint8_t)0, true);
+            publish_stamp_(mqtt, "offline");
             last_online = false;
         }
     }
@@ -47,7 +54,7 @@ struct AvailabilityTracker {
     // offline repairs it on the next heartbeat.
     void heartbeat(esphome::mqtt::MQTTClientComponent* mqtt) {
         if (!mqtt) return;
-        mqtt->publish(status_topic, std::string(stale ? "offline" : "online"), (uint8_t)0, true);
+        publish_stamp_(mqtt, stale ? "offline" : "online");
     }
 
     void reset() {

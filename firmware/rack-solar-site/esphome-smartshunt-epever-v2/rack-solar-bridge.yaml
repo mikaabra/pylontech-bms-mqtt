@@ -14,6 +14,7 @@ esphome:
     - ../../shared/esphome/mqtt_helpers.h
     - ../../shared/esphome/hysteresis.h
     - ../../shared/esphome/availability.h
+    - ../../shared/esphome/breadcrumbs.h
     - includes/solar_validation.h
     - includes/smartshunt_handler.h
     - ../../shared/esphome/epever_handler.h

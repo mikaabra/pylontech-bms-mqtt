@@ -401,6 +401,7 @@ public:
 
     void publish_discovery() {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
+        bc_mark(BC_PUB_DISC);
 
         char topic[160];
         char payload[768];
@@ -567,6 +568,7 @@ public:
             esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
             pacer.pace();
         }
+        bc_mark(BC_IDLE);
     }
 
 private:
@@ -631,7 +633,9 @@ private:
 
     void publish_topic(const char* suffix, const char* value) {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
+        bc_pub_begin();
         esphome::mqtt::global_mqtt_client->publish(can_prefix_ + suffix, std::string(value));
+        bc_pub_end();
     }
 
     void reset_value_hysteresis() {
