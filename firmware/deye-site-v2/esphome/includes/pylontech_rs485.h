@@ -324,11 +324,9 @@ public:
         rotate_++;
         pass_attempts_ = 0;
         pass_refused_client_ = 0;
+        pass_open_ = true;
 
-        if (!phases_armed_) {
-            arm_phases_(now);
-            phases_armed_ = true;
-        }
+        assign_slots_(now);   // idempotent: already-slotted instances are skipped
 
         // 30s repair pass, gated internally (the yaml interval calls this
         // every 10s for the value pass): retained idempotent stamps — the
@@ -341,9 +339,15 @@ public:
             esphome::mqtt::global_mqtt_client->is_connected()) {
             last_repair_ = now;
             availability_.heartbeat(esphome::mqtt::global_mqtt_client);
-            for (int batt = 0; batt < num_batteries_; batt++) {
-                if (!publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm)) total_refused_++;
-                if (!publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm)) total_refused_++;
+            for (int batt = 0; batt < num_batteries_ && pass_open_; batt++) {
+                if (!publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm)) {
+                    total_refused_++;
+                    pass_open_ = false;   // first refusal closes the pass
+                }
+                if (pass_open_ && !publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm)) {
+                    total_refused_++;
+                    pass_open_ = false;
+                }
             }
         }
 
@@ -379,9 +383,9 @@ public:
         }
         if (valid_batts > 0) stack_voltage /= valid_batts;
 
-        // Stack position alternates (#53): FRONT on odd passes so the worst
-        // case storm (every class crossing every pass) cannot starve the
-        // 9 stack instances past the reserve; reserve-protected tail on even.
+        // Stack position alternates (#53): FRONT on odd passes so a full
+        // storm (every class crossing every pass) cannot starve the 9
+        // stack instances into deferral; tail on even passes.
         if (stack_cell_min < 99.0f && valid_batts > 0 && (rotate_ & 1)) {
             bc_mark(BC_PUB_STACK);
             publish_stack_values_(stack_cell_min, stack_cell_max, stack_voltage, stack_current,
@@ -464,7 +468,7 @@ public:
                     ok = publish_raw(topic, batteries_[batt].balancing_count > 0 ? "1" : "0") && ok;
                     if (ok) hyst_batt_balancing_count_[idx].commit();
                 }
-                if (hyst_batt_balancing_cells_[idx].decide(batteries_[batt].balancing_cells, 300000)) {
+                if (hyst_batt_balancing_cells_[idx].decide(batteries_[batt].balancing_cells)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/balancing_cells", mqtt_prefix_.c_str(), batt);
                     if (publish_raw(topic, batteries_[batt].balancing_cells.c_str())) hyst_batt_balancing_cells_[idx].commit();
                 }
@@ -476,39 +480,39 @@ public:
                     ok = publish_raw(topic, batteries_[batt].overvolt_count > 0 ? "1" : "0") && ok;
                     if (ok) hyst_batt_overvolt_count_[idx].commit();
                 }
-                if (hyst_batt_overvolt_cells_[idx].decide(batteries_[batt].overvolt_cells, 300000)) {
+                if (hyst_batt_overvolt_cells_[idx].decide(batteries_[batt].overvolt_cells)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/overvolt_cells", mqtt_prefix_.c_str(), batt);
                     if (publish_raw(topic, batteries_[batt].overvolt_cells.c_str())) hyst_batt_overvolt_cells_[idx].commit();
                 }
-                if (hyst_batt_states_[idx].decide(batteries_[batt].state, 300000)) {
+                if (hyst_batt_states_[idx].decide(batteries_[batt].state)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/state", mqtt_prefix_.c_str(), batt);
                     if (publish_raw(topic, batteries_[batt].state.c_str())) hyst_batt_states_[idx].commit();
                 }
-                if (hyst_batt_warnings_[idx].decide(batteries_[batt].warnings, 300000)) {
+                if (hyst_batt_warnings_[idx].decide(batteries_[batt].warnings)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/warnings", mqtt_prefix_.c_str(), batt);
                     if (publish_raw(topic, batteries_[batt].warnings.c_str())) hyst_batt_warnings_[idx].commit();
                 }
-                if (hyst_batt_alarms_[idx].decide(batteries_[batt].alarms, 300000)) {
+                if (hyst_batt_alarms_[idx].decide(batteries_[batt].alarms)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/alarms", mqtt_prefix_.c_str(), batt);
                     if (publish_raw(topic, batteries_[batt].alarms.c_str())) hyst_batt_alarms_[idx].commit();
                 }
-                if (hyst_batt_charge_mosfet_[idx].decide(batteries_[batt].charge_mosfet, 300000)) {
+                if (hyst_batt_charge_mosfet_[idx].decide(batteries_[batt].charge_mosfet)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/charge_mosfet", mqtt_prefix_.c_str(), batt);
                     if (publish_raw(topic, batteries_[batt].charge_mosfet ? "1" : "0")) hyst_batt_charge_mosfet_[idx].commit();
                 }
-                if (hyst_batt_discharge_mosfet_[idx].decide(batteries_[batt].discharge_mosfet, 300000)) {
+                if (hyst_batt_discharge_mosfet_[idx].decide(batteries_[batt].discharge_mosfet)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/discharge_mosfet", mqtt_prefix_.c_str(), batt);
                     if (publish_raw(topic, batteries_[batt].discharge_mosfet ? "1" : "0")) hyst_batt_discharge_mosfet_[idx].commit();
                 }
-                if (hyst_batt_lmcharge_mosfet_[idx].decide(batteries_[batt].lmcharge_mosfet, 300000)) {
+                if (hyst_batt_lmcharge_mosfet_[idx].decide(batteries_[batt].lmcharge_mosfet)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/lmcharge_mosfet", mqtt_prefix_.c_str(), batt);
                     if (publish_raw(topic, batteries_[batt].lmcharge_mosfet ? "1" : "0")) hyst_batt_lmcharge_mosfet_[idx].commit();
                 }
-                if (hyst_batt_cw_active_[idx].decide(batteries_[batt].cw_active, 300000)) {
+                if (hyst_batt_cw_active_[idx].decide(batteries_[batt].cw_active)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/cw_active", mqtt_prefix_.c_str(), batt);
                     if (publish_raw(topic, batteries_[batt].cw_active ? "1" : "0")) hyst_batt_cw_active_[idx].commit();
                 }
-                if (hyst_batt_cw_cells_[idx].decide(batteries_[batt].cw_cells, 300000)) {
+                if (hyst_batt_cw_cells_[idx].decide(batteries_[batt].cw_cells)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/cw_cells", mqtt_prefix_.c_str(), batt);
                     if (publish_raw(topic, batteries_[batt].cw_cells.c_str())) hyst_batt_cw_cells_[idx].commit();
                 }
@@ -575,8 +579,7 @@ public:
     // pool or budget stop mid-stream retries the missing tail instead of
     // feeding itself with yet another full pass.
     void on_mqtt_connect() {
-        arm_phases_(millis());
-        phases_armed_ = true;   // avoid a second arm on the first pass
+        assign_slots_(millis());   // idempotent; slots never move after assignment
         has_any_alarm_ = false;
         restart_discovery();
     }
@@ -587,8 +590,7 @@ public:
     // value updates lost during the outage must be re-sent
     void on_short_reconnect() {
         availability_.on_connect(esphome::mqtt::global_mqtt_client);
-        arm_phases_(millis());
-        phases_armed_ = true;
+        assign_slots_(millis());   // idempotent; outage cannot move slots
         for (int batt = 0; batt < num_batteries_; batt++) {
             publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm);
             publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm);
@@ -904,16 +906,16 @@ private:
     // task watchdog between them; the async backend (#42/#44) moved all
     // network I/O off the loop task, so pacing exists to spread bursts in
     // time (producer-side), not to survive blocked publishes.
-    // #53: the 29-slot pool IS the pass bound — no artificial per-pass
-    // counter. With commit-on-acceptance, a pool refusal defers the value
-    // to the next pass instead of losing it, so pool-full is a natural,
-    // self-regulating gate (~29 admitted per pass; the drain refills
-    // between passes). A fixed counter cap was implemented and then
-    // REMOVED: under link flaps the accumulated dues of a 30 s gap exceed
-    // any per-pass budget and the armed backlog starves permanently (the
-    // exact starvation the review's flap table predicted). Fairness comes
-    // from pack rotation, stack position alternation and stamps-first
-    // ordering instead.
+    // #53: no fixed per-pass budget. The pass stops at the FIRST pool
+    // refusal (publish_raw closes pass_open_): the 29-slot pool is the
+    // bound, a refusal defers its value to the next pass
+    // (commit-on-acceptance, nothing lost), and rotation + stack
+    // alternation keep the deferrals fair. A slow drain therefore costs
+    // one refused attempt per pass, not a pass full of retries. Fairness
+    // ordering: stamps first, then rotated packs, stack alternating
+    // front/tail. (An earlier round claimed a fixed cap starves under
+    // flaps — withdrawn: the starvation traced to re-arm moving boot
+    // anchors, which the fixed-slot mechanism closed.)
 
     PublishPacer raw_pacer_;
     int disc_pos_ = 0;
@@ -924,7 +926,7 @@ private:
     // worst-case acceptance signals, not a ratio pair.
     uint32_t total_attempts_ = 0, total_refused_ = 0;
     uint32_t last_pass_ms_ = 0, max_pass_ms_ = 0;
-    bool phases_armed_ = false;
+    bool pass_open_ = false;   // false once this pass hit its first refusal
     uint32_t last_repair_ = 0;
     uint8_t rotate_ = 0;
 
@@ -937,7 +939,11 @@ public:
 private:
 
     bool publish_raw(const char* topic, const char* value) {
-        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return false;
+        if (!pass_open_) return false;   // pass closed by an earlier refusal
+        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) {
+            pass_open_ = false;
+            return false;
+        }
         pass_attempts_++;
         total_attempts_++;
         bc_pub_begin();
@@ -947,6 +953,7 @@ private:
         if (!ok) {
             pass_refused_client_++;
             total_refused_++;
+            pass_open_ = false;   // stop the pass: defer, retry next pass
         }
         return ok;
     }
@@ -998,63 +1005,88 @@ private:
         }
     }
 
-    // #53: phase-staggered arming of every heartbeat-bearing instance.
-    // Slots are spread EVENLY across the window (k*H/N, not k%N seconds:
-    // 110 cells at 1 s spacing would crowd the first 110 s of the 300 s
-    // window and burst past the cap). Re-arming (reconnect paths) is
-    // PHASE-PRESERVING: instances still waiting for their first slot keep
-    // their original anchor (they accrue elapsed time across link flaps),
-    // and committed instances are skipped entirely — their heartbeat counts
-    // from the last commit, so a flapping link cannot push slots back.
-    // Bool/String instances are not armed: changes publish immediately and
-    // their 300 s heartbeat self-repairs accepted-but-discarded messages.
-    void arm_phases_(uint32_t now) {
+    // #53: a FIXED slot for every heartbeat-bearing instance, change types
+    // included (all 60 s/300 s classes). Positions spread k*H/N per class;
+    // assignment is idempotent — already-slotted instances are skipped, so
+    // reconnect calls can never move a slot. The slot re-sends each value
+    // once per period at its window position no matter when the last
+    // commit landed (an outage that bunches commits cannot regroup the
+    // cohort); changes and crossings bypass the slot entirely and publish
+    // immediately.
+    void assign_slots_(uint32_t now) {
         const uint16_t n60 = (uint16_t) (9 + 11 * num_batteries_);
-        const uint16_t n300 = (uint16_t) (22 * num_batteries_);
+        const uint16_t n300 = (uint16_t) (22 * num_batteries_ + 53);   // cells/temps + change types
         uint16_t k60 = 0, k300 = 0;
-        auto arm_f60 = [&](HysteresisFloat& h) {
-            if (h.armed || !h.first) return;
-            h.arm(now, (uint32_t) ((uint64_t) k60++ * 60000 / n60), 60000);
+        auto slot_f60 = [&](HysteresisFloat& h) {
+            if (h.slot_period_) return;
+            h.assign_slot(now, (uint32_t) ((uint64_t) k60++ * 60000 / n60), 60000);
         };
-        auto arm_i60 = [&](HysteresisInt& h) {
-            if (h.armed || !h.first) return;
-            h.arm(now, (uint32_t) ((uint64_t) k60++ * 60000 / n60), 60000);
+        auto slot_i60 = [&](HysteresisInt& h) {
+            if (h.slot_period_) return;
+            h.assign_slot(now, (uint32_t) ((uint64_t) k60++ * 60000 / n60), 60000);
         };
-        auto arm_f300 = [&](HysteresisFloat& h) {
-            if (h.armed || !h.first) return;
-            h.arm(now, (uint32_t) ((uint64_t) k300++ * 300000 / n300), 300000);
+        auto slot_f300 = [&](HysteresisFloat& h) {
+            if (h.slot_period_) return;
+            h.assign_slot(now, (uint32_t) ((uint64_t) k300++ * 300000 / n300), 300000);
         };
-        // stack first: the dashboard favorites get the earliest slots
-        arm_f60(hyst_stack_voltage_);
-        arm_f60(hyst_stack_current_);
-        arm_f60(hyst_stack_cell_min_);
-        arm_f60(hyst_stack_cell_max_);
-        arm_f60(hyst_stack_cell_delta_);
-        arm_f60(hyst_stack_temp_min_);
-        arm_f60(hyst_stack_temp_max_);
-        arm_i60(hyst_stack_balancing_count_);
-        arm_i60(hyst_stack_overvolt_count_);
+        auto slot_s300 = [&](HysteresisString& h) {
+            if (h.slot_period_) return;
+            h.assign_slot(now, (uint32_t) ((uint64_t) k300++ * 300000 / n300), 300000);
+        };
+        auto slot_b300 = [&](HysteresisBool& h) {
+            if (h.slot_period_) return;
+            h.assign_slot(now, (uint32_t) ((uint64_t) k300++ * 300000 / n300), 300000);
+        };
+        // 60 s class first: stack (dashboard favorites) then per-pack
+        slot_f60(hyst_stack_voltage_);
+        slot_f60(hyst_stack_current_);
+        slot_f60(hyst_stack_cell_min_);
+        slot_f60(hyst_stack_cell_max_);
+        slot_f60(hyst_stack_cell_delta_);
+        slot_f60(hyst_stack_temp_min_);
+        slot_f60(hyst_stack_temp_max_);
+        slot_i60(hyst_stack_balancing_count_);
+        slot_i60(hyst_stack_overvolt_count_);
         for (int b = 0; b < num_batteries_; b++) {
-            arm_f60(hyst_batt_cell_min_[b]);
-            arm_f60(hyst_batt_cell_max_[b]);
-            arm_f60(hyst_batt_cell_delta_[b]);
-            arm_f60(hyst_batt_voltage_[b]);
-            arm_f60(hyst_batt_current_[b]);
-            arm_f60(hyst_batt_soc_[b]);
-            arm_f60(hyst_batt_remain_ah_[b]);
-            arm_f60(hyst_batt_total_ah_[b]);
-            arm_i60(hyst_batt_cycles_[b]);
-            arm_i60(hyst_batt_balancing_count_[b]);
-            arm_i60(hyst_batt_overvolt_count_[b]);
+            slot_f60(hyst_batt_cell_min_[b]);
+            slot_f60(hyst_batt_cell_max_[b]);
+            slot_f60(hyst_batt_cell_delta_[b]);
+            slot_f60(hyst_batt_voltage_[b]);
+            slot_f60(hyst_batt_current_[b]);
+            slot_f60(hyst_batt_soc_[b]);
+            slot_f60(hyst_batt_remain_ah_[b]);
+            slot_f60(hyst_batt_total_ah_[b]);
+            slot_i60(hyst_batt_cycles_[b]);
+            slot_i60(hyst_batt_balancing_count_[b]);
+            slot_i60(hyst_batt_overvolt_count_[b]);
         }
-        for (auto& h : hyst_cell_voltages_) arm_f300(h);
-        for (auto& h : hyst_batt_temps_) arm_f300(h);
+        // 300 s class: cells + temps, then the change types (states,
+        // warnings, alarms, cell lists, mosfets) — the cohort the round-2
+        // commit-anchored heartbeat regrouped every 300 s; slots hold it
+        // spread permanently
+        for (auto& h : hyst_cell_voltages_) slot_f300(h);
+        for (auto& h : hyst_batt_temps_) slot_f300(h);
+        slot_s300(hyst_stack_balancing_cells_);
+        slot_s300(hyst_stack_overvolt_cells_);
+        slot_s300(hyst_stack_alarms_);
+        for (int b = 0; b < num_batteries_; b++) {
+            slot_s300(hyst_batt_states_[b]);
+            slot_s300(hyst_batt_warnings_[b]);
+            slot_s300(hyst_batt_alarms_[b]);
+            slot_s300(hyst_batt_balancing_cells_[b]);
+            slot_s300(hyst_batt_overvolt_cells_[b]);
+            slot_s300(hyst_batt_cw_cells_[b]);
+            slot_b300(hyst_batt_charge_mosfet_[b]);
+            slot_b300(hyst_batt_discharge_mosfet_[b]);
+            slot_b300(hyst_batt_lmcharge_mosfet_[b]);
+            slot_b300(hyst_batt_cw_active_[b]);
+        }
     }
 
     // #53: stack sites extracted so their position can rotate to the FRONT
-    // of the pass on odd passes — under the worst-case storm (every class
-    // crossing every pass) the 3-slot reserve alone cannot serve 9 stack
-    // instances; alternating position bounds stack staleness at 2 passes.
+    // of the pass on odd passes — under a full storm (every class crossing
+    // every pass) a fixed tail position would starve the 9 stack instances
+    // into deferral; alternating position bounds stack staleness at 2 passes.
     void publish_stack_values_(float stack_cell_min, float stack_cell_max, float stack_voltage,
                                float stack_current, float stack_temp_min, float stack_temp_max) {
         char payload[32];
@@ -1105,7 +1137,7 @@ private:
                                  stack_balancing_count_ > 0 ? "1" : "0") && ok;
                 if (ok) hyst_stack_balancing_count_.commit();
             }
-            if (hyst_stack_balancing_cells_.decide(stack_balancing_cells_, 300000)) {
+            if (hyst_stack_balancing_cells_.decide(stack_balancing_cells_)) {
                 if (publish_raw((mqtt_prefix_ + "/stack/balancing_cells").c_str(), stack_balancing_cells_.c_str()))
                     hyst_stack_balancing_cells_.commit();
             }
@@ -1116,11 +1148,11 @@ private:
                                  stack_overvolt_count_ > 0 ? "1" : "0") && ok;
                 if (ok) hyst_stack_overvolt_count_.commit();
             }
-            if (hyst_stack_overvolt_cells_.decide(stack_overvolt_cells_, 300000)) {
+            if (hyst_stack_overvolt_cells_.decide(stack_overvolt_cells_)) {
                 if (publish_raw((mqtt_prefix_ + "/stack/overvolt_cells").c_str(), stack_overvolt_cells_.c_str()))
                     hyst_stack_overvolt_cells_.commit();
             }
-            if (hyst_stack_alarms_.decide(stack_alarms_, 300000)) {
+            if (hyst_stack_alarms_.decide(stack_alarms_)) {
                 if (publish_raw((mqtt_prefix_ + "/stack/alarms").c_str(),
                                 stack_alarms_.empty() ? "" : stack_alarms_.c_str()))
                     hyst_stack_alarms_.commit();

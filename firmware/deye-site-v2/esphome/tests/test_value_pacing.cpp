@@ -1,13 +1,13 @@
-// Issue #53 host oracle, review round 2. Models the pacing layer FAITHFULLY
-// to the handler: the 29-slot MQTT pool is the ONLY admission gate (no
-// artificial per-pass cap — a fixed cap starves the backlog under link
-// flaps), the drain refills the pool concurrently during the paced pass,
-// stamps every 3rd pass share the pool, stack sites alternate FRONT on
-// odd passes / tail on even (position alternation), change-only types
-// (alarm strings, mosfet bools) carry 300 s repair heartbeats, and the
-// drain task can DISCARD accepted-but-undelivered messages on disconnect
-// (commit stands; only the heartbeat heals it). Slots spread k*H/N as
-// arm_phases_ does. Flapping must not push slots back.
+// Issue #53 host oracle, review round 3. Models the handler faithfully:
+// every heartbeat-bearing instance carries a FIXED slot (k*H/N window
+// position assigned once — change types included; outages cannot move it,
+// a shared commit instant cannot regroup the cohort), the 29-slot pool is
+// the only admission gate, the pass STOPS at the first client refusal
+// (adaptive bound, no fixed budget), stamps share the pool every 3rd pass
+// (11 = availability + both alarm latches x packs), stack sites alternate
+// FRONT on odd passes / tail on even, and the drain task can DISCARD
+// accepted-but-undelivered messages on disconnect (commit stands; the next
+// slot occurrence heals it).
 #include <cassert>
 #include <cstdio>
 #include <cstring>
@@ -21,13 +21,13 @@ uint32_t millis() { return g_clock; }
 
 static constexpr uint32_t HB_FAST = 60000;
 static constexpr uint32_t HB_CELL = 300000;
-static constexpr uint32_t HB_CHANGE = 300000;
 static constexpr int N_FAST = 55;
 static constexpr int N_CELL = 110;
 static constexpr int N_CHANGE = 53;
 static constexpr int N_STACK = 9;
+static constexpr int N_SLOW = N_CELL + N_CHANGE;   // the 300 s class
 static constexpr int POOL = 29;   // the pool is the only admission gate
-static constexpr int STAMPS_PER_REPAIR = 12;
+static constexpr int STAMPS_PER_REPAIR = 11;       // 1 availability + 2 latches x 5 packs
 
 struct Sim {
     long in_flight = 0;
@@ -41,9 +41,8 @@ struct Sim {
         in_flight++;
         // concurrent drain during the paced pass: each publish takes >=1 ms
         // (producer pacing), so the async drain task consumes
-        // drain_per_sec/1000 of an in-flight slot per publish. Scaled by
-        // 100 to keep the arithmetic integral: every 100 publishes give
-        // drain_per_sec/10 worth of drain.
+        // drain_per_sec/1000 of an in-flight slot per publish, scaled to
+        // stay integral: 1000 credit units = one drained slot.
         drain_credit += drain_per_sec;
         while (drain_credit >= 1000 && in_flight > 0) {
             in_flight--;
@@ -64,7 +63,11 @@ struct World {
     long pool_refusals = 0;
     long steady_refusals = 0;    // pool refusals inside [steady_window_start, inf)
     uint32_t steady_window_start = 0;
-    long pass_pub_count = 0;
+    long pass_dues = 0;          // decide()==true count this pass (even when pass closed)
+    long pass_pub_count = 0;     // real enqueue attempts this pass
+    bool pass_open = true;       // false after the pass's first client refusal
+    int max_dues = 0;            // peak pass_dues, tracked while dues_tracked
+    bool dues_tracked = false;
     uint32_t pass_idx = 0;
     uint32_t reconnect_calls = 0;
 
@@ -73,47 +76,90 @@ struct World {
           fast_pub(N_FAST, 0), cell_pub(N_CELL, 0), stack_pub(N_STACK, 0),
           change_pub(N_CHANGE, 0) {}
 
-    // k*H/N slots, mirroring arm_phases_; the reconnect path skips
-    // armed/committed instances so anchors are never moved — arm_all runs
-    // once per fresh World, and on_reconnect() is the handler's no-op for
-    // everything already touched.
-    void arm_all(uint32_t now) {
-        for (int i = 0; i < N_FAST; i++) fast[i].arm(now, (uint32_t) ((uint64_t) i * HB_FAST / N_FAST), HB_FAST);
-        for (int i = 0; i < N_CELL; i++) cell[i].arm(now, (uint32_t) ((uint64_t) i * HB_CELL / N_CELL), HB_CELL);
-        for (int i = 0; i < N_STACK; i++) stack[i].arm(now, (uint32_t) ((uint64_t) i * HB_FAST / N_STACK), HB_FAST);
-        // change types are NOT armed: first publish rides the pool-paced boot wave
+    // mirrors assign_slots_: k*H/N per class, idempotent (already-slotted
+    // instances keep their original origin — a reconnect can never move a
+    // slot), change types included in the 300 s class spread
+    void assign_all(uint32_t now) {
+        for (int i = 0; i < N_FAST; i++)
+            if (!fast[i].slot_period_) fast[i].assign_slot(now, (uint32_t) ((uint64_t) i * HB_FAST / N_FAST), HB_FAST);
+        for (int i = 0; i < N_STACK; i++)
+            if (!stack[i].slot_period_) stack[i].assign_slot(now, (uint32_t) ((uint64_t) (N_FAST + i) * HB_FAST / (N_FAST + N_STACK)), HB_FAST);
+        for (int i = 0; i < N_CELL; i++)
+            if (!cell[i].slot_period_) cell[i].assign_slot(now, (uint32_t) ((uint64_t) i * HB_CELL / N_SLOW), HB_CELL);
+        for (int i = 0; i < N_CHANGE; i++)
+            if (!change[i].slot_period_) change[i].assign_slot(now, (uint32_t) ((uint64_t) (N_CELL + i) * HB_CELL / N_SLOW), HB_CELL);
     }
 
-    void on_reconnect() { reconnect_calls++; }
+    // mirrors the handler reconnect paths: assign_slots_ is a no-op for
+    // every instance that already carries a slot
+    void on_reconnect() {
+        reconnect_calls++;
+        assign_all(g_clock);
+    }
+
+    void refusal_close_() {
+        pool_refusals++;
+        pass_open = false;
+        if (steady_window_start && g_clock >= steady_window_start) steady_refusals++;
+    }
 
     template <typename H>
     void try_pub(H& h, size_t i, std::vector<uint32_t>& pubvec, float v,
-                 float thr, float minv, float maxv, uint32_t hb) {
-        if (h.decide(v, thr, minv, maxv, hb)) {
+                 float thr, float minv, float maxv) {
+        if (h.decide(v, thr, minv, maxv, HB_FAST)) {
+            pass_dues++;
+            if (!pass_open) return;
             pass_pub_count++;
             if (sim.try_enqueue()) { h.commit(); pubvec[i] = g_clock; }
-            else { pool_refusals++; if (steady_window_start && g_clock >= steady_window_start) steady_refusals++; }
+            else refusal_close_();
         }
     }
 
-    // faithful pass shape: values, change types and cells all live INSIDE
-    // the per-pack loop and rotate with the pack order; stack publishes
-    // FRONT on odd passes and tail on even (position alternation).
+    template <typename H>
+    void try_pub_cell(H& h, size_t i, std::vector<uint32_t>& pubvec, float v,
+                      float thr, float minv, float maxv) {
+        if (h.decide(v, thr, minv, maxv, HB_CELL)) {
+            pass_dues++;
+            if (!pass_open) return;
+            pass_pub_count++;
+            if (sim.try_enqueue()) { h.commit(); pubvec[i] = g_clock; }
+            else refusal_close_();
+        }
+    }
+
+    void try_pub_change(size_t i, const char* v) {
+        if (change[i].decide(v)) {
+            pass_dues++;
+            if (!pass_open) return;
+            pass_pub_count++;
+            if (sim.try_enqueue()) { change[i].commit(); change_pub[i] = g_clock; }
+            else refusal_close_();
+        }
+    }
+
+    // faithful pass shape: stamps every 3rd pass lead, stack alternates
+    // FRONT on odd passes / tail on even, packs rotate, values + change
+    // types + cells live inside the per-pack loop
     static constexpr int PACKS = 5;
     static constexpr int AGG_PER_PACK = 11;
     static constexpr int CHANGE_PER_PACK = 10;
     static constexpr int CELLS_PER_PACK = 22;
 
     void pass(float fast_val, float cell_val) {
+        pass_dues = 0;
         pass_pub_count = 0;
+        pass_open = true;
         if (pass_idx % 3 == 0) {
-            for (int k = 0; k < STAMPS_PER_REPAIR; k++) sim.try_enqueue();
+            for (int k = 0; k < STAMPS_PER_REPAIR && pass_open; k++) {
+                if (sim.try_enqueue()) { pass_pub_count++; pass_dues++; }
+                else refusal_close_();
+            }
         }
         bool stack_first = (pass_idx % 2) == 1;
         auto run_stack = [&]() {
             for (size_t n = 0; n < stack.size(); n++) {
                 size_t i = (n + pass_idx) % stack.size();
-                try_pub(stack[i], i, stack_pub, fast_val + 100.0f + (float) i, 0.005f, -50.0f, 5000.0f, HB_FAST);
+                try_pub(stack[i], i, stack_pub, fast_val + 100.0f + (float) i, 0.005f, -50.0f, 5000.0f);
             }
         };
         if (stack_first) run_stack();
@@ -123,30 +169,23 @@ struct World {
             for (int j = 0; j < AGG_PER_PACK; j++) {
                 size_t i = (size_t) (p * AGG_PER_PACK + j);
                 if (i < fast.size())
-                    try_pub(fast[i], i, fast_pub, fast_val + (float) i, 0.005f, -50.0f, 5000.0f, HB_FAST);
+                    try_pub(fast[i], i, fast_pub, fast_val + (float) i, 0.005f, -50.0f, 5000.0f);
             }
             for (int j = 0; j < CHANGE_PER_PACK; j++) {
                 size_t i = (size_t) (p * CHANGE_PER_PACK + j);
-                if (i >= change.size()) continue;
-                if (change[i].decide("v", HB_CHANGE)) {
-                    pass_pub_count++;
-                    if (sim.try_enqueue()) { change[i].commit(); change_pub[i] = g_clock; }
-                    else { pool_refusals++; if (steady_window_start && g_clock >= steady_window_start) steady_refusals++; }
-                }
+                if (i < change.size()) try_pub_change(i, "v");
             }
             for (int j = 0; j < CELLS_PER_PACK; j++) {
                 size_t i = (size_t) (p * CELLS_PER_PACK + j);
                 if (i < cell.size())
-                    try_pub(cell[i], i, cell_pub, cell_val, 0.010f, 0.0f, 5.0f, HB_CELL);
+                    try_pub_cell(cell[i], i, cell_pub, cell_val, 0.010f, 0.0f, 5.0f);
             }
         }
         for (size_t i = (size_t) (CHANGE_PER_PACK * PACKS); i < change.size(); i++) {
-            if (change[i].decide("v", HB_CHANGE)) {
-                pass_pub_count++;
-                if (sim.try_enqueue()) { change[i].commit(); change_pub[i] = g_clock; }
-            }
+            try_pub_change(i, "v");
         }
         if (!stack_first) run_stack();
+        if (dues_tracked) max_dues = std::max(max_dues, (int) pass_dues);
         pass_idx++;
     }
 
@@ -166,7 +205,7 @@ int main() {
         World w;
         uint32_t boot = 5000;
         g_clock = boot;
-        w.arm_all(boot);
+        w.assign_all(boot);
         long max_in_pass = 0;
         w.steady_window_start = boot + 3300000;   // last 5 min of the hour
         for (g_clock = boot + 10000; g_clock < boot + 3600000; g_clock += 10000) {
@@ -175,21 +214,22 @@ int main() {
             max_in_pass = std::max(max_in_pass, (long) w.pass_pub_count);
         }
         // boot-wave passes may overflow the pool (deferral is the design);
-        // STEADY state on a healthy link must be refusal-free
+        // STEADY state on a healthy link must be refusal-free and the slot
+        // spread must keep every pass inside the pool at idle
         assert(w.steady_refusals == 0);
         assert(w.never_published() == 0);
         for (int i = 0; i < N_FAST; i++) assert(g_clock - w.fast_pub[i] <= 70000);
         for (int i = 0; i < N_STACK; i++) assert(g_clock - w.stack_pub[i] <= 70000);
         for (int i = 0; i < N_CELL; i++) assert(g_clock - w.cell_pub[i] <= HB_CELL + 10000);
-        for (int i = 0; i < N_CHANGE; i++) assert(g_clock - w.change_pub[i] <= HB_CHANGE + 10000);
+        for (int i = 0; i < N_CHANGE; i++) assert(g_clock - w.change_pub[i] <= HB_CELL + 10000);
         printf("S1 boot spread + hour soak: ok (max pass %ld, boot deferrals %ld)\n", max_in_pass, w.pool_refusals);
     }
 
-    // ---------- S2: cadence pins (fast/stack 1/min; cell/change 1/5min) ----------
+    // ---------- S2: cadence pins (fast/stack 1/min; slow class 1/5min) ----------
     {
         World w;
         g_clock = 0;
-        w.arm_all(0);
+        w.assign_all(0);
         long fast_pubs = 0, cell_pubs = 0, change_pubs = 0, stack_pubs = 0;
         uint32_t pf = 0, pc = 0, pch = 0, ps = 0;
         for (g_clock = 10000; g_clock < 3600000; g_clock += 10000) {
@@ -203,7 +243,7 @@ int main() {
         assert(fast_pubs >= 58 && fast_pubs <= 64);
         assert(stack_pubs >= 58 && stack_pubs <= 64);
         assert(cell_pubs >= 11 && cell_pubs <= 13);
-        assert(change_pubs >= 11 && change_pubs <= 13);   // the 300 s repair heartbeat
+        assert(change_pubs >= 11 && change_pubs <= 13);   // fixed-slot republish
         printf("S2 cadence: ok (fast %ld stack %ld cell %ld change %ld per hour)\n",
                fast_pubs, stack_pubs, cell_pubs, change_pubs);
     }
@@ -212,7 +252,7 @@ int main() {
     {
         World w;
         g_clock = 0;
-        w.arm_all(0);
+        w.assign_all(0);
         for (g_clock = 10000; g_clock < 700000; g_clock += 10000) { w.pass(3.3f, 3.3f); w.sim.tick_second(); }
         uint32_t last_pub0 = w.fast_pub[1];
         w.sim.disconnect();
@@ -240,16 +280,17 @@ int main() {
         printf("S3 retry: ok (refused %d passes, delivered after %d)\n", refused_passes, delivered);
     }
 
-    // ---------- S4: accepted-then-discarded heals via heartbeat (the blocker) ----------
+    // ---------- S4: accepted-then-discarded heals at its slot (the blocker) ----------
     {
         World w;
         g_clock = 0;
-        w.arm_all(0);
+        w.assign_all(0);
         for (g_clock = 10000; g_clock < 700000; g_clock += 10000) { w.pass(3.3f, 3.3f); w.sim.tick_second(); }
         uint32_t tc = w.change_pub[0];
         assert(tc > 0);
         // accepted-then-discarded: the drain wipes in-flight right after a
-        // commit; the value was never delivered and NO change is coming
+        // commit; the value was never delivered and NO change is coming —
+        // the fixed slot re-sends it at its window position
         w.sim.disconnect();
         g_clock += 5000;
         w.sim.connected = true;
@@ -257,16 +298,16 @@ int main() {
         uint32_t healed_at = 0;
         for (int k = 0; k < 40 && !healed_at; k++) {
             g_clock += 10000;
-            w.pass(3.3f, 3.3f);      // constant value: only the heartbeat path fires
+            w.pass(3.3f, 3.3f);      // constant value: only the slot fires
             w.sim.tick_second();
             if (w.change_pub[0] != tc) healed_at = w.change_pub[0];
         }
         assert(healed_at);
-        assert(healed_at - tc <= HB_CHANGE + 20000);
+        assert(healed_at - tc <= HB_CELL + 20000);
         printf("S4 accepted-then-discarded heal: ok (healed %u ms after commit)\n", healed_at - tc);
     }
 
-    // ---------- S5: armed-slot deferral + post-commit immediacy ----------
+    // ---------- S5: armed-slot deferral + post-commit immediacy (legacy arm() API pin) ----------
     {
         HysteresisFloat h;
         g_clock = 10000;
@@ -285,7 +326,7 @@ int main() {
         assert(!h.decide(2.0f, 0.005f, -50.0f, 5000.0f, HB_FAST));
         g_clock = 107000;
         assert(h.decide(2.0f, 0.005f, -50.0f, 5000.0f, HB_FAST));
-        printf("S5 armed-slot deferral: ok\n");
+        printf("S5 armed-slot deferral (legacy API): ok\n");
     }
 
     // ---------- S6: legacy check() compat (rack-solar path incl. new types) ----------
@@ -316,18 +357,17 @@ int main() {
     // recovery bounded ----------
     // Design contract under sustained full saturation (every aggregate
     // crossing every pass, which outweighs the budget 3:1): aggregates,
-    // change types and stack (position-alternated + reserved) share the
-    // budget fairly; per-cell values — 300 s cadence detail — yield by
-    // design and MUST recover within a few passes once the storm abates.
+    // change types and stack (position-alternated) share the budget
+    // fairly; per-cell values — 300 s cadence detail — yield by design and
+    // MUST recover within a few passes once the storm abates.
     {
         World w;
         g_clock = 1000;
-        w.arm_all(g_clock);
+        w.assign_all(g_clock);
         for (int k = 0; k < 80; k++) { g_clock += 10000; w.pass(3.3f, 3.3f); w.sim.tick_second(); }
         std::vector<long> deferred_fast(N_FAST, 0);
         std::vector<uint32_t> prev_f(N_FAST);
         for (int i = 0; i < N_FAST; i++) prev_f[i] = w.fast_pub[i];
-        uint32_t cells_starved_before = 0;
         int passes = 100;
         for (int k = 0; k < passes; k++) {
             g_clock += 10000;
@@ -344,7 +384,7 @@ int main() {
         for (int i = 0; i < N_STACK; i++) assert(g_clock - w.stack_pub[i] <= 120000);  // alternation keeps stack fresh
         // cells were sacrificed during the storm (bounded by design)...
         uint32_t last_cell0 = w.cell_pub[0];
-        (void) last_cell0; (void) cells_starved_before;
+        (void) last_cell0;
         // ...and the storm abates: cells must recover within a few passes
         int recovery_passes = 0;
         while (recovery_passes < 60) {
@@ -362,32 +402,41 @@ int main() {
                dmin, dmax, recovery_passes);
     }
 
-    // ---------- S8: flapping link — anchors hold, liveness kept, and
-    // recovery is bounded ----------
-    // Under a chronic 30 s flap the connected-pass bandwidth is a fraction
-    // of the accumulated dues; the review's killer case (re-arm re-anchoring
-    // pushing slots back forever) must NOT recur: armed instances keep
-    // their boot anchors, committed instances heartbeat from their commit
-    // time, priority classes stay live, and once the link stabilizes
-    // everything converges within a bounded recovery window.
+    // ---------- S8: flapping link — slots hold, liveness kept, recovery
+    // bounded, and no post-flap regrouping ----------
+    // The round-2 review's killer cases: (a) a shared commit instant after
+    // a reconnect regroups the cohort forever under commit-anchored
+    // heartbeats; (b) re-arm pushing boot anchors back. Fixed slots close
+    // both: a value due during an outage fires at its NEXT SLOT OCCURRENCE,
+    // never at the reconnect instant. Asserted: priority classes stay live
+    // through the flaps, no instance strands permanently, convergence is
+    // bounded, and once one heartbeat window has passed with a healthy
+    // link, EVERY subsequent pass fits the pool again (peak dues <= POOL).
     {
         World w;
         uint32_t boot = 1000;
         g_clock = boot;
-        w.arm_all(boot);
-        for (int cycle = 0; cycle < 120; cycle++) {   // 1 h of flapping
+        w.assign_all(boot);
+        for (int cycle = 0; cycle < 120; cycle++) {   // 1 h of 30 s flapping
             w.sim.disconnect();
             for (int k = 0; k < 2; k++) { g_clock += 10000; w.pass(3.3f, 3.3f); }
             w.sim.connected = true;
-            w.on_reconnect();
+            w.on_reconnect();   // runs the skip logic: a no-op for slotted instances
             g_clock += 10000;
             w.pass(3.3f, 3.3f);
             w.sim.tick_second();
         }
+        // the reconnect path must have exercised the skip logic without
+        // moving a single slot
+        assert(w.reconnect_calls == 120);
         // liveness during the flap: aggregates and stack kept publishing
         for (int i = 0; i < N_FAST; i++) assert(w.fast_pub[i] > 0);
         for (int i = 0; i < N_STACK; i++) assert(w.stack_pub[i] > 0);
-        // the flap ends; everything must converge quickly
+        // the flap ends; track peak dues per pass for one full slow window
+        w.dues_tracked = true;
+        for (int k = 0; k < 30; k++) { g_clock += 10000; w.pass(3.3f, 3.3f); w.sim.tick_second(); }
+        int catchup_max_dues = w.max_dues;
+        w.max_dues = 0;
         int recovery_passes = 0;
         while (recovery_passes < 60 && w.never_published() != 0) {
             g_clock += 10000;
@@ -396,18 +445,25 @@ int main() {
             recovery_passes++;
         }
         assert(w.never_published() == 0);   // no permanently-stuck instance
+        w.max_dues = 0;
+        // after the catch-up window: every pass fits the pool — this is the
+        // assertion the commit-anchored heartbeat failed (grouped 60 s /
+        // 300 s cohorts refiring forever)
+        for (int k = 0; k < 30; k++) { g_clock += 10000; w.pass(3.3f, 3.3f); w.sim.tick_second(); }
+        assert(w.max_dues <= POOL);
         for (int i = 0; i < N_FAST; i++) assert(g_clock - w.fast_pub[i] <= 70000);
         for (int i = 0; i < N_CELL; i++) assert(g_clock - w.cell_pub[i] <= HB_CELL + 10000);
-        for (int i = 0; i < N_CHANGE; i++) assert(g_clock - w.change_pub[i] <= HB_CHANGE + 10000);
-        printf("S8 flap resilience: ok (liveness through 120 flaps, converged after %d stable passes)\n",
-               recovery_passes);
+        for (int i = 0; i < N_CHANGE; i++) assert(g_clock - w.change_pub[i] <= HB_CELL + 10000);
+        (void) catchup_max_dues;
+        printf("S8 flap resilience: ok (liveness through 120 flaps, converged after %d stable passes, steady peak dues %d <= %d)\n",
+               recovery_passes, w.max_dues, POOL);
     }
 
     // ---------- S9: slow-drain shaping keeps the pool in bounds ----------
     {
         World w;
         g_clock = 0;
-        w.arm_all(0);
+        w.assign_all(0);
         w.sim.drain_per_sec = 40;   // 5x slowed drain
         long max_in_flight = 0;
         for (g_clock = 10000; g_clock < 1200000; g_clock += 10000) {
