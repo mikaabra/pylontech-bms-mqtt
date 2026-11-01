@@ -1,7 +1,7 @@
-// Host oracle for breadcrumbs.h: exercises the boot -> MQTT-connect ->
-// broker-report sequence the 2026-11-01 review found broken (snapshot flag
-// cleared before the broker pass), plus the entry/exit-mark discrimination
-// and last-publish-duration capture.
+// Host oracle for breadcrumbs.h: exercises the boot -> direct-publish
+// report sequence (checked and retried, replacing the earlier design the
+// 2026-11-01 review found broken), plus the entry/exit-mark discrimination,
+// section-origin scoping, and last/slowest publish duration capture.
 #include "../../../shared/esphome/breadcrumbs.h"
 
 #include <cassert>
@@ -16,6 +16,14 @@ static size_t count_logs(const char *level, const char *needle = nullptr) {
         if (strcmp(r.level, level) != 0) continue;
         if (needle && !strstr(r.msg, needle)) continue;
         n++;
+    }
+    return n;
+}
+
+static size_t msgs_containing(const char *needle) {
+    size_t n = 0;
+    for (auto &m : g_pub_messages) {
+        if (strstr(m.c_str(), needle)) n++;
     }
     return n;
 }
@@ -40,8 +48,8 @@ int main() {
     bc_mark(BC_TX_ALARM, 4);
     assert(bc_stage_ == BC_TX_ALARM && bc_aux_ == 4);
 
-    // Session 2: wdt panic reboot. Setup must snapshot + log on serial at
-    // ERROR, and KEEP the snapshot pending for the broker pass.
+    // Session 2: wdt panic reboot. Setup snapshots and logs serial ERROR,
+    // keeping the record pending for the direct broker publish.
     g_reset_reason = ESP_RST_TASK_WDT;
     g_ms = 2000;
     bc_setup();
@@ -50,15 +58,23 @@ int main() {
     assert(bc_snap_last_pub_ms_ == 30);
     assert(bc_snap_stage_ms_ == 1030);
 
-    // Broker pass: fires once on connect, at ERROR, then seals the flag;
-    // a second call is a no-op even if MQTT flaps.
-    bc_report_to_broker(false);
+    // Direct publish is checked and retried: a rejected enqueue keeps the
+    // snapshot pending; acceptance delivers exactly one message and seals
+    // it; a later call with nothing pending is a no-op.
     assert(count_logs("ERROR") == 1);
-    bc_report_to_broker(true);
-    assert(count_logs("ERROR", "reset_reason=6") == 2);  // serial + broker pass
+    g_pub_accept = false;
+    assert(!bc_publish_report_direct());
+    assert(bc_have_snapshot_);
+    assert(!bc_publish_report_direct());  // rejection is retryable
+    assert(bc_have_snapshot_);
+    g_pub_accept = true;
+    assert(bc_publish_report_direct());
     assert(!bc_have_snapshot_);
-    bc_report_to_broker(true);
-    assert(count_logs("ERROR") == 2);  // no third line on repeat
+    assert(g_pub_messages.size() == 1);
+    assert(strstr(g_pub_messages[0].c_str(), "stage 4(tx_alarm)") != nullptr);
+    assert(strstr(g_pub_messages[0].c_str(), "reset_reason=6") != nullptr);
+    assert(bc_publish_report_direct());  // nothing pending
+    assert(g_pub_messages.size() == 1);
 
     // Session 3: a publish that never returns. Entry mark stays sticky —
     // this is the "blocked inside the call" case the crumb exists for.
@@ -68,23 +84,23 @@ int main() {
     // (no bc_pub_end: publish "never returned")
     g_reset_reason = ESP_RST_TASK_WDT;
     bc_setup();
-    // broker reconnect never happened before this reboot; serial shows the
-    // blocked-in-publish position with the entry timestamp.
     assert(count_logs("ERROR", "ended in stage 6(pub_data)") == 1);
     assert(bc_snap_stage_ms_ == 3000);
-    bc_report_to_broker(true);
-    assert(count_logs("ERROR", "ended in stage 6(pub_data)") == 2);
+    assert(bc_publish_report_direct());
+    assert(g_pub_messages.size() == 2);
+    assert(strstr(g_pub_messages[1].c_str(), "pub_data") != nullptr);
 
-    // Session 4: routine OTA reboot (software reset) — serial INFO, broker
-    // WARN flagged as routine, so HA keeps the reset_reason field without
-    // an error-level false alarm.
+    // Session 4: routine OTA reboot (software reset) — serial INFO and a
+    // routine-labeled report, so HA sees the reset_reason without an
+    // error-level false alarm.
     bc_mark(BC_IDLE);
     g_reset_reason = ESP_RST_SW;
     bc_setup();
     assert(count_logs("INFO", "routine reset") == 1);
     assert(bc_have_snapshot_);
-    bc_report_to_broker(true);
-    assert(count_logs("WARN", "routine reset") == 1);
+    assert(bc_publish_report_direct());
+    assert(g_pub_messages.size() == 3);
+    assert(strstr(g_pub_messages[2].c_str(), "routine reset, not a crash") != nullptr);
     assert(count_logs("ERROR", "routine reset") == 0);
 
     // Session 5: blocked AFTER a publish returned (exit mark wins: IDLE,
@@ -119,6 +135,8 @@ int main() {
     }
     assert(count_logs("ERROR", "ended in stage 5(wait_alarm)") == 1);
     assert(bc_snap_stage_ms_ == 6010);  // written at mark time, not hang time
+    assert(bc_publish_report_direct());
+    assert(g_pub_messages.size() == 4);
 
     // Guard clears the section origin: a publish from an unmarked caller
     // after a section exits must not inherit the stale section aux.
@@ -133,7 +151,7 @@ int main() {
     g_ms = 6900;
     bc_pub_end();
 
-    // Session 7: unknown and non-enum'd reasons are NOT routine — ERROR, no
+    // Session 7: unknown and non-benign reasons are NOT routine — ERROR, no
     // routine label. Only SW/POWERON/DEEPSLEEP get the benign treatment.
     g_reset_reason = ESP_RST_UNKNOWN;
     bc_setup();
@@ -172,7 +190,8 @@ int main() {
     g_reset_reason = ESP_RST_TASK_WDT;
     bc_setup();
     assert(count_logs("ERROR", "max_pub_ms=250") == 1);
-    bc_report_to_broker(true);
+    assert(bc_publish_report_direct());
+    assert(msgs_containing("max_pub_ms=250") == 1);
 
     printf("breadcrumbs oracle passed\n");
     return 0;

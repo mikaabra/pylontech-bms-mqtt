@@ -39,6 +39,22 @@ struct PublishPacer {
     }
 };
 
+// Per-pass publish budget, shared by both handlers within one 3s tick so
+// the combined burst stays safely under the ~29-slot async pool. A rejected
+// budget slot or a pool rejection stops the stream; the cursor freezes and
+// the next tick resumes from it.
+struct PublishBudget {
+    int remaining;
+    explicit PublishBudget(int n) : remaining(n) {}
+    bool take() {
+        if (remaining > 0) {
+            remaining--;
+            return true;
+        }
+        return false;
+    }
+};
+
 // Force-republish window after an MQTT reconnect edge: diagnostics that
 // publish only on change lose updates sent during an outage, and retained
 // ones need a re-send when the value changed during the gap. Unsigned
