@@ -12,19 +12,43 @@
 // lambdas from core getters - there is deliberately no discovery code
 // here: native ESPHome MQTT discovery covers this low-volume device.
 //
-// Phase 2 (issue #59, guarded write client) adds the TX path; this header
-// contains no write call, and the v1 yaml declares no tx_pin, so DE/RE
-// (GPIO21, held low by an internal ALWAYS_OFF switch pin) can never key.
+// Phase 2 (issue #59): the guarded write client. The TX path is reachable
+// only through WriteController's gates: the Link Write Enable switch
+// (yaml restore_mode: ALWAYS_OFF) is re-checked at every state transition,
+// the allowlist (param 0x4C, 3400-3500 mV, packs 01-04) lives in the pure
+// core, each Send press is a one-shot (initial + single retry), and firing
+// requires >=150 ms confirmed silence with the slot watchdog healthy.
+// DE/RE keys only via the uart flow_control_pin during our own frame -
+// nothing else in this tree writes to the UART.
 
 class BmsLinkSniffer {
 public:
     explicit BmsLinkSniffer(esphome::uart::UARTComponent* uart)
-        : uart_(uart) {}
+        : uart_(uart),
+          write_(core_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this) {
+        core_.set_ack_waiter(&write_);
+    }
 
     void bind_entities(esphome::text_sensor::TextSensor* last_anomaly,
-              esphome::text_sensor::TextSensor* anomaly_dump) {
+                       esphome::text_sensor::TextSensor* anomaly_dump,
+                       esphome::text_sensor::TextSensor* write_status,
+                       esphome::switch_::Switch* write_enable) {
         last_anomaly_ = last_anomaly;
         anomaly_dump_ = anomaly_dump;
+        write_status_ = write_status;
+        write_enable_ = write_enable;
+    }
+
+    // one-shot trigger from the Send Balance Voltage Write button
+    void arm_write(uint8_t pack, uint16_t value_mv) {
+        if (!write_status_) return;
+        if (!write_enable_ || !write_enable_->state) {
+            write_status_->publish_state(
+                "refused: Link Write Enable is off (turn it on deliberately)");
+            return;
+        }
+        write_.request(pack, 0x4C, value_mv, esphome::millis());
+        write_status_->publish_state(write_.status_line());
     }
 
     // 10 ms interval tick from yaml
@@ -38,12 +62,20 @@ public:
         }
         if (n) core_.feed(buf, n, now);
         core_.tick(now);
+        write_.tick(now);
         for (const auto& e : core_.drain_events()) publish_event(e);
+        if (write_status_ && write_.status_line() != last_write_line_) {
+            last_write_line_ = write_.status_line();
+            write_status_->publish_state(last_write_line_);
+        }
     }
 
+    float writes_sent() const { return (float)write_.tx_count(); }
+    float write_collisions() const { return (float)write_.collision_count(); }
+
     // Dump button: publish the ring and release a freeze. Auto-publish
-    // (below) never resumes - the operator decides when the incident
-    // window is no longer needed.
+    // (in publish_event, below) never resumes - the operator decides
+    // when the incident window is no longer needed.
     void publish_dump() {
         if (anomaly_dump_) anomaly_dump_->publish_state(core_.dump_bounded());
         core_.resume_ring();
@@ -131,6 +163,21 @@ private:
 
     esphome::uart::UARTComponent* uart_;
     linksniff::BmsLinkCore core_;
+    linksniff::WriteController write_;
     esphome::text_sensor::TextSensor* last_anomaly_ = nullptr;
     esphome::text_sensor::TextSensor* anomaly_dump_ = nullptr;
+    esphome::text_sensor::TextSensor* write_status_ = nullptr;
+    esphome::switch_::Switch* write_enable_ = nullptr;
+    std::string last_write_line_;
+
+    static bool enable_cb_(void* ctx) {
+        BmsLinkSniffer* self = (BmsLinkSniffer*)ctx;
+        return self->write_enable_ && self->write_enable_->state;
+    }
+    static bool tx_cb_(const std::string& frame, void* ctx) {
+        BmsLinkSniffer* self = (BmsLinkSniffer*)ctx;
+        for (char ch : frame) self->uart_->write_byte((uint8_t)ch);
+        self->uart_->flush();
+        return true;
+    }
 };

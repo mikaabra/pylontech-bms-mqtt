@@ -40,6 +40,8 @@
 
 namespace linksniff {
 
+class WriteController;
+
 // ---- constants ------------------------------------------------------------
 static constexpr int      kNumPacks          = 4;     // Link slaves 01..04
 static constexpr uint32_t kWatchdogTripMs   = 2000;  // over 624 & 1264 ms slots
@@ -52,6 +54,85 @@ static constexpr size_t   kRingSlots        = 32;
 // the month-3 lockup's capture)
 static constexpr uint32_t kRingReleaseDelayMs = 5000;
 static constexpr uint32_t kStatsWindowMs    = 60000;
+
+// ---- guarded write client (issue #59) ---------------------------------------
+// The allowlist is data with exactly one entry, mirroring
+// docs/analysis/bms073-tools/rs485_write_param.py (the proven Mac tool):
+// parameter 0x4C "Start Balance Voltage", 3400-3500 mV - "3.3 V is normal
+// resting voltage; the 3.55 V cell alarm is the ceiling." Identical bounds
+// on both write surfaces is deliberate: extending either is its own
+// reviewed change; there is no force-path.
+struct WriteAllowEntry {
+    uint8_t   param;
+    uint16_t  min_mv;
+    uint16_t  max_mv;
+    const char* name;
+};
+static const WriteAllowEntry kWriteAllowlist[] = {
+    {0x4C, 3400, 3500, "Start Balance Voltage"},
+};
+
+// Observed Link slave addresses only: 00 is the standalone self-address,
+// FF the broadcast probe address - both untested write territory.
+static constexpr uint8_t kLinkPackFirst = 0x01;
+static constexpr uint8_t kLinkPackLast  = 0x04;
+
+inline const WriteAllowEntry* write_allowlist_find(uint8_t param) {
+    for (const auto& e : kWriteAllowlist)
+        if (e.param == param) return &e;
+    return nullptr;
+}
+
+// Validation pass/fail with a reason line (goes to Write Status).
+inline bool write_request_valid(uint8_t pack, uint8_t param, uint16_t value_mv,
+                                std::string* why) {
+    if (pack < kLinkPackFirst || pack > kLinkPackLast) {
+        if (why) *why = "pack must be 01-04 (observed Link addresses)";
+        return false;
+    }
+    const WriteAllowEntry* e = write_allowlist_find(param);
+    if (!e) {
+        if (why) *why = "parameter not on the write allowlist (0x4C only)";
+        return false;
+    }
+    if (value_mv < e->min_mv || value_mv > e->max_mv) {
+        if (why) *why = std::string(e->name) + ": " + std::to_string(value_mv) +
+                        " mV outside " + std::to_string(e->min_mv) + "-" +
+                        std::to_string(e->max_mv) + " mV";
+        return false;
+    }
+    return true;
+}
+
+// CID2 0x49 int-parameter write frame:
+//   ~ VER(80) ADR(00) CID1(D5) CID2(49) LENID(8008) [pack][param][u16 BE] CHK CR
+// INFO is 4 bytes = 8 ASCII chars; LENID length 8 -> LCHK nibble 8 (same
+// formula rs485_make_cmd uses). Byte-exact against both captured frames in
+// the inject oracle - change them together.
+inline std::string build_write_frame(uint8_t pack, uint8_t param, uint16_t value) {
+    char info[9];
+    snprintf(info, sizeof info, "%02X%02X%04X", (unsigned)pack, (unsigned)param,
+             (unsigned)value);
+    int len = 8;
+    int digit_sum = (len / 256) + ((len / 16) % 16) + (len % 16);
+    int lchk = (~digit_sum + 1) & 0xF;
+    char body[25];
+    snprintf(body, sizeof body, "8000D549%X%03X%s", lchk, len, info);
+    std::string result = "~";
+    result += body;
+    result += rs485_calc_chksum(body);
+    result += "\r";
+    return result;
+}
+
+// Injection timing (docs/PROTOCOL_REFERENCE.md measured Link bus):
+//   624 ms slots leave ~436 ms idle; >=150 ms confirmed silence is the
+//   experimentally proven injection threshold; frame is ~26 chars (~27 ms
+//   at 9600); ack turnaround ~15 ms; give the ack up to ~130 ms after TX
+//   start (30 ms wire time + 100 ms slack).
+static constexpr uint32_t kGapConfirmMs    = 150;
+static constexpr uint32_t kAckDeadlineMs   = 130;
+static constexpr int      kMaxAttempts     = 2;  // initial + single retry on no-ack
 
 // The captured bare ack (RTN 00, empty INFO), interior without SOI/EOI.
 static const char kRawBareAck[] = "8000D5000000FD9F";
@@ -95,6 +176,7 @@ enum class EventKind {
     PackMute,         // pack hit kPackMuteSlots unanswered polls
     PackRecover,
     RingReleased,     // incident window re-opened after recovery + delay (wrapper publishes)
+    AckForWrite,      // bare ack consumed by a pending injection wait (not an anomaly)
 };
 
 struct LinkEvent {
@@ -403,6 +485,7 @@ private:
         open_req_.valid = false;
         last_frame_end_ms_ = frame_end_t_ms_;
         ring_now(frame_end_t_ms_, pair_cid + " p" + std::to_string(pack));  // compact normal-traffic context entry
+        last_pair_ms_ = frame_end_t_ms_;  // clean request/response pair completed
         if (pack >= 1 && pack <= 4) {
             PackStats& s = packs_[pack];
             s.responses++;
@@ -418,16 +501,8 @@ private:
         }
     }
 
-    void on_bare_ack(uint32_t t_ms) {
-        last_frame_end_ms_ = frame_end_t_ms_;
-        if (bare_ack_hook_) {
-            bare_ack_hook_(t_ms, bare_ack_ctx_);  // injection wait decides; v1: never set
-            return;
-        }
-        push_event(EventKind::AnomalyAck, t_ms, 0, "bare ack with no write pending");
-        anomalies_++;
-        ring_now(t_ms, kRawBareAck);
-    }
+    // Defined after WriteController (ack-waiter consult)
+    void on_bare_ack(uint32_t t_ms);
 
     // ---- helpers -------------------------------------------------------------
     void close_open_slot_unanswered() {
@@ -497,14 +572,13 @@ private:
         events_.push_back(LinkEvent{k, t, pack, detail});
     }
 
-    // ---- hook (set only by the guarded write client, part 2) --------------
+    // ---- ack-waiter hookup (set only by the guarded write client) ---------
 public:
-    void set_bare_ack_hook(void (*hook)(uint32_t t_ms, void* ctx), void* ctx) {
-        bare_ack_hook_ = hook;
-        bare_ack_ctx_ = ctx;
-    }
+    void set_ack_waiter(WriteController* w) { ack_waiter_ = w; }
     uint32_t dropped_events() const { return dropped_events_; }
     uint32_t last_frame_end_ms() const { return last_frame_end_ms_; }
+    uint32_t last_rx_ms() const { return last_rx_t_ms_; }
+    uint32_t last_pair_ms() const { return last_pair_ms_; }
 
 private:
     static constexpr size_t kRingHexBudget = 240;
@@ -531,6 +605,7 @@ private:
     bool     watchdog_tripped_ = false;
     uint32_t last_request_start_ms_ = 0;
     uint32_t last_frame_end_ms_ = 0;
+    uint32_t last_pair_ms_ = 0;
     uint32_t rate_anchor_ms_ = 0;
     uint32_t rate_anchor_total_ = 0;
     PackStats packs_[kNumPacks + 1];
@@ -548,8 +623,174 @@ private:
 
     std::vector<LinkEvent> events_;
 
-    void (*bare_ack_hook_)(uint32_t, void*) = nullptr;
-    void* bare_ack_ctx_ = nullptr;
+    WriteController* ack_waiter_ = nullptr;
 };
+
+// ---------------------------------------------------------------------------
+// Guarded injection controller (issue #59). One-shot per request(): at most
+// initial + single retry; every state transition re-checks the enable gate
+// (mid-sequence switch-off aborts); fires only into a >=150 ms confirmed
+// silence; never while the slot watchdog is tripped; a failed attempt must
+// observe one clean request/response pair before the retry may fire.
+// Verification is ack-level ONLY: the bare ack does not identify the
+// responding pack - status lines say so and must never claim more.
+// ---------------------------------------------------------------------------
+class WriteController {
+public:
+    enum class Status { Idle, Denied, Armed, WaitAck, Acked, NoAck, Collision, Aborted };
+
+    using EnableFn = bool (*)(void*);
+    using TxFn = bool (*)(const std::string&, void*);
+
+    WriteController(BmsLinkCore& core, EnableFn enable, TxFn tx, void* ctx)
+        : core_(core), enable_(enable), tx_(tx), ctx_(ctx) {}
+
+    // explicit one-shot trigger (the Send button). Validation failures go to
+    // Denied with the reason; nothing is queued or auto-retried afterwards.
+    bool request(uint8_t pack, uint8_t param, uint16_t value_mv, uint32_t now) {
+        (void)now;
+        std::string why;
+        if (!write_request_valid(pack, param, value_mv, &why)) {
+            deny(why);
+            return false;
+        }
+        pending_ = Pending{pack, param, value_mv};
+        attempts_ = 0;
+        need_clean_slot_ = false;
+        status_ = Status::Armed;
+        line_ = "armed: pack " + hex2(pack) + " param " + hex2(param) +
+                " (" + std::to_string(value_mv) + " mV), waiting for gap";
+        return true;
+    }
+
+    void tick(uint32_t t_ms) {
+        switch (status_) {
+            case Status::Armed:
+                tick_armed(t_ms);
+                break;
+            case Status::WaitAck:
+                tick_wait_ack(t_ms);
+                break;
+            default:
+                break;  // terminal states: Idle/Denied/Acked/NoAck/Collision/Aborted
+        }
+    }
+
+    // core consults this on every bare ack; when true the ack is consumed
+    void on_ack(uint32_t t_ms) {
+        if (status_ != Status::WaitAck) return;
+        status_ = Status::Acked;
+        last_ack_latency_ms_ = (int)(t_ms - tx_started_ms_);
+        line_ = "ack ok in " + std::to_string(last_ack_latency_ms_) +
+                " ms (bare RTN-00 ack, pack not identified: ack-level verification only)";
+    }
+
+    bool ack_expected() const { return status_ == Status::WaitAck; }
+
+    Status status() const { return status_; }
+    const std::string& status_line() const { return line_; }
+    uint32_t tx_count() const { return tx_count_; }
+    uint32_t collision_count() const { return collision_count_; }
+
+private:
+    struct Pending { uint8_t pack; uint8_t param; uint16_t value_mv; };
+
+    void deny(const std::string& why) {
+        status_ = Status::Denied;
+        line_ = "denied: " + why;
+    }
+
+    void tick_armed(uint32_t t_ms) {
+        if (!enable_(ctx_)) {
+            status_ = Status::Aborted;
+            line_ = "aborted: write enable switched off";
+            return;
+        }
+        if (core_.watchdog_tripped()) return;  // bus in unknown state: hold fire
+        if (need_clean_slot_) {
+            if (core_.last_pair_ms() > failed_at_ms_) {
+                need_clean_slot_ = false;  // one clean slot observed since failure
+            } else {
+                return;
+            }
+        }
+        if (core_.since_last_rx(t_ms) < kGapConfirmMs) return;
+        std::string frame = build_write_frame(pending_.pack, pending_.param, pending_.value_mv);
+        tx_started_ms_ = t_ms;
+        if (!tx_(frame, ctx_)) {
+            status_ = Status::Aborted;
+            line_ = "aborted: uart write failed";
+            return;
+        }
+        tx_count_++;
+        ack_deadline_ms_ = t_ms + kAckDeadlineMs;
+        status_ = Status::WaitAck;
+        line_ = "sent, waiting for ack (frame " + std::to_string(frame.size()) + " chars)";
+    }
+
+    void tick_wait_ack(uint32_t t_ms) {
+        if (!enable_(ctx_)) {
+            status_ = Status::Aborted;
+            line_ = "aborted: write enable switched off";
+            return;
+        }
+        if (t_ms < ack_deadline_ms_) return;
+        // deadline passed: any RX during our window that was not the ack is
+        // collision evidence (the master's poll arrived inside our slot)
+        bool traffic = core_.last_rx_ms() > tx_started_ms_;
+        attempts_++;
+        bool retry = attempts_ < kMaxAttempts;
+        const char* verdict = traffic ? "collision" : "no ack";
+        if (retry) {
+            need_clean_slot_ = true;
+            failed_at_ms_ = t_ms;
+            status_ = Status::Armed;
+            line_ = std::string(verdict) + " on attempt " + std::to_string(attempts_) +
+                    "; one clean slot required before the single retry";
+        } else {
+            if (traffic) collision_count_++;
+            status_ = traffic ? Status::Collision : Status::NoAck;
+            line_ = std::string(verdict) + " after " + std::to_string(attempts_) +
+                    " attempts; disarmed (press Send again for a new one-shot)";
+        }
+    }
+
+    static std::string hex2(uint8_t v) {
+        char b[3];
+        snprintf(b, sizeof b, "%02X", (unsigned)v);
+        return b;
+    }
+
+    BmsLinkCore& core_;
+    EnableFn enable_;
+    TxFn tx_;
+    void* ctx_;
+
+    Status status_ = Status::Idle;
+    Pending pending_{0, 0, 0};
+    int attempts_ = 0;
+    bool need_clean_slot_ = false;
+    uint32_t failed_at_ms_ = 0;
+    uint32_t tx_started_ms_ = 0;
+    uint32_t ack_deadline_ms_ = 0;
+    uint32_t tx_count_ = 0;
+    uint32_t collision_count_ = 0;
+    int last_ack_latency_ms_ = 0;
+    std::string line_ = "idle";
+};
+
+// Bare-ack routing: a pending injection wait consumes it (AckForWrite,
+// not an anomaly); anything else stays unexpected config-plane oddity.
+inline void BmsLinkCore::on_bare_ack(uint32_t t_ms) {
+    last_frame_end_ms_ = frame_end_t_ms_;
+    if (ack_waiter_ && ack_waiter_->ack_expected()) {
+        push_event(EventKind::AckForWrite, t_ms, 0, "bare ack for injected write");
+        ack_waiter_->on_ack(t_ms);
+        return;
+    }
+    push_event(EventKind::AnomalyAck, t_ms, 0, "bare ack with no write pending");
+    anomalies_++;
+    ring_now(t_ms, kRawBareAck);
+}
 
 }  // namespace linksniff

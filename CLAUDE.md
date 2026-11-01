@@ -83,7 +83,7 @@ All v2 firmware uses the same pattern: YAML (component wiring) + C++ header hand
 - **`includes/pylontech_can.h`** — CAN frame parsing (0x351, 0x355, 0x359, 0x35C, 0x370), diagnostics, stale detection, resumable budgeted discovery stream + 10s availability heartbeat
 - **`includes/pylontech_rs485.h`** — RS485 polling state machine, per-battery data, stack aggregation, resumable budgeted discovery stream + 30s stamp repair pass
 - **`includes/pylontech_protocol.h`** — Shared protocol pure helpers + RS485 INFO decoders (0x42 analog / 0x44 alarm), host-oracle tested (`tests/`)
-- **`includes/bms_link_sniffer_core.h` / `bms_link_sniffer.h`** — BMS073 Link-bus listener (#58): pure core (frame scan/classify/pairing/stats/watchdog/anomaly ring, host-oracle tested) + thin UART wrapper pushing into native ESPHome MVP entities. RX-only by construction: no tx_pin in the yaml, DE/RE pinned low
+- **`includes/bms_link_sniffer_core.h` / `bms_link_sniffer.h`** — BMS073 Link-bus sniffer (#58 listener + #59 guarded write client): pure core (frame scan/classify/pairing/stats/watchdog/anomaly ring; on top: write allowlist {0x4C 3400-3500 mV}, byte-exact captured builder, gap-injection state machine with clean-slot retry rules — all host-oracle tested) + thin UART wrapper (10 ms feed, event/text push into native ESPHome entities, gated TX via flow_control). Part 1 ships rx-only (no tx_pin, DE/RE held low); part 2 is the reviewed change adding the guarded TX path
 
 ### Rack Solar BLE v2 (`firmware/rack-solar-site/esphome-smartshunt-epever-ble-v2/`)
 
