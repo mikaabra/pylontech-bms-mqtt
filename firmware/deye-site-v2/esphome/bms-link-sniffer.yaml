@@ -4,23 +4,31 @@
 #
 # Hardware: Waveshare ESP32-S3-RS485-CAN, second unit, clipped onto the
 # pack-to-pack RS485 chain of the 5-pack Richpower BMS073 stack.
-#   RS485: RX=GPIO18, 9600 baud (TX=GPIO17 and DE/RE=GPIO21 are unused here)
+#   RS485: RX=GPIO18, TX=GPIO17, DE/RE=GPIO21 (uart flow_control), 9600 baud
 #
-# RX-ONLY GUARANTEE (part 1) — scoped honestly: WHILE THE FIRMWARE RUNS,
-# this yaml declares no tx_pin and no flow_control_pin, so ESPHome cannot
-# key DE via the UART driver, and DE/RE (hardwired to GPIO21 on this
-# board) is claimed by an internal ALWAYS_OFF gpio switch held LOW:
-# receive enabled, driver disabled.
-# That claim does NOT extend to reset: GPIO21 is unclaimed through the
-# ROM bootloader, chip reset, and safe mode — safe-mode entry returns
-# from main() before components set up, so a boot loop can leave the pin
-# floating for up to ~5 minutes. Only the board's own pull state covers
-# that window, and it is UNMEASURED. The pre-bus glitch sniff (reboots,
-# OTA, forced safe-mode boot — deployment checklist in the PR) is the
-# measurement; if it shows DE floating high, fit an external pulldown on
-# GPIO21 before permanent clip-on.
-# Part 2 (#59) replaces the pin-holder with uart flow_control in its own
-# reviewed change; until then there is no write path anywhere in the tree.
+# TX GUARANTEE (part 2, #59) — scoped honestly: WHILE THE FIRMWARE RUNS,
+# DE/RE (hardwired to GPIO21 on this board) is driven by the uart
+# flow_control_pin, asserted only while our own frame is on the wire.
+# The write path reaches the UART only through the guarded
+# WriteController gates: the Link Write Enable switch below
+# (restore_mode ALWAYS_OFF, auto-off after each operation, re-checked at
+# every injection state transition), the single-entry write allowlist in
+# the pure core (param 0x4C, 3400-3500 mV, packs 01-04 — the same bounds
+# as the Mac tool), a one-shot button (one frame per press, presses in
+# flight ignored), a >=150 ms..<=250 ms fire window inside a fresh poll
+# cadence, and a 6 s arm expiry.
+# The four write controls carry state_topic/command_topic: null — the
+# supported way to remove their MQTT plumbing entirely (no topics, no
+# subscriptions, no discovery; compute_is_internal_() classifies them
+# MQTT-internal). Operator reach: the HA ESPHome integration (encrypted
+# native API) or the device web server (digest auth, LAN only). Nothing
+# broker-side can command the write path.
+# Reset window, same honesty as part 1: GPIO21 is unclaimed through the
+# ROM bootloader, chip reset, and safe mode, and the write controls do
+# not extend that claim; the pre-bus glitch sniff (boots, OTA, forced
+# safe-mode boot) is the measurement; external pulldown if it shows
+# DE floating high. Part 1 (#58) shipped rx-only; this is that reviewed
+# change.
 #
 # Discovery: native ESPHome MQTT (low-volume diagnostics, ~15 state topics
 # at 60 s). The hand-rolled budgeted discovery stream on deye-bms-can exists
@@ -47,7 +55,7 @@ esphome:
     then:
       - lambda: |-
           id(link_sniffer) = (void*) new BmsLinkSniffer(id(link_uart));
-          ((BmsLinkSniffer*)id(link_sniffer))->bind_entities(id(link_last_anomaly), id(link_anomaly_dump));
+          ((BmsLinkSniffer*)id(link_sniffer))->bind_entities(id(link_last_anomaly), id(link_anomaly_dump), id(link_write_status), id(link_write_enable));
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -129,24 +137,32 @@ web_server:
 
 uart:
   id: link_uart
-  # rx-only by design — see the header comment block. DE/RE (GPIO21) is
-  # held low by the internal switch below, never by the UART driver.
   rx_pin: GPIO18
+  tx_pin: GPIO17
+  flow_control_pin: GPIO21
   baud_rate: 9600
+  # round 4: never wait indefinitely on a wedged driver - a flush with no
+  # timeout would block the main loop until the task watchdog reset, which
+  # re-opens the DE/RE window we keep closed
+  flush_timeout: 100ms
   data_bits: 8
   stop_bits: 1
   parity: NONE
   rx_buffer_size: 1024
 
 switch:
-  # Pin-holder only, hidden from HA (internal): DE/RE low = receiver on,
-  # driver off. Do not convert to a visible entity; part 2 swaps it for
-  # uart flow_control_pin in the same change that adds tx_pin.
-  - platform: gpio
-    pin: GPIO21
-    id: link_de_hold
-    internal: true
+  - platform: template
+    name: "Link Write Enable"
+    id: link_write_enable
+    icon: "mdi:shield-key"
+    entity_category: config
+    optimistic: true
     restore_mode: ALWAYS_OFF
+    # auto-off after every completed operation AND after 5 min of
+    # idleness (wrapper), so each write needs deliberate re-enabling -
+    # the per-write confirmation analog
+    state_topic: null
+    command_topic: null
 
 globals:
   - id: link_sniffer
@@ -319,6 +335,26 @@ sensor:
       return ((BmsLinkSniffer*)id(link_sniffer))->pack_age_s(4);
 
   - platform: template
+    name: "Link Writes Sent"
+    id: link_writes_sent
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->writes_sent();
+
+  - platform: template
+    name: "Link Write Collisions"
+    id: link_write_collisions
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->write_collisions();
+
+  - platform: template
     name: "Free Heap"
     id: sensor_free_heap
     unit_of_measurement: "bytes"
@@ -383,6 +419,12 @@ text_sensor:
     update_interval: never
 
   - platform: template
+    name: "Link Write Status"
+    id: link_write_status
+    entity_category: diagnostic
+    update_interval: never
+
+  - platform: template
     name: "Link Last Anomaly"
     id: link_last_anomaly
     entity_category: diagnostic
@@ -399,6 +441,41 @@ text_sensor:
   - platform: version
     name: "ESPHome Version"
 
+number:
+  - platform: template
+    name: "Balance Start Voltage mV"
+    id: link_balance_mv
+    icon: "mdi:tune"
+    entity_category: config
+    min_value: 3400
+    max_value: 3500
+    step: 10
+    initial_value: 3420
+    optimistic: true
+    restore_value: true
+    state_topic: null
+    command_topic: null
+
+select:
+  # "None" boots unselected and never restores - a target must be chosen
+  # for every session (review round 2: no silent Pack-01 fallback)
+  - platform: template
+    name: "Write Target Pack"
+    id: link_target_pack
+    icon: "mdi:battery"
+    entity_category: config
+    options:
+      - "None"
+      - "Pack 01"
+      - "Pack 02"
+      - "Pack 03"
+      - "Pack 04"
+    optimistic: true
+    initial_option: "None"
+    restore_value: false
+    state_topic: null
+    command_topic: null
+
 button:
   # review round 3: restart and dump keep their MQTT command topics by
   # default - a retained PRESS would reboot the device on every broker
@@ -411,6 +488,22 @@ button:
     name: "Restart"
     state_topic: null
     command_topic: null
+
+  # index 0 is "None" - the wrapper refuses a send without a selection
+  - platform: template
+    name: "Send Balance Voltage Write"
+    icon: "mdi:pencil"
+    entity_category: config
+    state_topic: null
+    command_topic: null
+    on_press:
+      - lambda: |-
+          if (!id(link_sniffer)) return;
+          int pack = 0;
+          if (id(link_target_pack).active_index().has_value())
+            pack = (int)*id(link_target_pack).active_index();
+          uint16_t mv = (uint16_t)id(link_balance_mv).state;
+          ((BmsLinkSniffer*)id(link_sniffer))->arm_write((uint8_t)pack, mv);
 
   - platform: template
     name: "Dump Anomaly Ring"

@@ -12,19 +12,50 @@
 // lambdas from core getters - there is deliberately no discovery code
 // here: native ESPHome MQTT discovery covers this low-volume device.
 //
-// Phase 2 (issue #59, guarded write client) adds the TX path; this header
-// contains no write call, and the v1 yaml declares no tx_pin, so DE/RE
-// (GPIO21, held low by an internal ALWAYS_OFF switch pin) can never key.
+// Phase 2 (issue #59): the guarded write client. The TX path is reachable
+// only through WriteController's gates: the Link Write Enable switch
+// (yaml restore_mode: ALWAYS_OFF) is re-checked at every state transition,
+// the allowlist (param 0x4C, 3400-3500 mV, packs 01-04) lives in the pure
+// core, each Send press is ONE deliberate frame (no retry - a late ack is
+// listened for and reported, but never triggers a transmit), and firing
+// requires >=150 ms confirmed silence with the slot watchdog healthy.
+// DE/RE keys only via the uart flow_control_pin during our own frame -
+// nothing else in this tree writes to the UART.
 
 class BmsLinkSniffer {
 public:
     explicit BmsLinkSniffer(esphome::uart::UARTComponent* uart)
-        : uart_(uart) {}
+        : uart_(uart),
+          write_(core_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this) {
+        core_.set_ack_waiter(&write_);
+    }
 
     void bind_entities(esphome::text_sensor::TextSensor* last_anomaly,
-              esphome::text_sensor::TextSensor* anomaly_dump) {
+                       esphome::text_sensor::TextSensor* anomaly_dump,
+                       esphome::text_sensor::TextSensor* write_status,
+                       esphome::switch_::Switch* write_enable) {
         last_anomaly_ = last_anomaly;
         anomaly_dump_ = anomaly_dump;
+        write_status_ = write_status;
+        write_enable_ = write_enable;
+    }
+
+    // one-shot trigger from the Send Balance Voltage Write button. Pack 0
+    // is the select's "None" (no restore, deliberate re-selection per
+    // review round 2) - refuse rather than fall back to a default target.
+    void arm_write(uint8_t pack, uint16_t value_mv) {
+        if (!write_status_) return;
+        if (!write_enable_ || !write_enable_->state) {
+            write_status_->publish_state(
+                "refused: Link Write Enable is off (turn it on deliberately)");
+            return;
+        }
+        if (pack == 0) {
+            write_status_->publish_state("refused: select a target pack first");
+            return;
+        }
+        write_.request(pack, 0x4C, value_mv, esphome::millis());
+        write_status_->publish_state(write_.status_line());
     }
 
     // 10 ms interval tick from yaml
@@ -38,12 +69,44 @@ public:
         }
         if (n) core_.feed(buf, n, now);
         core_.tick(now);
+        write_.tick(now);
         for (const auto& e : core_.drain_events()) publish_event(e);
+        if (write_status_ && write_.status_line() != last_write_line_) {
+            last_write_line_ = write_.status_line();
+            write_status_->publish_state(last_write_line_);
+        }
+        // review round 2: the enable gate auto-closes after every
+        // operation completes (ack, no-ack, collision, abort, expiry) -
+        // confirmation per press, matching the Mac tool's typed WRITE
+        auto prev = write_status_prev_;
+        write_status_prev_ = write_.status();
+        if (write_enable_ && write_enable_->state && prev != write_.status() &&
+            write_status_ && write_terminal(write_.status())) {
+            write_enable_->turn_off();
+            enable_on_ms_ = 0;
+            write_status_->publish_state(last_write_line_ + " [enable auto-off]");
+        }
+        // review round 3: enable left on with no press and no operation
+        // in flight must not stay armed forever - 5 minutes of idleness
+        // closes the gate
+        bool en = write_enable_ && write_enable_->state;
+        if (en && !enable_prev_) enable_on_ms_ = now;
+        enable_prev_ = en;
+        if (en && enable_on_ms_ && now - enable_on_ms_ > kEnableTimeoutMs &&
+            write_status_ && write_.status() != linksniff::WriteController::Status::Armed &&
+            write_.status() != linksniff::WriteController::Status::WaitAck) {
+            write_enable_->turn_off();
+            enable_on_ms_ = 0;
+            write_status_->publish_state("enable timed out after 5 min of idleness - turn it on deliberately for the next write");
+        }
     }
 
-    // Dump button: publish the ring and release a freeze. Auto-publish
-    // (below) never resumes - the operator decides when the incident
-    // window is no longer needed.
+    float writes_sent() const { return (float)write_.tx_count(); }
+    float write_collisions() const { return (float)write_.collision_count(); }
+
+    // Dump button: publish the ring and release a freeze. The core also
+    // releases automatically once every trigger has cleared (publish_event
+    // below); so this stays what it always was - the operator override.
     void publish_dump() {
         if (anomaly_dump_) anomaly_dump_->publish_state(core_.dump_bounded());
         core_.resume_ring();
@@ -101,6 +164,11 @@ private:
                 // entries that fit (~11 s on the healthy cadence)
                 kind = "ring-released";
                 break;
+            case linksniff::EventKind::AckForWrite:
+                // healthy expected event: Write Status already reports the
+                // ack; it must not appear on the Last Anomaly feed
+                anomaly_like = false;
+                break;
         }
         if (!anomaly_like) return;
         char line[160];
@@ -131,6 +199,38 @@ private:
 
     esphome::uart::UARTComponent* uart_;
     linksniff::BmsLinkCore core_;
+    linksniff::WriteController write_;
     esphome::text_sensor::TextSensor* last_anomaly_ = nullptr;
     esphome::text_sensor::TextSensor* anomaly_dump_ = nullptr;
+    esphome::text_sensor::TextSensor* write_status_ = nullptr;
+    esphome::switch_::Switch* write_enable_ = nullptr;
+    std::string last_write_line_;
+    linksniff::WriteController::Status write_status_prev_ = linksniff::WriteController::Status::Idle;
+    bool enable_prev_ = false;
+    uint32_t enable_on_ms_ = 0;
+    static constexpr uint32_t kEnableTimeoutMs = 300000;
+
+    static bool write_terminal(linksniff::WriteController::Status s) {
+        using S = linksniff::WriteController::Status;
+        return s == S::Acked || s == S::NoAck || s == S::Collision ||
+               s == S::Aborted || s == S::Expired || s == S::Denied;
+    }
+
+    static bool enable_cb_(void* ctx) {
+        BmsLinkSniffer* self = (BmsLinkSniffer*)ctx;
+        return self->write_enable_ && self->write_enable_->state;
+    }
+    static bool tx_cb_(const std::string& frame, void* ctx) {
+        // review round 2 nit: the flush result is checked - a timeout or
+        // driver failure after the write is a real, reported abort, not
+        // dead code. ASSUMED_SUCCESS (platform cannot confirm) also
+        // returns true; FAILED/TIMEOUT return false and the controller
+        // treats the attempt as sent-unknown (bytes may be on the wire).
+        BmsLinkSniffer* self = (BmsLinkSniffer*)ctx;
+        self->uart_->write_array(reinterpret_cast<const uint8_t*>(frame.data()),
+                                 (size_t)frame.size());
+        auto r = self->uart_->flush();
+        return r == esphome::uart::UARTFlushResult::UART_FLUSH_RESULT_SUCCESS ||
+               r == esphome::uart::UARTFlushResult::UART_FLUSH_RESULT_ASSUMED_SUCCESS;
+    }
 };

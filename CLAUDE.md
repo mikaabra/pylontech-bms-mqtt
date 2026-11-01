@@ -15,7 +15,7 @@ All data published to MQTT with Home Assistant auto-discovery.
 | Device | Firmware | Status |
 |--------|----------|--------|
 | `deye-bms-can.local` | `firmware/deye-site-v2/esphome/deye-bms-can.yaml` | **ACTIVE** — production, ESPHome 2026.9.1, encrypted OTA, async MQTT (`idf_send_async`, issue #42 fix merged 1919071), flashed + stall-test accepted 2026-11-01, #42 closed |
-| — (board ordered) | `firmware/deye-site-v2/esphome/bms-link-sniffer.yaml` | **PENDING** — second Waveshare ESP32-S3-RS485-CAN for the BMS073 Link bus. Two-phase: rx-only listener (#58, PR part 1 — no tx_pin; DE/RE held low while the firmware runs only) + guarded balance-voltage write client (#59, PR part 2 — tx via flow_control, Link Write Enable switch ALWAYS_OFF, single-entry allowlist 0x4C 3400-3500 mV, one-shot button, MQTT-command-free controls). Deployment gated on the pre-bus glitch sniff (boots/OTA/forced safe mode — GPIO21 is unclaimed through reset) + 120 Ω termination check, per the checklists in the PRs |
+| — (board ordered) | `firmware/deye-site-v2/esphome/bms-link-sniffer.yaml` | **PENDING** — second Waveshare ESP32-S3-RS485-CAN for the BMS073 Link bus. Two-phase: passive listener (#58 — merged #60, rx-only pins: no TX while it alone runs) + guarded balance-voltage write client (#59, PR #61 — tx via flow_control, Link Write Enable switch ALWAYS_OFF, single-entry allowlist 0x4C 3400-3500 mV, one frame per press with a 4 s cooldown latch, MQTT-command-free controls). Deployment gated on the pre-bus glitch sniff (boots/OTA/forced safe mode — GPIO21 is unclaimed through reset) + 120 Ω termination check, per the checklists in the PRs |
 | `rack-solar-bridge.local` | `firmware/rack-solar-site/esphome-smartshunt-epever-ble-v2/rack-solar-bridge.yaml` | **ACTIVE** — production (BLE SmartShunt + EPEVER), flashed 2026-11-01 with shared availability.h state-flip-on-success semantics (first on-device run; post-flash verified: all 6 stamps online, single clean reboot, data live). Async MQTT NOT yet adopted — see issue #45 |
 | — | `firmware/rack-solar-site/esphome-smartshunt-epever-v2/` | **NOT DEPLOYED** — VE.Direct variant, not in use (user confirmed). Do not flash. |
 | — | `firmware/rack-solar-site/esphome-smartshunt-epever/` | **LEGACY v1** — superseded |
@@ -55,7 +55,7 @@ Desktop oracle tests run directly with clang, no esphome toolchain needed:
 
 ```bash
 cd firmware/deye-site-v2/esphome
-for t in test_breadcrumbs test_discovery_driver test_rs485_info_decode test_rs485_temp_decode test_bms_link_sniffer_core; do
+for t in test_breadcrumbs test_discovery_driver test_rs485_info_decode test_rs485_temp_decode test_bms_link_sniffer_core test_bms_link_sniffer_inject; do
   clang++ -std=gnu++20 -Wall -Wextra -I. -Itests/stubs -Iincludes tests/$t.cpp -o /tmp/$t && /tmp/$t
 done
 ```
@@ -83,7 +83,7 @@ All v2 firmware uses the same pattern: YAML (component wiring) + C++ header hand
 - **`includes/pylontech_can.h`** — CAN frame parsing (0x351, 0x355, 0x359, 0x35C, 0x370), diagnostics, stale detection, resumable budgeted discovery stream + 10s availability heartbeat
 - **`includes/pylontech_rs485.h`** — RS485 polling state machine, per-battery data, stack aggregation, resumable budgeted discovery stream + 30s stamp repair pass
 - **`includes/pylontech_protocol.h`** — Shared protocol pure helpers + RS485 INFO decoders (0x42 analog / 0x44 alarm), host-oracle tested (`tests/`)
-- **`includes/bms_link_sniffer_core.h` / `bms_link_sniffer.h`** — BMS073 Link-bus listener (#58): pure core (frame scan/classify/pairing/stats/watchdog/anomaly ring, host-oracle tested) + thin UART wrapper pushing into native ESPHome MVP entities. RX-only by construction: no tx_pin in the yaml, DE/RE pinned low
+- **`includes/bms_link_sniffer_core.h` / `bms_link_sniffer.h`** — BMS073 Link-bus sniffer (#58 listener + #59 guarded write client): pure core (frame scan/classify/pairing/stats/watchdog/anomaly ring; on top: write allowlist {0x4C 3400-3500 mV}, byte-exact captured builder, gap-injection state machine — one frame per press, 4 s cooldown + clean-pair + fresh-cadence + 150..250 ms silence gates, all latches long-uptime-safe (10 ms tick clears them; pair-count baselines, not idle timestamps) — all host-oracle tested) + thin UART wrapper (10 ms feed, event/text push into native ESPHome entities, gated TX via flow_control). Part 1 (#60, merged) is the passive listener; part 2 (#61) adds the guarded TX path
 
 ### Rack Solar BLE v2 (`firmware/rack-solar-site/esphome-smartshunt-epever-ble-v2/`)
 
