@@ -306,6 +306,9 @@ button:
           PublishBudget budget(250);
           ((PylontechCAN*)id(pylontech_can))->publish_discovery(budget);
           if (budget.remaining > 0) ((PylontechRS485*)id(pylontech_rs485))->publish_discovery(budget);
+          // an incomplete blast (pool rejection) must not strand the sweep:
+          // let the 3s tick resume the cursor until the pass completes clean
+          id(discovery_published) = false;
 
   - platform: template
     name: "Toggle Debug Logging"
