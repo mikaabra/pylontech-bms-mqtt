@@ -320,27 +320,35 @@ public:
         BcScopeGuard bc_sweep_guard_;
 
         uint32_t now = millis();
+        uint32_t pass_start_ms_ = now;
+        rotate_++;
+        pass_attempts_ = 0;
+        pass_refused_client_ = 0;
+        pass_open_ = true;
 
-        // 30s repair pass (review items 3+5): retained idempotent stamps —
-        // the channel availability plus both alarm latches for every pack.
+        assign_slots_(now);   // idempotent: already-slotted instances are skipped
+
+        // 30s repair pass, gated internally (the yaml interval calls this
+        // every 10s for the value pass): retained idempotent stamps — the
+        // channel availability plus both alarm latches for every pack.
         // A dropped alarm ON would hide a dead pack until reconnect and a
         // dropped OFF would stick; the runtime transition publishes stay for
         // latency, this bounds their repair at one sweep. CAN heals its
         // stamp in 10s via publish_diagnostics; this gives RS485 parity.
-        if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected()) {
+        if (now - last_repair_ >= 30000 && esphome::mqtt::global_mqtt_client &&
+            esphome::mqtt::global_mqtt_client->is_connected()) {
+            last_repair_ = now;
             availability_.heartbeat(esphome::mqtt::global_mqtt_client);
-            for (int batt = 0; batt < num_batteries_; batt++) {
-                publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm);
-                publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm);
+            for (int batt = 0; batt < num_batteries_ && pass_open_; batt++) {
+                if (!publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm)) {
+                    total_refused_++;
+                    pass_open_ = false;   // first refusal closes the pass
+                }
+                if (pass_open_ && !publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm)) {
+                    total_refused_++;
+                    pass_open_ = false;
+                }
             }
-        }
-
-        bool force_heartbeat = (now - last_heartbeat_ >= 300000);
-        if (force_heartbeat) {
-            last_heartbeat_ = now;
-            ESP_LOGI("mqtt", "RS485 heartbeat: forcing republish of all values");
-            availability_.heartbeat(esphome::mqtt::global_mqtt_client);
-            reset_all_hysteresis();
         }
 
         float stack_cell_min = 99.0f, stack_cell_max = 0.0f;
@@ -349,26 +357,16 @@ public:
         float stack_current = 0.0f;
         int valid_batts = 0;
 
+        // Pass A: accumulate stack aggregates over all packs (order-free).
         for (int batt = 0; batt < num_batteries_; batt++) {
-            bc_mark(BC_SWEEP_BATT, (uint8_t) batt);
-            float batt_min = 99.0f, batt_max = 0.0f;
-
             if (batteries_[batt].has_analog) {
-                // Residuals accepted by design: totals can still include up to 10
-                // stale polls (~8 min) before the alarm clears a dead battery's
-                // data, and that battery's own HA entities keep their last values
-                // (they gate on the shared channel availability topic, so
-                // battery%d/poll_alarm is the visible sign of the failure).
                 for (int cell = 0; cell < 16; cell++) {
                     float v = batteries_[batt].cell_voltages[cell];
                     if (v > 0.1f) {
-                        if (v < batt_min) batt_min = v;
-                        if (v > batt_max) batt_max = v;
                         if (v < stack_cell_min) stack_cell_min = v;
                         if (v > stack_cell_max) stack_cell_max = v;
                     }
                 }
-
                 for (int t = 0; t < 6; t++) {
                     float temp = batteries_[batt].cell_temps[t];
                     if (temp > -40.0f && temp < 100.0f) {
@@ -376,118 +374,147 @@ public:
                         if (temp > stack_temp_max) stack_temp_max = temp;
                     }
                 }
-
                 if (batteries_[batt].voltage > 0.1f) {
                     stack_voltage += batteries_[batt].voltage;
                     valid_batts++;
                 }
                 stack_current += batteries_[batt].current;
             }
+        }
+        if (valid_batts > 0) stack_voltage /= valid_batts;
 
+        // Stack position alternates (#53): FRONT on odd passes so a full
+        // storm (every class crossing every pass) cannot starve the 9
+        // stack instances into deferral; tail on even passes.
+        if (stack_cell_min < 99.0f && valid_batts > 0 && (rotate_ & 1)) {
+            bc_mark(BC_PUB_STACK);
+            publish_stack_values_(stack_cell_min, stack_cell_max, stack_voltage, stack_current,
+                                 stack_temp_min, stack_temp_max);
+        }
+
+        // rotation: pack order advances by one per pass so chronic pool
+        // pressure (issue #53) can't starve the same tail packs every time
+        uint8_t b0 = rotate_ % (num_batteries_ ? num_batteries_ : 1);
+        for (int bb = 0; bb < num_batteries_; bb++) {
+            int batt = (bb + b0) % num_batteries_;
+            bc_mark(BC_SWEEP_BATT, (uint8_t) batt);
+            float batt_min = 99.0f, batt_max = 0.0f;
+            for (int cell = 0; cell < 16; cell++) {
+                float v = batteries_[batt].cell_voltages[cell];
+                if (v > 0.1f) {
+                    if (v < batt_min) batt_min = v;
+                    if (v > batt_max) batt_max = v;
+                }
+            }
             if (batteries_[batt].has_analog && batt_min < 99.0f) {
                 int idx = batt;
 
-                if (hyst_batt_cell_min_[idx].check(batt_min, 0.005f, 0.0f, 5.0f, 60000)) {
+                if (hyst_batt_cell_min_[idx].decide(batt_min, 0.005f, 0.0f, 5.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/cell_min", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.3f", batt_min);
-                    publish_raw(topic, payload);
+                    if (publish_raw(topic, payload)) hyst_batt_cell_min_[idx].commit();
                 }
-                if (hyst_batt_cell_max_[idx].check(batt_max, 0.005f, 0.0f, 5.0f, 60000)) {
+                if (hyst_batt_cell_max_[idx].decide(batt_max, 0.005f, 0.0f, 5.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/cell_max", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.3f", batt_max);
-                    publish_raw(topic, payload);
+                    if (publish_raw(topic, payload)) hyst_batt_cell_max_[idx].commit();
                 }
                 float cell_delta = (batt_max - batt_min) * 1000.0f;
-                if (hyst_batt_cell_delta_[idx].check(cell_delta, 5.0f, 0.0f, 5000.0f, 60000)) {
+                if (hyst_batt_cell_delta_[idx].decide(cell_delta, 5.0f, 0.0f, 5000.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/cell_delta_mv", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.1f", cell_delta);
-                    publish_raw(topic, payload);
+                    if (publish_raw(topic, payload)) hyst_batt_cell_delta_[idx].commit();
                 }
-                if (hyst_batt_voltage_[idx].check(batteries_[batt].voltage, 0.1f, 0.0f, 100.0f, 60000)) {
+                if (hyst_batt_voltage_[idx].decide(batteries_[batt].voltage, 0.1f, 0.0f, 100.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/voltage", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.2f", batteries_[batt].voltage);
-                    publish_raw(topic, payload);
+                    if (publish_raw(topic, payload)) hyst_batt_voltage_[idx].commit();
                 }
-                if (hyst_batt_current_[idx].check(batteries_[batt].current, 0.05f, -500.0f, 500.0f, 60000)) {
+                if (hyst_batt_current_[idx].decide(batteries_[batt].current, 0.05f, -500.0f, 500.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/current", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.2f", batteries_[batt].current);
-                    publish_raw(topic, payload);
+                    if (publish_raw(topic, payload)) hyst_batt_current_[idx].commit();
                 }
-                if (hyst_batt_soc_[idx].check(batteries_[batt].soc, 1.0f, 0.0f, 100.0f, 60000)) {
+                if (hyst_batt_soc_[idx].decide(batteries_[batt].soc, 1.0f, 0.0f, 100.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/soc", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.0f", batteries_[batt].soc);
-                    publish_raw(topic, payload);
+                    if (publish_raw(topic, payload)) hyst_batt_soc_[idx].commit();
                 }
-                if (hyst_batt_remain_ah_[idx].check(batteries_[batt].remain_ah, 0.5f, 0.0f, 1000.0f, 60000)) {
+                if (hyst_batt_remain_ah_[idx].decide(batteries_[batt].remain_ah, 0.5f, 0.0f, 1000.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/remain_ah", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.1f", batteries_[batt].remain_ah);
-                    publish_raw(topic, payload);
+                    if (publish_raw(topic, payload)) hyst_batt_remain_ah_[idx].commit();
                 }
-                if (hyst_batt_total_ah_[idx].check(batteries_[batt].total_ah, 0.5f, 0.0f, 1000.0f, 60000)) {
+                if (hyst_batt_total_ah_[idx].decide(batteries_[batt].total_ah, 0.5f, 0.0f, 1000.0f, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/total_ah", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%.1f", batteries_[batt].total_ah);
-                    publish_raw(topic, payload);
+                    if (publish_raw(topic, payload)) hyst_batt_total_ah_[idx].commit();
                 }
-                if (hyst_batt_cycles_[idx].check(batteries_[batt].cycles, 1, 0, 100000, 60000)) {
+                if (hyst_batt_cycles_[idx].decide(batteries_[batt].cycles, 1, 0, 100000, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/cycles", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%d", batteries_[batt].cycles);
-                    publish_raw(topic, payload);
+                    if (publish_raw(topic, payload)) hyst_batt_cycles_[idx].commit();
                 }
             }
 
             if (batteries_[batt].has_alarm) {
                 int idx = batt;
 
-                if (hyst_batt_balancing_count_[idx].check(batteries_[batt].balancing_count, 1, 0, 100, 60000) ||
-                    hyst_batt_balancing_cells_[idx].check(batteries_[batt].balancing_cells)) {
+                if (hyst_batt_balancing_count_[idx].decide(batteries_[batt].balancing_count, 1, 0, 100, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/balancing_count", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%d", batteries_[batt].balancing_count);
-                    publish_raw(topic, payload);
+                    bool ok = publish_raw(topic, payload);
                     snprintf(topic, sizeof(topic), "%s/battery%d/balancing_active", mqtt_prefix_.c_str(), batt);
-                    publish_raw(topic, batteries_[batt].balancing_count > 0 ? "1" : "0");
-                    snprintf(topic, sizeof(topic), "%s/battery%d/balancing_cells", mqtt_prefix_.c_str(), batt);
-                    publish_raw(topic, batteries_[batt].balancing_cells.c_str());
+                    ok = publish_raw(topic, batteries_[batt].balancing_count > 0 ? "1" : "0") && ok;
+                    if (ok) hyst_batt_balancing_count_[idx].commit();
                 }
-                if (hyst_batt_overvolt_count_[idx].check(batteries_[batt].overvolt_count, 1, 0, 100, 60000) ||
-                    hyst_batt_overvolt_cells_[idx].check(batteries_[batt].overvolt_cells)) {
+                if (hyst_batt_balancing_cells_[idx].decide(batteries_[batt].balancing_cells)) {
+                    snprintf(topic, sizeof(topic), "%s/battery%d/balancing_cells", mqtt_prefix_.c_str(), batt);
+                    if (publish_raw(topic, batteries_[batt].balancing_cells.c_str())) hyst_batt_balancing_cells_[idx].commit();
+                }
+                if (hyst_batt_overvolt_count_[idx].decide(batteries_[batt].overvolt_count, 1, 0, 100, 60000)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/overvolt_count", mqtt_prefix_.c_str(), batt);
                     snprintf(payload, sizeof(payload), "%d", batteries_[batt].overvolt_count);
-                    publish_raw(topic, payload);
+                    bool ok = publish_raw(topic, payload);
                     snprintf(topic, sizeof(topic), "%s/battery%d/overvolt_active", mqtt_prefix_.c_str(), batt);
-                    publish_raw(topic, batteries_[batt].overvolt_count > 0 ? "1" : "0");
+                    ok = publish_raw(topic, batteries_[batt].overvolt_count > 0 ? "1" : "0") && ok;
+                    if (ok) hyst_batt_overvolt_count_[idx].commit();
+                }
+                if (hyst_batt_overvolt_cells_[idx].decide(batteries_[batt].overvolt_cells)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/overvolt_cells", mqtt_prefix_.c_str(), batt);
-                    publish_raw(topic, batteries_[batt].overvolt_cells.c_str());
+                    if (publish_raw(topic, batteries_[batt].overvolt_cells.c_str())) hyst_batt_overvolt_cells_[idx].commit();
                 }
-                if (hyst_batt_states_[idx].check(batteries_[batt].state)) {
+                if (hyst_batt_states_[idx].decide(batteries_[batt].state)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/state", mqtt_prefix_.c_str(), batt);
-                    publish_raw(topic, batteries_[batt].state.c_str());
+                    if (publish_raw(topic, batteries_[batt].state.c_str())) hyst_batt_states_[idx].commit();
                 }
-                if (hyst_batt_warnings_[idx].check(batteries_[batt].warnings)) {
+                if (hyst_batt_warnings_[idx].decide(batteries_[batt].warnings)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/warnings", mqtt_prefix_.c_str(), batt);
-                    publish_raw(topic, batteries_[batt].warnings.c_str());
+                    if (publish_raw(topic, batteries_[batt].warnings.c_str())) hyst_batt_warnings_[idx].commit();
                 }
-                if (hyst_batt_alarms_[idx].check(batteries_[batt].alarms)) {
+                if (hyst_batt_alarms_[idx].decide(batteries_[batt].alarms)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/alarms", mqtt_prefix_.c_str(), batt);
-                    publish_raw(topic, batteries_[batt].alarms.c_str());
+                    if (publish_raw(topic, batteries_[batt].alarms.c_str())) hyst_batt_alarms_[idx].commit();
                 }
-                if (hyst_batt_charge_mosfet_[idx].check(batteries_[batt].charge_mosfet)) {
+                if (hyst_batt_charge_mosfet_[idx].decide(batteries_[batt].charge_mosfet)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/charge_mosfet", mqtt_prefix_.c_str(), batt);
-                    publish_raw(topic, batteries_[batt].charge_mosfet ? "1" : "0");
+                    if (publish_raw(topic, batteries_[batt].charge_mosfet ? "1" : "0")) hyst_batt_charge_mosfet_[idx].commit();
                 }
-                if (hyst_batt_discharge_mosfet_[idx].check(batteries_[batt].discharge_mosfet)) {
+                if (hyst_batt_discharge_mosfet_[idx].decide(batteries_[batt].discharge_mosfet)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/discharge_mosfet", mqtt_prefix_.c_str(), batt);
-                    publish_raw(topic, batteries_[batt].discharge_mosfet ? "1" : "0");
+                    if (publish_raw(topic, batteries_[batt].discharge_mosfet ? "1" : "0")) hyst_batt_discharge_mosfet_[idx].commit();
                 }
-                if (hyst_batt_lmcharge_mosfet_[idx].check(batteries_[batt].lmcharge_mosfet)) {
+                if (hyst_batt_lmcharge_mosfet_[idx].decide(batteries_[batt].lmcharge_mosfet)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/lmcharge_mosfet", mqtt_prefix_.c_str(), batt);
-                    publish_raw(topic, batteries_[batt].lmcharge_mosfet ? "1" : "0");
+                    if (publish_raw(topic, batteries_[batt].lmcharge_mosfet ? "1" : "0")) hyst_batt_lmcharge_mosfet_[idx].commit();
                 }
-                if (hyst_batt_cw_active_[idx].check(batteries_[batt].cw_active) ||
-                    hyst_batt_cw_cells_[idx].check(batteries_[batt].cw_cells)) {
+                if (hyst_batt_cw_active_[idx].decide(batteries_[batt].cw_active)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/cw_active", mqtt_prefix_.c_str(), batt);
-                    publish_raw(topic, batteries_[batt].cw_active ? "1" : "0");
+                    if (publish_raw(topic, batteries_[batt].cw_active ? "1" : "0")) hyst_batt_cw_active_[idx].commit();
+                }
+                if (hyst_batt_cw_cells_[idx].decide(batteries_[batt].cw_cells)) {
                     snprintf(topic, sizeof(topic), "%s/battery%d/cw_cells", mqtt_prefix_.c_str(), batt);
-                    publish_raw(topic, batteries_[batt].cw_cells.c_str());
+                    if (publish_raw(topic, batteries_[batt].cw_cells.c_str())) hyst_batt_cw_cells_[idx].commit();
                 }
             }
 
@@ -496,10 +523,10 @@ public:
                     float v = batteries_[batt].cell_voltages[cell];
                     if (v > 0.1f) {
                         int cell_idx = batt * 16 + cell;
-                        if (hyst_cell_voltages_[cell_idx].check(v, 0.010f, 0.0f, 5.0f, 60000)) {
+                        if (hyst_cell_voltages_[cell_idx].decide(v, 0.010f, 0.0f, 5.0f, 300000)) {
                             snprintf(topic, sizeof(topic), "%s/battery%d/cell%02d", mqtt_prefix_.c_str(), batt, cell + 1);
                             snprintf(payload, sizeof(payload), "%.3f", v);
-                            publish_raw(topic, payload);
+                            if (publish_raw(topic, payload)) hyst_cell_voltages_[cell_idx].commit();
                         }
                     }
                 }
@@ -507,73 +534,29 @@ public:
                     float temp = batteries_[batt].cell_temps[t];
                     if (temp > -40.0f && temp < 100.0f) {
                         int temp_idx = batt * 6 + t;
-                        if (hyst_batt_temps_[temp_idx].check(temp, 0.2f, -40.0f, 100.0f, 60000)) {
+                        if (hyst_batt_temps_[temp_idx].decide(temp, 0.2f, -40.0f, 100.0f, 300000)) {
                             snprintf(topic, sizeof(topic), "%s/battery%d/temp%d", mqtt_prefix_.c_str(), batt, t + 1);
                             snprintf(payload, sizeof(payload), "%.1f", temp);
-                            publish_raw(topic, payload);
+                            if (publish_raw(topic, payload)) hyst_batt_temps_[temp_idx].commit();
                         }
                     }
                 }
             }
         }
 
-        if (stack_cell_min < 99.0f && valid_batts > 0) {
+        if (stack_cell_min < 99.0f && valid_batts > 0 && !(rotate_ & 1)) {
             bc_mark(BC_PUB_STACK);
-            stack_voltage /= valid_batts;
-
-            if (hyst_stack_cell_min_.check(stack_cell_min, 0.005f, 0.0f, 5.0f, 60000)) {
-                snprintf(payload, sizeof(payload), "%.3f", stack_cell_min);
-                publish_raw((mqtt_prefix_ + "/stack/cell_min").c_str(), payload);
-            }
-            if (hyst_stack_cell_max_.check(stack_cell_max, 0.005f, 0.0f, 5.0f, 60000)) {
-                snprintf(payload, sizeof(payload), "%.3f", stack_cell_max);
-                publish_raw((mqtt_prefix_ + "/stack/cell_max").c_str(), payload);
-            }
-            float stack_cell_delta = (stack_cell_max - stack_cell_min) * 1000.0f;
-            if (hyst_stack_cell_delta_.check(stack_cell_delta, 5.0f, 0.0f, 5000.0f, 60000)) {
-                snprintf(payload, sizeof(payload), "%.1f", stack_cell_delta);
-                publish_raw((mqtt_prefix_ + "/stack/cell_delta_mv").c_str(), payload);
-            }
-            if (hyst_stack_voltage_.check(stack_voltage, 0.1f, 0.0f, 100.0f, 60000)) {
-                snprintf(payload, sizeof(payload), "%.2f", stack_voltage);
-                publish_raw((mqtt_prefix_ + "/stack/voltage").c_str(), payload);
-            }
-            if (hyst_stack_current_.check(stack_current, 0.05f, -500.0f, 500.0f, 60000)) {
-                snprintf(payload, sizeof(payload), "%.2f", stack_current);
-                publish_raw((mqtt_prefix_ + "/stack/current").c_str(), payload);
-            }
-            if (stack_temp_min < 99.0f) {
-                if (hyst_stack_temp_min_.check(stack_temp_min, 0.2f, -40.0f, 100.0f, 60000)) {
-                    snprintf(payload, sizeof(payload), "%.1f", stack_temp_min);
-                    publish_raw((mqtt_prefix_ + "/stack/temp_min").c_str(), payload);
-                }
-                if (hyst_stack_temp_max_.check(stack_temp_max, 0.2f, -40.0f, 100.0f, 60000)) {
-                    snprintf(payload, sizeof(payload), "%.1f", stack_temp_max);
-                    publish_raw((mqtt_prefix_ + "/stack/temp_max").c_str(), payload);
-                }
-            }
-            if (has_any_alarm_) {
-                if (hyst_stack_balancing_count_.check(stack_balancing_count_, 1, 0, 100, 60000) ||
-                    hyst_stack_balancing_cells_.check(stack_balancing_cells_)) {
-                    snprintf(payload, sizeof(payload), "%d", stack_balancing_count_);
-                    publish_raw((mqtt_prefix_ + "/stack/balancing_count").c_str(), payload);
-                    publish_raw((mqtt_prefix_ + "/stack/balancing_active").c_str(), stack_balancing_count_ > 0 ? "1" : "0");
-                    publish_raw((mqtt_prefix_ + "/stack/balancing_cells").c_str(), stack_balancing_cells_.c_str());
-                }
-                if (hyst_stack_overvolt_count_.check(stack_overvolt_count_, 1, 0, 100, 60000) ||
-                    hyst_stack_overvolt_cells_.check(stack_overvolt_cells_)) {
-                    snprintf(payload, sizeof(payload), "%d", stack_overvolt_count_);
-                    publish_raw((mqtt_prefix_ + "/stack/overvolt_count").c_str(), payload);
-                    publish_raw((mqtt_prefix_ + "/stack/overvolt_active").c_str(), stack_overvolt_count_ > 0 ? "1" : "0");
-                    publish_raw((mqtt_prefix_ + "/stack/overvolt_cells").c_str(), stack_overvolt_cells_.c_str());
-                }
-                if (hyst_stack_alarms_.check(stack_alarms_)) {
-                    publish_raw((mqtt_prefix_ + "/stack/alarms").c_str(), stack_alarms_.empty() ? "" : stack_alarms_.c_str());
-                }
-            }
+            publish_stack_values_(stack_cell_min, stack_cell_max, stack_voltage, stack_current,
+                                 stack_temp_min, stack_temp_max);
         }
 
-        ESP_LOGI("mqtt", "Published RS485 data for %d batteries", num_batteries_);
+        last_pass_ms_ = millis() - pass_start_ms_;
+        if (last_pass_ms_ > max_pass_ms_) max_pass_ms_ = last_pass_ms_;
+        if (pass_refused_client_) {
+            ESP_LOGW("mqtt", "value pass DONE: %lu attempts, %lu refused by pool, pass %lums",
+                    (unsigned long) pass_attempts_, (unsigned long) pass_refused_client_,
+                    (unsigned long) last_pass_ms_);
+        }
     }
 
     void check_stale() {
@@ -596,7 +579,7 @@ public:
     // pool or budget stop mid-stream retries the missing tail instead of
     // feeding itself with yet another full pass.
     void on_mqtt_connect() {
-        reset_all_hysteresis();
+        assign_slots_(millis());   // idempotent; slots never move after assignment
         has_any_alarm_ = false;
         restart_discovery();
     }
@@ -607,7 +590,7 @@ public:
     // value updates lost during the outage must be re-sent
     void on_short_reconnect() {
         availability_.on_connect(esphome::mqtt::global_mqtt_client);
-        reset_all_hysteresis();
+        assign_slots_(millis());   // idempotent; outage cannot move slots
         for (int batt = 0; batt < num_batteries_; batt++) {
             publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm);
             publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm);
@@ -891,7 +874,6 @@ private:
     std::string response_buf_;
     uint32_t last_analog_poll_ = 0;
     uint32_t last_alarm_poll_ = 0;
-    uint32_t last_heartbeat_ = 0;
     uint32_t last_analog_rx_ = 0;
     bool has_analog_rx_ = false;
     bool has_any_alarm_ = false;
@@ -920,20 +902,60 @@ private:
     std::vector<HysteresisBool> hyst_batt_charge_mosfet_, hyst_batt_discharge_mosfet_, hyst_batt_lmcharge_mosfet_;
     std::vector<HysteresisBool> hyst_batt_cw_active_;
 
-    // paces publish_raw bursts (e.g. the 5-minute forced heartbeat sweep,
-    // ~200 messages). App.feed_wdt() in the pacer keeps the 5s task
-    // watchdog fed across a burst; a single publish blocking longer than
-    // that (network timeout, up to ~10s on a stalled broker) can still
-    // reset the device until the deferred restructure.
+    // PublishPacer: 1 ms producer pacing between publishes, feeding the
+    // task watchdog between them; the async backend (#42/#44) moved all
+    // network I/O off the loop task, so pacing exists to spread bursts in
+    // time (producer-side), not to survive blocked publishes.
+    // #53: no fixed per-pass budget. The pass stops at the FIRST pool
+    // refusal (publish_raw closes pass_open_): the 29-slot pool is the
+    // bound, a refusal defers its value to the next pass
+    // (commit-on-acceptance, nothing lost), and rotation + stack
+    // alternation keep the deferrals fair. A slow drain therefore costs
+    // one refused attempt per pass, not a pass full of retries. Fairness
+    // ordering: stamps first, then rotated packs, stack alternating
+    // front/tail. (An earlier round claimed a fixed cap starves under
+    // flaps — withdrawn: the starvation traced to re-arm moving boot
+    // anchors, which the fixed-slot mechanism closed.)
+
     PublishPacer raw_pacer_;
     int disc_pos_ = 0;
+    uint32_t pass_attempts_ = 0, pass_refused_client_ = 0;
+    // total_refused_ intentionally includes 30s stamp-repair refusals
+    // (publish_poll_alarm / publish_alarm_poll_alarm bypass publish_raw),
+    // while total_attempts_ counts value publishes only — the counters are
+    // worst-case acceptance signals, not a ratio pair.
+    uint32_t total_attempts_ = 0, total_refused_ = 0;
+    uint32_t last_pass_ms_ = 0, max_pass_ms_ = 0;
+    bool pass_open_ = false;   // false once this pass hit its first refusal
+    uint32_t last_repair_ = 0;
+    uint8_t rotate_ = 0;
 
-    void publish_raw(const char* topic, const char* value) {
-        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
+public:
+    uint32_t get_total_attempts() const { return total_attempts_; }
+    uint32_t get_total_refused() const { return total_refused_; }
+    uint32_t get_last_pass_ms() const { return last_pass_ms_; }
+    uint32_t get_max_pass_ms() const { return max_pass_ms_; }
+
+private:
+
+    bool publish_raw(const char* topic, const char* value) {
+        if (!pass_open_) return false;   // pass closed by an earlier refusal
+        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) {
+            pass_open_ = false;
+            return false;
+        }
+        pass_attempts_++;
+        total_attempts_++;
         bc_pub_begin();
-        esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(value));
+        bool ok = esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(value));
         bc_pub_end();
         raw_pacer_.pace();
+        if (!ok) {
+            pass_refused_client_++;
+            total_refused_++;
+            pass_open_ = false;   // stop the pass: defer, retry next pass
+        }
+        return ok;
     }
 
     bool publish_poll_alarm(int batt, bool alarm) {
@@ -983,42 +1005,159 @@ private:
         }
     }
 
-    void reset_all_hysteresis() {
-        for (auto& h : hyst_cell_voltages_) h.reset();
-        for (auto& h : hyst_batt_temps_) h.reset();
-        for (auto& h : hyst_batt_cell_min_) h.reset();
-        for (auto& h : hyst_batt_cell_max_) h.reset();
-        for (auto& h : hyst_batt_cell_delta_) h.reset();
-        for (auto& h : hyst_batt_voltage_) h.reset();
-        for (auto& h : hyst_batt_current_) h.reset();
-        for (auto& h : hyst_batt_soc_) h.reset();
-        for (auto& h : hyst_batt_remain_ah_) h.reset();
-        for (auto& h : hyst_batt_total_ah_) h.reset();
-        for (auto& h : hyst_batt_cycles_) h.reset();
-        for (auto& h : hyst_batt_balancing_count_) h.reset();
-        for (auto& h : hyst_batt_overvolt_count_) h.reset();
-        for (auto& h : hyst_batt_states_) h.reset();
-        for (auto& h : hyst_batt_warnings_) h.reset();
-        for (auto& h : hyst_batt_alarms_) h.reset();
-        for (auto& h : hyst_batt_balancing_cells_) h.reset();
-        for (auto& h : hyst_batt_overvolt_cells_) h.reset();
-        for (auto& h : hyst_batt_cw_cells_) h.reset();
-        for (auto& h : hyst_batt_charge_mosfet_) h.reset();
-        for (auto& h : hyst_batt_discharge_mosfet_) h.reset();
-        for (auto& h : hyst_batt_lmcharge_mosfet_) h.reset();
-        for (auto& h : hyst_batt_cw_active_) h.reset();
-        hyst_stack_voltage_.reset();
-        hyst_stack_current_.reset();
-        hyst_stack_cell_min_.reset();
-        hyst_stack_cell_max_.reset();
-        hyst_stack_cell_delta_.reset();
-        hyst_stack_temp_min_.reset();
-        hyst_stack_temp_max_.reset();
-        hyst_stack_balancing_count_.reset();
-        hyst_stack_overvolt_count_.reset();
-        hyst_stack_balancing_cells_.reset();
-        hyst_stack_overvolt_cells_.reset();
-        hyst_stack_alarms_.reset();
+    // #53: a FIXED slot for every heartbeat-bearing instance, change types
+    // included (all 60 s/300 s classes). Positions spread k*H/N per class;
+    // assignment is idempotent — already-slotted instances are skipped, so
+    // reconnect calls can never move a slot. The slot re-sends each value
+    // once per period at its window position no matter when the last
+    // commit landed (an outage that bunches commits cannot regroup the
+    // cohort); changes and crossings bypass the slot entirely and publish
+    // immediately.
+    void assign_slots_(uint32_t now) {
+        const uint16_t n60 = (uint16_t) (9 + 11 * num_batteries_);
+        const uint16_t n300 = (uint16_t) (22 * num_batteries_ + 53);   // cells/temps + change types
+        uint16_t k60 = 0, k300 = 0;
+        auto slot_f60 = [&](HysteresisFloat& h) {
+            if (h.slot_period_) return;
+            h.assign_slot(now, (uint32_t) ((uint64_t) k60++ * 60000 / n60), 60000);
+        };
+        auto slot_i60 = [&](HysteresisInt& h) {
+            if (h.slot_period_) return;
+            h.assign_slot(now, (uint32_t) ((uint64_t) k60++ * 60000 / n60), 60000);
+        };
+        auto slot_f300 = [&](HysteresisFloat& h) {
+            if (h.slot_period_) return;
+            h.assign_slot(now, (uint32_t) ((uint64_t) k300++ * 300000 / n300), 300000);
+        };
+        auto slot_s300 = [&](HysteresisString& h) {
+            if (h.slot_period_) return;
+            h.assign_slot(now, (uint32_t) ((uint64_t) k300++ * 300000 / n300), 300000);
+        };
+        auto slot_b300 = [&](HysteresisBool& h) {
+            if (h.slot_period_) return;
+            h.assign_slot(now, (uint32_t) ((uint64_t) k300++ * 300000 / n300), 300000);
+        };
+        // 60 s class first: stack (dashboard favorites) then per-pack
+        slot_f60(hyst_stack_voltage_);
+        slot_f60(hyst_stack_current_);
+        slot_f60(hyst_stack_cell_min_);
+        slot_f60(hyst_stack_cell_max_);
+        slot_f60(hyst_stack_cell_delta_);
+        slot_f60(hyst_stack_temp_min_);
+        slot_f60(hyst_stack_temp_max_);
+        slot_i60(hyst_stack_balancing_count_);
+        slot_i60(hyst_stack_overvolt_count_);
+        for (int b = 0; b < num_batteries_; b++) {
+            slot_f60(hyst_batt_cell_min_[b]);
+            slot_f60(hyst_batt_cell_max_[b]);
+            slot_f60(hyst_batt_cell_delta_[b]);
+            slot_f60(hyst_batt_voltage_[b]);
+            slot_f60(hyst_batt_current_[b]);
+            slot_f60(hyst_batt_soc_[b]);
+            slot_f60(hyst_batt_remain_ah_[b]);
+            slot_f60(hyst_batt_total_ah_[b]);
+            slot_i60(hyst_batt_cycles_[b]);
+            slot_i60(hyst_batt_balancing_count_[b]);
+            slot_i60(hyst_batt_overvolt_count_[b]);
+        }
+        // 300 s class: cells + temps, then the change types (states,
+        // warnings, alarms, cell lists, mosfets) — the cohort the round-2
+        // commit-anchored heartbeat regrouped every 300 s; slots hold it
+        // spread permanently
+        for (auto& h : hyst_cell_voltages_) slot_f300(h);
+        for (auto& h : hyst_batt_temps_) slot_f300(h);
+        slot_s300(hyst_stack_balancing_cells_);
+        slot_s300(hyst_stack_overvolt_cells_);
+        slot_s300(hyst_stack_alarms_);
+        for (int b = 0; b < num_batteries_; b++) {
+            slot_s300(hyst_batt_states_[b]);
+            slot_s300(hyst_batt_warnings_[b]);
+            slot_s300(hyst_batt_alarms_[b]);
+            slot_s300(hyst_batt_balancing_cells_[b]);
+            slot_s300(hyst_batt_overvolt_cells_[b]);
+            slot_s300(hyst_batt_cw_cells_[b]);
+            slot_b300(hyst_batt_charge_mosfet_[b]);
+            slot_b300(hyst_batt_discharge_mosfet_[b]);
+            slot_b300(hyst_batt_lmcharge_mosfet_[b]);
+            slot_b300(hyst_batt_cw_active_[b]);
+        }
+    }
+
+    // #53: stack sites extracted so their position can rotate to the FRONT
+    // of the pass on odd passes — under a full storm (every class crossing
+    // every pass) a fixed tail position would starve the 9 stack instances
+    // into deferral; alternating position bounds stack staleness at 2 passes.
+    void publish_stack_values_(float stack_cell_min, float stack_cell_max, float stack_voltage,
+                               float stack_current, float stack_temp_min, float stack_temp_max) {
+        char payload[32];
+
+        if (hyst_stack_cell_min_.decide(stack_cell_min, 0.005f, 0.0f, 5.0f, 60000)) {
+            snprintf(payload, sizeof(payload), "%.3f", stack_cell_min);
+            if (publish_raw((mqtt_prefix_ + "/stack/cell_min").c_str(), payload))
+                hyst_stack_cell_min_.commit();
+        }
+        if (hyst_stack_cell_max_.decide(stack_cell_max, 0.005f, 0.0f, 5.0f, 60000)) {
+            snprintf(payload, sizeof(payload), "%.3f", stack_cell_max);
+            if (publish_raw((mqtt_prefix_ + "/stack/cell_max").c_str(), payload))
+                hyst_stack_cell_max_.commit();
+        }
+        float stack_cell_delta = (stack_cell_max - stack_cell_min) * 1000.0f;
+        if (hyst_stack_cell_delta_.decide(stack_cell_delta, 5.0f, 0.0f, 5000.0f, 60000)) {
+            snprintf(payload, sizeof(payload), "%.1f", stack_cell_delta);
+            if (publish_raw((mqtt_prefix_ + "/stack/cell_delta_mv").c_str(), payload))
+                hyst_stack_cell_delta_.commit();
+        }
+        if (hyst_stack_voltage_.decide(stack_voltage, 0.1f, 0.0f, 100.0f, 60000)) {
+            snprintf(payload, sizeof(payload), "%.2f", stack_voltage);
+            if (publish_raw((mqtt_prefix_ + "/stack/voltage").c_str(), payload))
+                hyst_stack_voltage_.commit();
+        }
+        if (hyst_stack_current_.decide(stack_current, 0.05f, -500.0f, 500.0f, 60000)) {
+            snprintf(payload, sizeof(payload), "%.2f", stack_current);
+            if (publish_raw((mqtt_prefix_ + "/stack/current").c_str(), payload))
+                hyst_stack_current_.commit();
+        }
+        if (stack_temp_min < 99.0f) {
+            if (hyst_stack_temp_min_.decide(stack_temp_min, 0.2f, -40.0f, 100.0f, 60000)) {
+                snprintf(payload, sizeof(payload), "%.1f", stack_temp_min);
+                if (publish_raw((mqtt_prefix_ + "/stack/temp_min").c_str(), payload))
+                    hyst_stack_temp_min_.commit();
+            }
+            if (hyst_stack_temp_max_.decide(stack_temp_max, 0.2f, -40.0f, 100.0f, 60000)) {
+                snprintf(payload, sizeof(payload), "%.1f", stack_temp_max);
+                if (publish_raw((mqtt_prefix_ + "/stack/temp_max").c_str(), payload))
+                    hyst_stack_temp_max_.commit();
+            }
+        }
+        if (has_any_alarm_) {
+            if (hyst_stack_balancing_count_.decide(stack_balancing_count_, 1, 0, 100, 60000)) {
+                snprintf(payload, sizeof(payload), "%d", stack_balancing_count_);
+                bool ok = publish_raw((mqtt_prefix_ + "/stack/balancing_count").c_str(), payload);
+                ok = publish_raw((mqtt_prefix_ + "/stack/balancing_active").c_str(),
+                                 stack_balancing_count_ > 0 ? "1" : "0") && ok;
+                if (ok) hyst_stack_balancing_count_.commit();
+            }
+            if (hyst_stack_balancing_cells_.decide(stack_balancing_cells_)) {
+                if (publish_raw((mqtt_prefix_ + "/stack/balancing_cells").c_str(), stack_balancing_cells_.c_str()))
+                    hyst_stack_balancing_cells_.commit();
+            }
+            if (hyst_stack_overvolt_count_.decide(stack_overvolt_count_, 1, 0, 100, 60000)) {
+                snprintf(payload, sizeof(payload), "%d", stack_overvolt_count_);
+                bool ok = publish_raw((mqtt_prefix_ + "/stack/overvolt_count").c_str(), payload);
+                ok = publish_raw((mqtt_prefix_ + "/stack/overvolt_active").c_str(),
+                                 stack_overvolt_count_ > 0 ? "1" : "0") && ok;
+                if (ok) hyst_stack_overvolt_count_.commit();
+            }
+            if (hyst_stack_overvolt_cells_.decide(stack_overvolt_cells_)) {
+                if (publish_raw((mqtt_prefix_ + "/stack/overvolt_cells").c_str(), stack_overvolt_cells_.c_str()))
+                    hyst_stack_overvolt_cells_.commit();
+            }
+            if (hyst_stack_alarms_.decide(stack_alarms_)) {
+                if (publish_raw((mqtt_prefix_ + "/stack/alarms").c_str(),
+                                stack_alarms_.empty() ? "" : stack_alarms_.c_str()))
+                    hyst_stack_alarms_.commit();
+            }
+        }
     }
 
     void compute_stack_totals() {

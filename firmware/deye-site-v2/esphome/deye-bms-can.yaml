@@ -56,6 +56,9 @@ logger:
 wifi:
   ssid: !secret wifi_ssid
   password: !secret wifi_password
+  # #53: latency-sensitive MQTT producer; device is mains-powered, so
+  # accept the radio power cost and remove modem-sleep as a drain variable
+  power_save_mode: none
   ap:
     ssid: "${device_name}-fallback"
     password: !secret captive_portal_password
@@ -257,7 +260,7 @@ interval:
       - lambda: |-
           if (!id(pylontech_rs485)) return;
           ((PylontechRS485*)id(pylontech_rs485))->tick();
-  - interval: 30s
+  - interval: 10s
     then:
       - lambda: |-
           if (!id(pylontech_rs485)) return;
@@ -280,7 +283,37 @@ sensor:
     entity_category: diagnostic
     update_interval: 60s
     lambda: 'return heap_caps_get_free_size(MALLOC_CAP_INTERNAL);'
-
+  - platform: template
+    name: "MQTT Publish Attempts"
+    id: sensor_mqtt_pub_attempts
+    icon: "mdi:upload"
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(pylontech_rs485)) return {};
+      return (float) ((PylontechRS485*)id(pylontech_rs485))->get_total_attempts();
+  - platform: template
+    name: "MQTT Publish Refused"
+    id: sensor_mqtt_pub_refused
+    icon: "mdi:upload-off"
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(pylontech_rs485)) return {};
+      return (float) ((PylontechRS485*)id(pylontech_rs485))->get_total_refused();
+  - platform: template
+    name: "RS485 Value Pass Max ms"
+    id: sensor_mqtt_pass_ms
+    unit_of_measurement: "ms"
+    icon: "mdi:timer"
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 1
+    lambda: |-
+      if (!id(pylontech_rs485)) return {};
+      return (float) ((PylontechRS485*)id(pylontech_rs485))->get_max_pass_ms();
 text_sensor:
   - platform: template
     name: "Debug Logging Level"
