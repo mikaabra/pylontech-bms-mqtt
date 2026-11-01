@@ -82,7 +82,21 @@ public:
         if (write_enable_ && write_enable_->state && prev != write_.status() &&
             write_status_ && write_terminal(write_.status())) {
             write_enable_->turn_off();
+            enable_on_ms_ = 0;
             write_status_->publish_state(last_write_line_ + " [enable auto-off]");
+        }
+        // review round 3: enable left on with no press and no operation
+        // in flight must not stay armed forever - 5 minutes of idleness
+        // closes the gate
+        bool en = write_enable_ && write_enable_->state;
+        if (en && !enable_prev_) enable_on_ms_ = now;
+        enable_prev_ = en;
+        if (en && enable_on_ms_ && now - enable_on_ms_ > kEnableTimeoutMs &&
+            write_status_ && write_.status() != linksniff::WriteController::Status::Armed &&
+            write_.status() != linksniff::WriteController::Status::WaitAck) {
+            write_enable_->turn_off();
+            enable_on_ms_ = 0;
+            write_status_->publish_state("enable timed out after 5 min of idleness - turn it on deliberately for the next write");
         }
     }
 
@@ -191,6 +205,9 @@ private:
     esphome::switch_::Switch* write_enable_ = nullptr;
     std::string last_write_line_;
     linksniff::WriteController::Status write_status_prev_ = linksniff::WriteController::Status::Idle;
+    bool enable_prev_ = false;
+    uint32_t enable_on_ms_ = 0;
+    static constexpr uint32_t kEnableTimeoutMs = 300000;
 
     static bool write_terminal(linksniff::WriteController::Status s) {
         using S = linksniff::WriteController::Status;

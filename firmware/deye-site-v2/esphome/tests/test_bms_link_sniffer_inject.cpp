@@ -1,18 +1,18 @@
 // Host oracle for the bms-link-sniffer guarded write client (part 2,
-// issue #59), review round 2: write-frame builder, allowlist gate, and
-// the rewritten gap-injection state machine - all against a faked clock
-// and recorded/played traffic, fully deterministic, no wall-clock.
+// issue #59), review round 3: ONE FRAME PER PRESS (the Mac tool's posture,
+// reviewer-ruled - no retry), 150 ms verdict deadline (the no-ack/collision
+// decision lands before the master's next poll can mislabel it), late-ack
+// LISTEN-and-report (bounded by the cooldown), per-operation has_tx_ reset
+// (wordings never claim a frame the op did not send), and flush failures
+// counted as TX attempts.
 //
-// Every scenario from the reviewer's round-1 attack table is a named
-// test here: outage out-waiting (now expiry), second-press reset (now
-// in-flight ignore), burst rate limits (cooldown + sticky clean pair),
-// cadence-less silence fires (now gated), the too-late fire corner
-// (150..250 ms window), late-ack duplicate-write risk (late ack disarms
-// the retry), and post-TX abort wording (result unknown).
+// Every reviewer finding has a named scenario, including the round-3 table:
+// a later operation with zero frames sent must not say "sent; result
+// unknown" (enable-off before firing / expiry without a window).
 //
 // Byte-exactness policy: the builder must reproduce BOTH captured write
-// frames (tests/fixtures/bms_link_fixtures.h) - which pins LENID 8008
-// and the checksum formula to real wire evidence, not to arithmetic.
+// frames (tests/fixtures/bms_link_fixtures.h) - which pins LENID 8008 and
+// the checksum formula to real wire evidence, not to arithmetic.
 //
 // Build & run (CLAUDE.md host-test loop):
 //   cd firmware/deye-site-v2/esphome
@@ -54,7 +54,14 @@ static void check_line_has(const std::string& line, const char* needle, const ch
     }
 }
 
-// ---- driver plumbing: record frames a fake bus receives -------------------
+static void check_line_lacks(const std::string& line, const char* needle, const char* what) {
+    if (line.find(needle) != std::string::npos) {
+        failures++;
+        printf("FAIL: %s - line must not contain '%s': %s\n", what, needle, line.c_str());
+    }
+}
+
+// ---- driver plumbing --------------------------------------------------------
 
 struct FakeBus {
     std::vector<std::string> tx_log;
@@ -87,6 +94,8 @@ static void slot(BmsLinkCore& c, uint32_t& t, int pack) {
     send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
     t += 624;
 }
+
+static void consume(BmsLinkCore& c) { (void)c.drain_events(); }
 
 static bool has_event(const std::vector<linksniff::LinkEvent>& ev, EventKind k) {
     for (const auto& e : ev)
@@ -125,8 +134,7 @@ static void test_deny_sets_status() {
     check(bus.tx_log.empty(), "nothing transmitted on deny");
 }
 
-// fire discipline: the window is 150..250 ms after the last RX, inside a
-// fresh (<1500 ms) poll cadence - silence alone is not a window
+// fire discipline: 150..250 ms window inside a fresh (<=1500 ms) cadence
 static void test_fire_window() {
     BmsLinkCore c;
     FakeBus bus;
@@ -139,27 +147,57 @@ static void test_fire_window() {
     check(w.request(0x01, 0x4C, 3420, 1030), "arm accepted");
     w.tick(1070);  // 55 ms silence
     check(bus.tx_log.empty(), "no fire below the 150 ms floor");
-    w.tick(1180);  // 165 ms: inside the window, cadence 180 ms old
+    w.tick(1180);  // 165 ms: mid-window, cadence 180 ms
     check(bus.tx_log.size() == 1, "fired inside the 150..250 ms window");
     check(w.status() == WriteController::Status::WaitAck, "waiting ack");
 
-    // the reviewer's 430 ms corner: a stale quiet arm must NOT fire
     BmsLinkCore c2;
     FakeBus bus2;
     WriteController w2(c2, FakeBus::enable_cb, FakeBus::tx_cb, &bus2);
     c2.set_ack_waiter(&w2);
     uint32_t t = 10000;
-    slot(c2, t, 2);  // req 10000, resp 10015
+    slot(c2, t, 2);
     check(w2.request(0x02, 0x4C, 3420, 10030), "arm accepted (corner case)");
-    w2.tick(10450);  // 435 ms since last RX - outside the window
+    w2.tick(10450);  // 435 ms since last RX: past the window top
     check(bus2.tx_log.empty(), "no fire at 435 ms since last RX");
-    slot(c2, t, 2);  // req 10624, resp 10639
-    w2.tick(10800);  // 161 ms since last RX
+    slot(c2, t, 2);
+    w2.tick(10800);  // 161 ms into the fresh idle
     check(bus2.tx_log.size() == 1, "fired in the fresh slot's window");
 }
 
-// reviewer row: "Armed during a bus outage, bus returns 6 h later - fires on
-// recovery". Expiry + the watchdog hold must make that unreachable.
+// ONE FRAME PER PRESS: firing late in the window, the verdict must land
+// BEFORE the master's next poll (~436 ms after our last RX) - a plain
+// no-ack can never be mislabeled "collision" by the next slot's traffic
+static void test_verdict_before_next_poll() {
+    BmsLinkCore c;
+    FakeBus bus;
+    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    c.set_ack_waiter(&w);
+    using S = WriteController::Status;
+
+    send(c, poll_req(2, "42"), 1000);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", 1015);      // last RX
+    check(w.request(0x02, 0x4C, 3420, 1030), "arm accepted");
+    w.tick(1245);   // 230 ms: firing near the window TOP
+    check(bus.tx_log.size() == 1, "fired near the window top");
+    check(w.status() == S::WaitAck, "waiting");
+
+    w.tick(1400);   // 155 ms after TX start: verdict due (150 + slack)
+    check(w.status() == S::NoAck, "no-ack verdict, not collision");
+    check(w.collision_count() == 0, "no false collision from the next poll");
+    check_line_has(w.status_line(), "no ack", "no-ack verdict text");
+
+    // the master's next poll arrives at +436 after the last RX: AFTER the
+    // verdict. It is just traffic; it must not change the outcome.
+    send(c, poll_req(2, "42"), 1451);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", 1466);
+    check(w.status() == S::NoAck, "verdict holds after the next poll lands");
+    check(w.collision_count() == 0, "post-verdict traffic never counted as collision");
+    check(w.tx_count() == 1, "one frame per press, no retry exists");
+}
+
+// outage row: expiry during the outage; expiry is terminal; without a TX in
+// the operation, the wording must not claim a sent frame
 static void test_outage_expiry() {
     BmsLinkCore c;
     FakeBus bus;
@@ -167,30 +205,28 @@ static void test_outage_expiry() {
     c.set_ack_waiter(&w);
 
     uint32_t t = 1000;
-    for (int i = 0; i < 3; i++) slot(c, t, 1);  // cadence established
+    for (int i = 0; i < 3; i++) slot(c, t, 1);
 
     check(w.request(0x01, 0x4C, 3420, 2300), "arm accepted in the outage");
-    w.tick(2400);   // 137 ms silence: below the floor
-    c.tick(4300);   // 2 s without requests: watchdog trips
-    check(c.watchdog_tripped(), "watchdog tripped during outage");
+    c.tick(4300);
+    check(c.watchdog_tripped(), "watchdog tripped");
     w.tick(4400);
     check(bus.tx_log.empty(), "no fire while watchdog tripped");
-    w.tick(8400);   // 6.1 s after arming
-    check(w.status() == WriteController::Status::Expired, "armed write expired in the outage");
+    w.tick(8400);
+    check(w.status() == WriteController::Status::Expired, "expired in the outage");
     check_line_has(w.status_line(), "expired", "expiry line");
+    check_line_lacks(w.status_line(), "result unknown",
+                     "expiry without a TX must not claim result-unknown");
     check(bus.tx_log.empty(), "nothing transmitted during the outage");
 
-    // bus returns much later: no resurrection without a new press
     uint32_t t2 = 9000;
     slot(c, t2, 1);
     w.tick(9200);
-    w.tick(10000);
     check(w.status() == WriteController::Status::Expired, "expiry is terminal");
     check(bus.tx_log.empty(), "no fire on recovery after expiry");
 }
 
-// reviewer row: second press 10 ms after TX, different pack and value - must
-// not reset the in-flight op and must not produce a second frame
+// second press mid-flight: ignored, never a reset
 static void test_press_in_flight_ignored() {
     BmsLinkCore c;
     FakeBus bus;
@@ -200,26 +236,21 @@ static void test_press_in_flight_ignored() {
     send(c, poll_req(1, "42"), 1000);
     send(c, std::string(REAL_42_RESPONSE) + "\r", 1015);
     check(w.request(0x01, 0x4C, 3420, 1030), "first arm accepted");
-    w.tick(1180);  // 165 ms window: fire
+    w.tick(1180);
     check(bus.tx_log.size() == 1, "first frame sent");
-
-    // second press 10 ms later, different pack and value: IGNORED
     check(!w.request(0x02, 0x4C, 3440, 1190), "second press refused");
     check(w.status() == WriteController::Status::WaitAck, "first op still owns the window");
-    check(bus.tx_log.size() == 1, "still one frame");
+    check(w.tx_count() == 1, "still one frame");
 
-    // the FIRST frame's ack must land in the FIRST op's result
-    send(c, std::string(REAL_ACK) + "\r", 1200);
+    send(c, std::string(REAL_ACK) + "\r", 1200);  // in-window ack
     auto ev = c.drain_events();
     check(w.status() == WriteController::Status::Acked, "ack attributed to the in-flight op");
     check(has_event(ev, EventKind::AckForWrite), "AckForWrite event");
     check(!has_event(ev, EventKind::AnomalyAck), "no unexpected-ack misfire");
-    check(w.tx_count() == 1, "no second frame from the straggler press");
 }
 
-// reviewer row: "1 failure, then 5 more presses - 6 frames in 960 ms". The
-// in-flight ignore must cap the burst: no new frame may appear while the
-// original one-shot (including its retry) is anywhere in flight.
+// burst row: 1 failure + 5 more presses - the single frame stands; presses
+// after the terminal are accepted but held by clean-pair + cooldown + window
 static void test_burst_storm_single_frame() {
     BmsLinkCore c;
     FakeBus bus;
@@ -227,33 +258,33 @@ static void test_burst_storm_single_frame() {
     c.set_ack_waiter(&w);
 
     uint32_t t = 1000;
-    slot(c, t, 1);  // req 1000, resp 1015
+    slot(c, t, 1);
     check(w.request(0x01, 0x4C, 3420, 1040), "arm accepted");
-    w.tick(1180);    // window fire
-    check(bus.tx_log.size() == 1, "attempt 1 sent");
-    w.tick(1450);   // deadline (>250 ms): no-ack verdict, retry armed in flight
-    check(w.status() == WriteController::Status::Armed, "retry armed, in flight");
-    check_line_has(w.status_line(), "no ack", "no-ack wording carries retry intent");
+    w.tick(1180);
+    check(bus.tx_log.size() == 1, "attempt sent");
+    w.tick(1340);   // verdict deadline: single-frame terminal
+    check(w.status() == WriteController::Status::NoAck, "terminal NoAck after the single frame");
+    check_line_has(w.status_line(), "after the single frame", "no-retry wording");
 
-    // burst: five presses while the failed one-shot is armed - all ignored
-    for (int i = 0; i < 5; i++) {
-        check(!w.request(0x02, 0x4C, 3430, 1500 + i * 40), "storm press ignored");
-    }
-    for (uint32_t tt = 1500; tt <= 2460; tt += 80) {
-        w.tick(tt);
-    }
+    // five presses right after the terminal: the first re-arms (and is
+    // held by clean-pair + cooldown + window), the rest are in-flight
+    // refusals; nothing else reaches the wire regardless
+    check(w.request(0x02, 0x4C, 3430, 1400), "first post-terminal press re-arms");
+    for (int i = 1; i < 5; i++)
+        check(!w.request(0x02, 0x4C, 3430, 1400 + i * 40), "storm press in flight: refused");
+    for (uint32_t tt = 1400; tt <= 2360; tt += 80) w.tick(tt);
     check(bus.tx_log.size() == 1, "burst produced no extra frame (was 6 in 960 ms)");
-
-    // the armed retry itself dies at expiry without a window
-    w.tick(7300);   // >6 s after the TX-restarted arm clock
+    w.tick(7200);   // their 6 s expiry also bounds the held arm
     check(w.status() == WriteController::Status::Expired ||
-          w.status() == WriteController::Status::Armed, "no burst growth");
-    check(w.tx_count() == 1, "tx count still exactly one for the whole burst");
+          w.status() == WriteController::Status::Armed,
+          "burst arm bounded by expiry");
+    check(bus.tx_log.size() == 1, "still exactly one frame for the whole burst");
 }
 
-// reviewer row: "Ack arrives at 200 ms - treated as no ack; retry stays armed
-// - duplicate write risk". A late ack, before the retry fires, must disarm.
-static void test_late_ack_disarms_retry() {
+// late-ack row: no-ack verdict, then the straggler ack lands inside the
+// listen window - reported, never a duplicate write; past the cooldown the
+// bare ack is an unexplained anomaly again
+static void test_late_ack_reported() {
     BmsLinkCore c;
     FakeBus bus;
     WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
@@ -262,33 +293,35 @@ static void test_late_ack_disarms_retry() {
     uint32_t t = 1000;
     slot(c, t, 1);
     check(w.request(0x01, 0x4C, 3420, 1040), "arm accepted");
-    w.tick(1180);  // fire
-    check(bus.tx_log.size() == 1, "frame out");
+    w.tick(1180);   // TX at 1180
+    w.tick(1340);   // verdict deadline: terminal NoAck
+    check(w.status() == WriteController::Status::NoAck, "no-ack after the single frame");
+    check(w.tx_count() == 1, "one frame");
 
-    w.tick(1450);  // deadline passed, no traffic: no-ack verdict, retry armed
-    check(w.status() == WriteController::Status::Armed, "retry armed at deadline");
-    check(w.tx_count() == 1, "one attempt so far");
-
-    // the straggler ack lands after the deadline but before the retry fires
-    send(c, std::string(REAL_ACK) + "\r", 1500);
+    // straggler ack 200 ms after the frame, inside the cooldown listen
+    send(c, std::string(REAL_ACK) + "\r", 1380);
     auto ev = c.drain_events();
-    check(w.status() == WriteController::Status::Acked, "late ack accepted");
+    check(w.status() == WriteController::Status::NoAck, "listen is report-only: status holds");
     check(has_event(ev, EventKind::AckForWrite), "late ack consumed, not an anomaly");
-    check_line_has(w.status_line(), "late", "status says the ack was late");
-    check_line_has(w.status_line(), "no retry", "explicit duplicate-write disarm");
+    check_line_has(w.status_line(), "late bare ack", "late-ack report on the status line");
+    check_line_has(w.status_line(), "after our frame", "reported as time since the frame, not the deadline");
+    check_line_has(w.status_line(), "probably written", "the report says what it means");
+    check(w.tx_count() == 1, "no duplicate write: still one frame");
 
-    // even a perfect window later must NOT transmit anything more
-    uint32_t t2 = 2000;
-    slot(c, t2, 1);  // clean pair after the TX (the ack set the requirement)
-    w.tick(2215);
-    w.tick(5400);   // cooldown long past
-    check(w.status() == WriteController::Status::Acked, "ack is terminal");
-    check(w.tx_count() == 1, "no duplicate write: total frames stay at 1");
+    // a bare ack AFTER the listen window (cooldown passed) is unexplained
+    uint32_t t2 = 6000;
+    slot(c, t2, 1);   // clean pair for the next press + fresh cadence
+    uint32_t t3 = 8000;
+    slot(c, t3, 1);
+    send(c, std::string(REAL_ACK) + "\r", 9500);  // >4 s since our frame
+    ev = c.drain_events();
+    check(has_event(ev, EventKind::AnomalyAck), "post-listen bare ack is an anomaly again");
+    check(w.tx_count() == 1, "still nothing new transmitted");
 }
 
-// full legitimate retry lifecycle under the new rules: no ack -> clean pair +
-// 4 s cooldown -> retry fires -> terminal result-unknown
-static void test_single_retry_with_cooldown() {
+// explicit second press lifecycle: cooldown + clean pair + window gate the
+// next frame; the count is two frames across two presses, never a retry
+static void test_explicit_second_press() {
     BmsLinkCore c;
     FakeBus bus;
     WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
@@ -296,35 +329,32 @@ static void test_single_retry_with_cooldown() {
 
     uint32_t t = 1000;
     slot(c, t, 1);
-    check(w.request(0x01, 0x4C, 3420, 1040), "arm accepted");
-    w.tick(1180);   // attempt 1
-    check(bus.tx_log.size() == 1, "attempt 1 out");
-    w.tick(1460);   // deadline, silence: no-ack verdict
-    check(w.status() == WriteController::Status::Armed, "retry armed (clean slot + cooldown wait)");
+    check(w.request(0x01, 0x4C, 3420, 1040), "arm 1");
+    w.tick(1180);   // TX 1
+    w.tick(1340);   // NoAck terminal
+    check(w.tx_count() == 1, "one frame so far");
 
     uint32_t t2 = 2000;
-    slot(c, t2, 1);   // clean pair observed after the failure... but cooldown
-    w.tick(2215);     // only ~1 s since the TX: cooldown holds
-    check(bus.tx_log.size() == 1, "cooldown holds the retry under 4 s");
-    w.tick(5300);     // ~4.1 s since the TX but 1165 ms since last RX: window miss
-    check(bus.tx_log.size() == 1, "window miss also holds the retry");
+    slot(c, t2, 1);   // clean pair after the TX
+    check(w.request(0x01, 0x4C, 3420, 2100), "arm 2 (explicit press)");
+    w.tick(2315);     // cooldown (1135 ms) holds
+    check(bus.tx_log.size() == 1, "cooldown holds the second press");
+    w.tick(5400);     // cooldown passed but 3.7 s since last RX: window missed
+    check(bus.tx_log.size() == 1, "window miss holds the second press");
 
     uint32_t t3 = 6000;
-    slot(c, t3, 1);   // fresh pair: cooldown passed, window opens
-    w.tick(6215);     // 200 ms since last RX
-    check(bus.tx_log.size() == 2, "retry fired after clean pair + cooldown + window");
-    check(w.status() == WriteController::Status::WaitAck, "retry waiting ack");
-
-    w.tick(6740);     // second deadline, no traffic: terminal
-    check(w.status() == WriteController::Status::NoAck, "terminal NoAck after retry");
-    check(w.tx_count() == 2, "exactly initial + single retry");
-    check_line_has(w.status_line(), "result unknown", "result-unknown wording");
+    slot(c, t3, 1);
+    w.tick(6215);     // clean pair + cooldown + 200 ms window
+    check(bus.tx_log.size() == 2, "second press fired after all gates");
+    w.tick(6370);     // verdict
+    check(w.status() == WriteController::Status::NoAck, "second op terminal NoAck");
+    check(w.tx_count() == 2, "two frames total, both deliberate presses");
     w.tick(8000);
-    check(w.tx_count() == 2, "terminal: no further frame without a press");
+    check(w.tx_count() == 2, "no retry exists to fire");
 }
 
-// collision path: traffic inside our ack window verdicts as collision (now
-// counted on EVERY attempt, not only the terminal one)
+// collision: traffic inside the 150 ms verdict window - terminal on the
+// FIRST collision, counted on the first attempt
 static void test_collision_detected() {
     BmsLinkCore c;
     FakeBus bus;
@@ -334,28 +364,73 @@ static void test_collision_detected() {
     uint32_t t = 1000;
     slot(c, t, 1);
     check(w.request(0x01, 0x4C, 3420, 1040), "arm accepted");
-    w.tick(1180);   // attempt 1 out
-    send(c, poll_req(1, "42"), 1250);   // master's poll lands inside our window
+    w.tick(1180);   // TX
+    send(c, poll_req(1, "42"), 1250);   // master poll inside the verdict window
     send(c, std::string(REAL_42_RESPONSE) + "\r", 1265);
-    w.tick(1450);   // deadline: traffic seen: collision verdict on attempt 1
-    check(w.status() == WriteController::Status::Armed, "retry armed after collision");
-    check(w.collision_count() == 1, "first-attempt collision counted (round-2 nit)");
+    w.tick(1340);   // deadline with traffic before it
+    check(w.status() == WriteController::Status::Collision, "terminal Collision on the first attempt");
+    check(w.collision_count() == 1, "first-attempt collision counted");
     check_line_has(w.status_line(), "collision", "collision wording");
-
-    // retry happens only after clean pair + cooldown + fresh window
-    uint32_t t2 = 6000;
-    slot(c, t2, 1);   // pair at 6000/6015 - also refreshes cadence
-    w.tick(6215);     // 200 ms window, cooldown 4820 ms passed
-    check(bus.tx_log.size() == 2, "retry fired");
-    send(c, poll_req(1, "42"), 6280);   // colliding poll inside window 2
-    send(c, std::string(REAL_42_RESPONSE) + "\r", 6295);
-    w.tick(6470);   // deadline with traffic: terminal Collision
-    check(w.status() == WriteController::Status::Collision, "terminal Collision");
-    check(w.collision_count() == 2, "both collisions counted");
     check_line_has(w.status_line(), "result unknown", "collision also result-unknown");
+    check(w.tx_count() == 1, "no retry follows a collision");
+
+    // a re-press is a fresh, gated one-shot - not an automatic retry
+    uint32_t t2 = 6000;
+    slot(c, t2, 1);
+    check(w.request(0x01, 0x4C, 3420, 6100), "re-press accepted");
+    w.tick(6215);
+    check(bus.tx_log.size() == 2, "re-press fired once gated");
+    w.tick(6370);
+    check(w.status() == WriteController::Status::NoAck, "second attempt verdict");
+    check(w.collision_count() == 1, "clean second attempt adds no collision");
 }
 
-// enable-off aborts: clean pre-TX wording vs sent-unknown post-TX wording
+// reviewer round-3 status-bug table: a LATER operation with zero frames of
+// its own must not inherit "sent; result unknown" wording
+static void test_has_tx_reset_wordings() {
+    BmsLinkCore c;
+    FakeBus bus;
+    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    c.set_ack_waiter(&w);
+    using S = WriteController::Status;
+
+    // operation 1 completes WITH a frame (ack in window)
+    uint32_t t = 1000;
+    slot(c, t, 1);
+    check(w.request(0x01, 0x4C, 3420, 1040), "arm 1");
+    w.tick(1180);   // TX
+    send(c, std::string(REAL_ACK) + "\r", 1200);
+    consume(c);
+    check(w.status() == S::Acked, "op 1 acked");
+
+    // operation 2: enable off BEFORE any fire - must not say "sent"
+    bus.enable = false;
+    check(w.request(0x02, 0x4C, 3420, 3000), "arm 2 accepted");
+    w.tick(3215);
+    check(w.status() == S::Aborted, "op 2 aborted pre-TX");
+    check_line_has(w.status_line(), "aborted", "op 2 abort wording");
+    check_line_lacks(w.status_line(), "sent", "op 2 must not claim a sent frame");
+    check_line_lacks(w.status_line(), "result unknown", "op 2 must not claim result-unknown");
+    bus.enable = true;
+
+    // operation 3: expires without a window - must not append result-unknown
+    uint32_t t2 = 5000;
+    slot(c, t2, 1);
+    check(w.request(0x03, 0x4C, 3420, 6000), "arm 3 accepted");
+    // no further traffic, no fire window; watchdog trips at ~7.1 s
+    c.tick(9500);
+    w.tick(9600);
+    check(w.status() == S::Armed || w.status() == S::Expired, "op 3 held by watchdog");
+    w.tick(12200);   // 6 s after arm: expiry
+    check(w.status() == S::Expired, "op 3 expired");
+    check_line_has(w.status_line(), "expired", "op 3 expiry wording");
+    check_line_lacks(w.status_line(), "result unknown",
+                     "op 3 never sent: expiry must not inherit result-unknown");
+    check(bus.tx_log.size() == 1, "only op 1 ever transmitted");
+}
+
+// enable-off aborts: pre-TX wording stays clean post-op-1; post-TX abort
+// says sent-unknown - but only for the op that actually sent
 static void test_enable_off_aborts() {
     BmsLinkCore c;
     FakeBus bus;
@@ -370,17 +445,14 @@ static void test_enable_off_aborts() {
     w.tick(1180);
     check(bus.tx_log.empty(), "pre-TX abort sends nothing");
     check(w.status() == S::Aborted, "pre-TX abort status");
-    check_line_has(w.status_line(), "aborted", "pre-TX abort wording");
-    check(w.status_line().find("result unknown") == std::string::npos,
-          "pre-TX abort does not claim a sent frame");
+    check_line_lacks(w.status_line(), "result unknown", "pre-TX abort wording is clean");
 
+    // post-TX abort (this op DID send)
     bus.enable = true;
     check(w.request(0x01, 0x4C, 3420, 3000), "re-arm accepted");
-    w.tick(3215);   // cadence from the old slot is stale: holds
-    check(w.status() == S::Armed, "stale cadence holds (fresh pair needed)");
     uint32_t t2 = 4000;
     slot(c, t2, 1);
-    w.tick(4215);   // fresh window: fires
+    w.tick(4215);   // fresh cadence + window: fires
     check(bus.tx_log.size() == 1, "post-arm fire happened");
     bus.enable = false;
     w.tick(4230);
@@ -388,7 +460,7 @@ static void test_enable_off_aborts() {
     check_line_has(w.status_line(), "result unknown", "post-TX abort wording says result unknown");
 }
 
-// uart flush failure after the write: honest abort, bytes may be on the wire
+// flush failure: counted as a TX attempt (never undercount), abort honest
 static void test_uart_fail_aborts() {
     BmsLinkCore c;
     FakeBus bus;
@@ -402,10 +474,10 @@ static void test_uart_fail_aborts() {
     w.tick(1180);
     check(w.status() == WriteController::Status::Aborted, "flush failure aborts");
     check_line_has(w.status_line(), "on the wire", "flush failure wording is conservative");
-    check(w.tx_count() == 0, "failed flush not counted as a sent frame");
+    check(w.tx_count() == 1, "flush failure counted as a TX attempt (round-3 undercount fix)");
 }
 
-// reviewer row: "One noise byte, no poll ever seen - fires, watchdog healthy"
+// noise-only row: no poll ever seen -> cadence gate holds -> expiry
 static void test_noise_only_no_cadence() {
     BmsLinkCore c;
     FakeBus bus;
@@ -415,17 +487,17 @@ static void test_noise_only_no_cadence() {
     uint8_t junk[] = {0x33, 0x55};
     c.feed(junk, sizeof junk, 1000);
     check(w.request(0x01, 0x4C, 3420, 1100), "arm accepted on a never-polled bus");
-    w.tick(2000);   // silence is 'confirmed' but no cadence was ever seen
+    w.tick(2000);
     check(bus.tx_log.empty(), "no fire without an established poll cadence");
     check(!c.watchdog_tripped(), "watchdog genuinely quiet (no requests ever)");
-    w.tick(7200);   // expiry bounds the wait
+    w.tick(7200);
     check(w.status() == WriteController::Status::Expired, "expired without cadence");
     check(bus.tx_log.empty(), "nothing ever sent");
 }
 
-// the whole state machine across the uint32 millis() wrap seam: TX fired
-// 64 ms before the wrap, ack accepted across the seam, second op held by
-// cooldown, retried, and late-acked - all after 0x00000000
+// full state machine across the uint32 millis() wrap: TX before the wrap,
+// in-window ack across the seam, second press held by cooldown, fires after
+// it, terminal verdict, late-ack report - all post-0x00000000
 static void test_millis_wraparound() {
     BmsLinkCore c;
     FakeBus bus;
@@ -435,29 +507,27 @@ static void test_millis_wraparound() {
     send(c, poll_req(1, "42"), 0xFFFFFF00u);
     send(c, std::string(REAL_42_RESPONSE) + "\r", 0xFFFFFF15u);
     check(w.request(0x01, 0x4C, 3420, 0xFFFFFF20u), "arm accepted before the wrap");
-    w.tick(0xFFFFFFC0u);  // 171 ms window: fire, 64 ms before the wrap
+    w.tick(0xFFFFFFC0u);  // 171 ms window: fires 64 ms before the wrap
     check(bus.tx_log.size() == 1, "fired before the wrap");
     check(w.status() == WriteController::Status::WaitAck, "waiting across the seam");
 
-    // ack 64 ms after the wrap: 160 ms elapsed, inside the deadline
-    send(c, std::string(REAL_ACK) + "\r", 0x40);
+    send(c, std::string(REAL_ACK) + "\r", 0x40);  // 160 ms elapsed: in-window
     check(w.status() == WriteController::Status::Acked, "ack accepted across the seam");
     check(w.tx_count() == 1, "still one frame");
 
-    // second one-shot: sticky clean pair + cooldown across the wrap
     check(w.request(0x02, 0x4C, 3425, 0x100u), "re-arm after the wrap");
     uint32_t t = 0x600u;
-    slot(c, t, 2);           // pair at 0x600/0x615
-    w.tick(0x800u);          // cooldown (2112 ms since TX) still holds
+    slot(c, t, 2);
+    w.tick(0x800u);   // cooldown (2112 ms since TX) holds
     check(bus.tx_log.size() == 1, "cooldown holds across the wrap");
     uint32_t t2 = 0x1000u;
-    slot(c, t2, 2);          // fresh pair at 0x1000/0x1015
-    w.tick(0x1100u);         // 4416 ms since TX, window 235 ms
-    check(bus.tx_log.size() == 2, "second op fired after cooldown across the wrap");
-    w.tick(0x11FBu);         // deadline, no traffic: retry armed
-    check(w.status() == WriteController::Status::Armed, "retry armed after the wrap");
-    send(c, std::string(REAL_ACK) + "\r", 0x1200u);   // late ack disarms the retry
-    check(w.status() == WriteController::Status::Acked, "late ack consumed after the wrap");
+    slot(c, t2, 2);
+    w.tick(0x1100u);  // 4416 ms since TX, 235 ms window
+    check(bus.tx_log.size() == 2, "second press fired after the gates");
+    w.tick(0x119au);  // 154 ms: verdict deadline
+    check(w.status() == WriteController::Status::NoAck, "verdict after the wrap");
+    send(c, std::string(REAL_ACK) + "\r", 0x1250u);   // late, inside listen
+    check(w.status() == WriteController::Status::NoAck, "listen stays report-only");
     check(w.tx_count() == 2, "wrap cycle ends at two frames");
     check(c.anomalies_total() == 0, "whole wrap cycle healthy");
 }
@@ -467,12 +537,14 @@ int main() {
     test_allowlist_gate();
     test_deny_sets_status();
     test_fire_window();
+    test_verdict_before_next_poll();
     test_outage_expiry();
     test_press_in_flight_ignored();
     test_burst_storm_single_frame();
-    test_late_ack_disarms_retry();
-    test_single_retry_with_cooldown();
+    test_late_ack_reported();
+    test_explicit_second_press();
     test_collision_detected();
+    test_has_tx_reset_wordings();
     test_enable_off_aborts();
     test_uart_fail_aborts();
     test_noise_only_no_cadence();

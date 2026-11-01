@@ -4,7 +4,7 @@
 #
 # Hardware: Waveshare ESP32-S3-RS485-CAN, second unit, clipped onto the
 # pack-to-pack RS485 chain of the 5-pack Richpower BMS073 stack.
-#   RS485: RX=GPIO18, 9600 baud (TX=GPIO17 and DE/RE=GPIO21 are unused here)
+#   RS485: RX=GPIO18, TX=GPIO17, DE/RE=GPIO21 (uart flow_control), 9600 baud
 #
 # TX GUARANTEE (part 2, #59) — scoped honestly: WHILE THE FIRMWARE RUNS,
 # DE/RE (hardwired to GPIO21 on this board) is driven by the uart
@@ -154,8 +154,9 @@ switch:
     entity_category: config
     optimistic: true
     restore_mode: ALWAYS_OFF
-    # auto-off after every completed operation (wrapper), so each write
-    # needs deliberate re-enabling - the per-write confirmation analog
+    # auto-off after every completed operation AND after 5 min of
+    # idleness (wrapper), so each write needs deliberate re-enabling -
+    # the per-write confirmation analog
     state_topic: null
     command_topic: null
 
