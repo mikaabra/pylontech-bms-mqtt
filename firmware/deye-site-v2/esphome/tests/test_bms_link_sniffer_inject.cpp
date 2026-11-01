@@ -335,12 +335,16 @@ static void test_explicit_second_press() {
     check(w.tx_count() == 1, "one frame so far");
 
     uint32_t t2 = 2000;
-    slot(c, t2, 1);   // clean pair after the TX
+    slot(c, t2, 1);   // fresh pair for the second press
     check(w.request(0x01, 0x4C, 3420, 2100), "arm 2 (explicit press)");
-    w.tick(2315);     // cooldown (1135 ms) holds
-    check(bus.tx_log.size() == 1, "cooldown holds the second press");
-    w.tick(5400);     // cooldown passed but 3.7 s since last RX: window missed
-    check(bus.tx_log.size() == 1, "window miss holds the second press");
+    // round 4: the tick lands 200 ms after the fresh pair - window OPEN,
+    // clean pair observed, cadence fresh. The 1035 ms cooldown since TX 1
+    // is the ONLY gate holding this frame (with the broken has_tx_-keyed
+    // gate this fired ~620 ms after TX 1).
+    w.tick(2215);
+    check(bus.tx_log.size() == 1, "cooldown-only gate holds the second press");
+    w.tick(5400);     // cadence long stale, window long gone: still holds
+    check(bus.tx_log.size() == 1, "no window, no fire");
 
     uint32_t t3 = 6000;
     slot(c, t3, 1);
@@ -355,6 +359,49 @@ static void test_explicit_second_press() {
 
 // collision: traffic inside the 150 ms verdict window - terminal on the
 // FIRST collision, counted on the first attempt
+// Round 4 must-fix oracle: every gate EXCEPT the cooldown is satisfied -
+// fresh pairs keep the cadence live, the clean pair is long observed, and
+// each tick lands inside a fresh 150..250 ms window - so the tick_armed
+// cooldown (keyed on never-reset tx_count_) is the only gate left. It
+// must hold at every window until 4 s after the TX, then fire once.
+static void test_cooldown_only_gate() {
+    BmsLinkCore c;
+    FakeBus bus;
+    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    c.set_ack_waiter(&w);
+
+    uint32_t t = 1000;
+    slot(c, t, 1);   // pair 1000/1015 (clean)
+    check(w.request(0x01, 0x4C, 3420, 1040), "arm accepted");
+    w.tick(1180);    // 165 ms window: TX at 1180
+    check(bus.tx_log.size() == 1, "first frame sent");
+    w.tick(1340);    // NoAck terminal
+    check(w.request(0x01, 0x4C, 3420, 1400), "second press accepted post-terminal");
+
+    // five consecutive OPEN windows after the TX: the cooldown must hold
+    // every single one (with the round-3 has_tx_-keyed bug every one of
+    // these fired ~620 ms apart in the reviewer harness)
+    uint32_t pairs[] = {2000, 2624, 3248, 3872, 4496};
+    for (uint32_t p : pairs) {
+        send(c, poll_req(1, "42"), p);
+        send(c, std::string(REAL_42_RESPONSE) + "\r", p + 15);
+        w.tick(p + 215);   // 200 ms after the fresh pair: window open
+        check(bus.tx_log.size() == 1,
+              "cooldown holds with the window open and a clean pair");
+    }
+    check(w.status() == WriteController::Status::Armed, "still armed through the holds");
+
+    // cooldown ends at 1180 + 4000 = 5180; the NEXT open window fires once
+    uint32_t p = 5120;
+    send(c, poll_req(1, "42"), p);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", p + 15);
+    w.tick(p + 215);   // 4155 ms since TX, 200 ms window: fires
+    check(bus.tx_log.size() == 2, "fires once the cooldown elapsed");
+    w.tick(p + 370);   // verdict deadline (155 ms)
+    check(w.status() == WriteController::Status::NoAck, "terminal NoAck");
+    check(w.tx_count() == 2, "exactly two frames across the whole scenario");
+}
+
 static void test_collision_detected() {
     BmsLinkCore c;
     FakeBus bus;
@@ -517,12 +564,14 @@ static void test_millis_wraparound() {
 
     check(w.request(0x02, 0x4C, 3425, 0x100u), "re-arm after the wrap");
     uint32_t t = 0x600u;
-    slot(c, t, 2);
-    w.tick(0x800u);   // cooldown (2112 ms since TX) holds
-    check(bus.tx_log.size() == 1, "cooldown holds across the wrap");
+    slot(c, t, 2);              // fresh pair at 0x600/0x615
+    w.tick(0x705u);   // round 4: 240 ms window OPEN post-pair - cooldown (1861 ms since TX across the seam) is the only gate: HOLDS
+    check(bus.tx_log.size() == 1, "cooldown-only hold across the millis wrap");
+    w.tick(0x800u);   // window missed (491 ms since last RX): separately held
+    check(bus.tx_log.size() == 1, "window miss holds across the wrap");
     uint32_t t2 = 0x1000u;
     slot(c, t2, 2);
-    w.tick(0x1100u);  // 4416 ms since TX, 235 ms window
+    w.tick(0x1100u);  // 4416 ms since TX (cooldown over), 235 ms window
     check(bus.tx_log.size() == 2, "second press fired after the gates");
     w.tick(0x119au);  // 154 ms: verdict deadline
     check(w.status() == WriteController::Status::NoAck, "verdict after the wrap");
@@ -543,6 +592,7 @@ int main() {
     test_burst_storm_single_frame();
     test_late_ack_reported();
     test_explicit_second_press();
+    test_cooldown_only_gate();
     test_collision_detected();
     test_has_tx_reset_wordings();
     test_enable_off_aborts();

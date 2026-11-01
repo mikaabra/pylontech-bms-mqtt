@@ -16,7 +16,8 @@
 // only through WriteController's gates: the Link Write Enable switch
 // (yaml restore_mode: ALWAYS_OFF) is re-checked at every state transition,
 // the allowlist (param 0x4C, 3400-3500 mV, packs 01-04) lives in the pure
-// core, each Send press is a one-shot (initial + single retry), and firing
+// core, each Send press is ONE deliberate frame (no retry - a late ack is
+// listened for and reported, but never triggers a transmit), and firing
 // requires >=150 ms confirmed silence with the slot watchdog healthy.
 // DE/RE keys only via the uart flow_control_pin during our own frame -
 // nothing else in this tree writes to the UART.

@@ -130,10 +130,11 @@ inline std::string build_write_frame(uint8_t pack, uint8_t param, uint16_t value
 //   150..250 ms after the last RX - deep enough to be real idle, far
 //   enough from the master's next poll (~436 ms) that our ~27 ms frame +
 //   ack turnaround (~15 ms measured) land inside the same slot. The
-//   150 ms ack deadline keeps the no-ack/collision verdict BEFORE the
-//   master's next poll can arrive (worst case: fire at 250, +27 frame,
-//   +150 verdict = 427 < 436): a plain no-ack can never be mislabeled
-//   "collision" by the next slot's traffic (review round 3).
+//   150 ms ack deadline runs from TX START and already covers the ~27 ms
+//   frame, keeping the verdict BEFORE the master's next poll can arrive
+//   (worst case: fire at 250 + 150 verdict = 400 < 436): a plain no-ack
+//   can never be mislabeled "collision" by the next slot's traffic
+//   (review rounds 3-4).
 //   ONE FRAME PER PRESS - the Mac tool's posture, reviewer-ruled: no ack
 //   never means unwritten, and a retry could write the same value twice
 //   against unknown flash endurance. A late ack is still LISTENED for
@@ -775,17 +776,17 @@ private:
     void tick_armed(uint32_t t_ms) {
         if (!enable_(ctx_)) {
             status_ = Status::Aborted;
-            line_ = has_tx_ ? "sent; result unknown (aborted after TX - write enable switched off)"
-                           : "aborted: write enable switched off";
-            if (has_tx_) require_clean_(t_ms);
+            // round 4: has_tx_ is always false here (a TX moves the status
+            // to WaitAck) - the "after TX" branch was dead code
+            line_ = "aborted: write enable switched off";
             return;
         }
         if ((int32_t)(t_ms - armed_at_ms_) > (int32_t)kArmExpiryMs) {
+            // round 4: has_tx_ is always false in tick_armed (a successful
+            // TX moves the status to WaitAck) - the "after TX" branches were dead code
             status_ = Status::Expired;
             line_ = "expired: no safe window within " + std::to_string(kArmExpiryMs / 1000) +
-                    " s (watchdog, cadence, clean-slot or silence waits); press Send again" +
-                    (has_tx_ ? std::string(" - result unknown") : std::string());
-            if (has_tx_) require_clean_(t_ms);
+                    " s (watchdog, cadence, clean-slot or silence waits); press Send again";
             return;
         }
         if (core_.watchdog_tripped()) return;           // bus in unknown state: hold
@@ -796,7 +797,12 @@ private:
             else
                 return;
         }
-        if (has_tx_ && (int32_t)(t_ms - last_tx_ms_) < (int32_t)kTxDueCooldownMs) return;
+        // round 4 must-fix: the cooldown is keyed on tx_count_ (never reset),
+        // not on has_tx_ (reset per operation by request()) - the per-op
+        // reset for the round-3 status fix silently disarmed this gate, so
+        // rapid repeat presses fired ~620 ms apart instead of 4 s apart.
+        // Flush failures count too: bytes may be on the wire either way.
+        if (tx_count_ > 0 && (int32_t)(t_ms - last_tx_ms_) < (int32_t)kTxDueCooldownMs) return;
         uint32_t since = core_.since_last_rx(t_ms);
         if (since < kGapConfirmMs || since > kGapMaxMs) return;  // land mid-idle, not at the next poll's edge
 
@@ -805,7 +811,6 @@ private:
         bool ok = tx_(frame, ctx_);
         has_tx_ = true;
         last_tx_ms_ = t_ms;
-        armed_at_ms_ = t_ms;  // expiry clock restarts at each TX
         tx_count_++;  // every TX attempt counts, flush failures included:
                       // bytes may be on the wire (round 3: never undercount)
         if (!ok) {

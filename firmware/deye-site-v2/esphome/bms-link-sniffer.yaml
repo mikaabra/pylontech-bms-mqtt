@@ -14,7 +14,7 @@
 # (restore_mode ALWAYS_OFF, auto-off after each operation, re-checked at
 # every injection state transition), the single-entry write allowlist in
 # the pure core (param 0x4C, 3400-3500 mV, packs 01-04 — the same bounds
-# as the Mac tool), a one-shot button (initial + single retry, presses in
+# as the Mac tool), a one-shot button (one frame per press, presses in
 # flight ignored), a >=150 ms..<=250 ms fire window inside a fresh poll
 # cadence, and a 6 s arm expiry.
 # The four write controls carry state_topic/command_topic: null — the
@@ -141,6 +141,10 @@ uart:
   tx_pin: GPIO17
   flow_control_pin: GPIO21
   baud_rate: 9600
+  # round 4: never wait indefinitely on a wedged driver - a flush with no
+  # timeout would block the main loop until the task watchdog reset, which
+  # re-opens the DE/RE window we keep closed
+  flush_timeout: 100ms
   data_bits: 8
   stop_bits: 1
   parity: NONE
