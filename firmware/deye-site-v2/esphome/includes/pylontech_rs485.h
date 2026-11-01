@@ -320,6 +320,9 @@ public:
         BcScopeGuard bc_sweep_guard_;
 
         uint32_t now = millis();
+        uint32_t pass_start_ms_ = now;
+        pass_attempts_ = 0;
+        pass_refused_client_ = 0;
 
         // 30s repair pass (review items 3+5): retained idempotent stamps —
         // the channel availability plus both alarm latches for every pack.
@@ -330,8 +333,8 @@ public:
         if (esphome::mqtt::global_mqtt_client && esphome::mqtt::global_mqtt_client->is_connected()) {
             availability_.heartbeat(esphome::mqtt::global_mqtt_client);
             for (int batt = 0; batt < num_batteries_; batt++) {
-                publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm);
-                publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm);
+                if (!publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm)) total_refused_++;
+                if (!publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm)) total_refused_++;
             }
         }
 
@@ -573,6 +576,13 @@ public:
             }
         }
 
+        last_pass_ms_ = millis() - pass_start_ms_;
+        if (last_pass_ms_ > max_pass_ms_) max_pass_ms_ = last_pass_ms_;
+        if (pass_refused_client_) {
+            ESP_LOGW("mqtt", "value pass DONE: %lu attempts, %lu refused by pool, pass %lums",
+                    (unsigned long) pass_attempts_, (unsigned long) pass_refused_client_,
+                    (unsigned long) last_pass_ms_);
+        }
         ESP_LOGI("mqtt", "Published RS485 data for %d batteries", num_batteries_);
     }
 
@@ -875,6 +885,12 @@ public:
         return true;
     }
 
+public:
+    uint32_t get_total_attempts() const { return total_attempts_; }
+    uint32_t get_total_refused() const { return total_refused_; }
+    uint32_t get_last_pass_ms() const { return last_pass_ms_; }
+    uint32_t get_max_pass_ms() const { return max_pass_ms_; }
+
 private:
     esphome::uart::UARTComponent* uart_;
     std::string mqtt_prefix_;
@@ -927,13 +943,23 @@ private:
     // reset the device until the deferred restructure.
     PublishPacer raw_pacer_;
     int disc_pos_ = 0;
+    uint32_t pass_attempts_ = 0, pass_refused_client_ = 0;
+    uint32_t total_attempts_ = 0, total_refused_ = 0;
+    uint32_t last_pass_ms_ = 0, max_pass_ms_ = 0;
 
-    void publish_raw(const char* topic, const char* value) {
-        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
+    bool publish_raw(const char* topic, const char* value) {
+        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return false;
+        pass_attempts_++;
+        total_attempts_++;
         bc_pub_begin();
-        esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(value));
+        bool ok = esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(value));
         bc_pub_end();
         raw_pacer_.pace();
+        if (!ok) {
+            pass_refused_client_++;
+            total_refused_++;
+        }
+        return ok;
     }
 
     bool publish_poll_alarm(int batt, bool alarm) {
