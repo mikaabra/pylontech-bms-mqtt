@@ -3,18 +3,28 @@
 #include <cstdint>
 #include <cstring>
 
-// #53 pacing note: value heartbeats are phase-staggered by arming each
-// instance's last_publish at (now + phase - heartbeat). Unsigned wrap makes
-// the arithmetic safe at boot (millis() < phase). The staggering therefore
-// lives ENTIRELY in initialization: the due predicate is unchanged, so
-// phases survive resets and reconnect re-arms by design.
+// #53 pacing note: every heartbeat-bearing instance gets a FIXED slot —
+// a window position assigned once (assign_slot, k*H/N spread) that no
+// publish, commit or outage can move. The slot re-sends each value once
+// per period at its position, so regrouping mechanisms (a shared commit
+// instant after a reconnect, the poll walk committing a cohort together)
+// cannot rebuild bursts: a value committed during an outage still fires at
+// its next slot occurrence, never at the reconnect instant. Changes and
+// crossings publish immediately and never touch slot state.
 //
-// armed instances (fresh from arm()) suppress the first/threshold branches:
-// their initial publish waits for its phase slot, which replaces the old
-// all-at-once first-publish burst with a paced wave. commit() clears the
-// state; refused publishes leave the instance armed/due and it retries on
-// the next pass — refusals cost at most one extra heartbeat interval of
-// staleness (commit-on-acceptance).
+// Slot mode coexists with the legacy path: without assign_slot, decide()
+// and check() behave exactly as rack-solar/epever consumed them before
+// #53 (change/first immediate, elapsed-since-commit heartbeat). armed
+// instances (arm()) keep the legacy boot-phased first publish for legacy
+// consumers; the deye handler uses slots for boot wave AND heartbeat.
+//
+// In slot mode the FIRST publish of a numeric instance waits for its slot
+// (boot spread); changes/crossings stay immediate. commit-on-acceptance
+// throughout: a refused publish leaves the slot occurrence unconsumed and
+// the value retries next pass — refusals cost at most one pass of staleness.
+// Slot arithmetic is modulo 2^32: millis() wraps at 49.7 days and the
+// occurrence indices then reset — accepted, devices power-cycle far more
+// often.
 
 inline uint32_t safe_elapsed(uint32_t now, uint32_t last) {
     return now - last;
@@ -103,6 +113,8 @@ struct HysteresisFloat {
     bool first = true;
     bool armed = false;
     float pending_val_ = NAN;
+    uint32_t slot_origin_ = 0, slot_phase_ = 0, slot_period_ = 0;
+    uint32_t slot_last_occurrence_ = 0;
 
     // would-publish decision without side effects; pairs with commit()
     bool decide(float new_val, float threshold, float min_val = -INFINITY, float max_val = INFINITY,
@@ -110,6 +122,20 @@ struct HysteresisFloat {
         if (std::isnan(new_val) || !std::isfinite(new_val)) return false;
         if (new_val < min_val || new_val > max_val) return false;
         uint32_t now = millis();
+        if (slot_period_) {
+            // fixed-slot heartbeat: once per period at the window position,
+            // independent of any publish/commit/outage timing
+            if (slot_due_(now)) {
+                pending_val_ = new_val;
+                return true;
+            }
+            if (first) return false;   // boot spread: first publish rides its slot
+            if (fabs(new_val - last_val) >= threshold) {
+                pending_val_ = new_val;
+                return true;
+            }
+            return false;
+        }
         if (armed) {
             // phased first publish: only the slotted heartbeat path fires
             if (safe_elapsed(now, last_publish) >= heartbeat_ms) {
@@ -139,6 +165,7 @@ struct HysteresisFloat {
         last_publish = millis();
         first = false;
         armed = false;
+        slot_mark_fired_(millis());
     }
 
     // phase-staggered (re)arm: first publish fires ~phase_ms from now_ms,
@@ -148,6 +175,37 @@ struct HysteresisFloat {
         armed = true;
         last_publish = now_ms + phase_ms - heartbeat_ms;  // uint wrap-safe
         pending_val_ = NAN;
+    }
+
+    // #53 fixed slot: window position assigned ONCE; refires the value at
+    // that position every period_ms, immune to commit timing and outages
+    void assign_slot(uint32_t now_ms, uint32_t phase_ms, uint32_t period_ms) {
+        slot_origin_ = now_ms;
+        slot_phase_ = phase_ms;
+        slot_period_ = period_ms;
+        slot_last_occurrence_ = 0xFFFFFFFF;   // no occurrence consumed yet
+    }
+
+    bool slot_due_(uint32_t now) const {
+        // occurrence-indexed: the k-th slot occurrence happens at
+        // origin + phase + k*period; fire on the FIRST SAMPLE at or
+        // after an unconsumed occurrence. Position-within-window
+        // comparison (pos >= phase) is WRONG under sampling: a 10 s
+        // pass grid leaves the last sampling gap of every window
+        // unreachable, killing every instance slotted there.
+        if (now - slot_origin_ < slot_phase_) return false;   // before first occurrence
+        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
+        return (uint32_t) (occ - slot_last_occurrence_) >= 1u;
+    }
+
+    void slot_mark_fired_(uint32_t now) {
+        if (!slot_period_) return;
+        // consume the LATEST occurrence when the commit landed at or
+        // after it — a change before the occurrence leaves it to fire at
+        // its time (idempotent re-send); nothing ever moves
+        if (now - slot_origin_ < slot_phase_) return;
+        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
+        if ((uint32_t) (occ - slot_last_occurrence_) >= 1u) slot_last_occurrence_ = occ;
     }
 
     // legacy decide+assume-success; kept for consumers not yet on
@@ -175,11 +233,25 @@ struct HysteresisInt {
     bool first = true;
     bool armed = false;
     int pending_val_ = -2147483647;
+    uint32_t slot_origin_ = 0, slot_phase_ = 0, slot_period_ = 0;
+    uint32_t slot_last_occurrence_ = 0;
 
     bool decide(int new_val, int threshold = 1, int min_val = -2147483647, int max_val = 2147483647,
                uint32_t heartbeat_ms = 60000) {
         if (new_val < min_val || new_val > max_val) return false;
         uint32_t now = millis();
+        if (slot_period_) {
+            if (slot_due_(now)) {
+                pending_val_ = new_val;
+                return true;
+            }
+            if (first) return false;   // boot spread: first publish rides its slot
+            if (std::abs(new_val - last_val) >= threshold) {
+                pending_val_ = new_val;
+                return true;
+            }
+            return false;
+        }
         if (armed) {
             // phased first publish; the armed gate itself suppresses the
             // first/threshold branches until the first slot commit (relevant
@@ -210,12 +282,39 @@ struct HysteresisInt {
         last_publish = millis();
         first = false;
         armed = false;
+        slot_mark_fired_(millis());
     }
 
     void arm(uint32_t now_ms, uint32_t phase_ms, uint32_t heartbeat_ms) {
         armed = true;
         last_publish = now_ms + phase_ms - heartbeat_ms;  // uint wrap-safe
         pending_val_ = -2147483647;
+    }
+
+    void assign_slot(uint32_t now_ms, uint32_t phase_ms, uint32_t period_ms) {
+        slot_origin_ = now_ms;
+        slot_phase_ = phase_ms;
+        slot_period_ = period_ms;
+        slot_last_occurrence_ = 0xFFFFFFFF;   // no occurrence consumed yet
+    }
+
+    bool slot_due_(uint32_t now) const {
+        // occurrence-indexed: the k-th slot occurrence happens at
+        // origin + phase + k*period; fire on the FIRST SAMPLE at or
+        // after an unconsumed occurrence. Position-within-window
+        // comparison (pos >= phase) is WRONG under sampling: a 10 s
+        // pass grid leaves the last sampling gap of every window
+        // unreachable, killing every instance slotted there.
+        if (now - slot_origin_ < slot_phase_) return false;   // before first occurrence
+        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
+        return (uint32_t) (occ - slot_last_occurrence_) >= 1u;
+    }
+
+    void slot_mark_fired_(uint32_t now) {
+        if (!slot_period_) return;
+        if (now - slot_origin_ < slot_phase_) return;
+        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
+        if ((uint32_t) (occ - slot_last_occurrence_) >= 1u) slot_last_occurrence_ = occ;
     }
 
     bool check(int new_val, int threshold = 1, int min_val = -2147483647, int max_val = 2147483647,
@@ -234,23 +333,33 @@ struct HysteresisInt {
     }
 };
 
-// Change-plus-heartbeat types. heartbeat_ms == 0 preserves the legacy
-// change-only semantics (rack-solar consumers pass no heartbeat); the deye
-// alarm/state/cell-list sites pass a slow (300 s) heartbeat so a value that
-// was committed after an ACCEPTED publish can still be DISCARDED by the
-// mqtt drain task on disconnect (backend pops and releases regardless of
-// is_connected_) — the heartbeat re-sends it within one window instead of
-// waiting for the next value change. No arming: changes still publish
-// immediately (alarm latency matters); the first publish rides the cap-paced
-// boot wave.
+// Change-plus-heartbeat types. Two modes:
+//  - legacy (no assign_slot): heartbeat_ms == 0 preserves the change-only
+//    semantics rack-solar consumed before #53; a nonzero heartbeat_ms (the
+//    deye round-2 call sites) allows the elapsed-since-commit republish.
+//  - slot mode (assign_slot): every instance re-sends its value once per
+//    period at its FIXED window position — the mechanism that repairs a
+//    value the mqtt drain task DISCARDED after acceptance (backend pops and
+//    releases regardless of is_connected_) AND keeps the change-type cohort
+//    spread forever (a shared commit instant cannot regroup them). Changes
+//    and first publishes stay immediate (alarm latency matters); they never
+//    touch slot state. Slot mode ignores the heartbeat_ms parameter.
 
 struct HysteresisBool {
     bool last_val = false;
     bool first = true;
     uint32_t last_publish = 0;
     bool pending_val_ = false;
+    uint32_t slot_origin_ = 0, slot_phase_ = 0, slot_period_ = 0;
+    uint32_t slot_last_occurrence_ = 0;
 
     bool decide(bool new_val, uint32_t heartbeat_ms = 0) {
+        if (slot_period_) {
+            if (slot_due_(millis())) {
+                pending_val_ = new_val;
+                return true;
+            }
+        }
         if (first || new_val != last_val) {
             pending_val_ = new_val;
             return true;
@@ -267,6 +376,33 @@ struct HysteresisBool {
         last_val = pending_val_;
         last_publish = millis();
         first = false;
+        slot_mark_fired_(millis());
+    }
+
+    void assign_slot(uint32_t now_ms, uint32_t phase_ms, uint32_t period_ms) {
+        slot_origin_ = now_ms;
+        slot_phase_ = phase_ms;
+        slot_period_ = period_ms;
+        slot_last_occurrence_ = 0xFFFFFFFF;   // no occurrence consumed yet
+    }
+
+    bool slot_due_(uint32_t now) const {
+        // occurrence-indexed: the k-th slot occurrence happens at
+        // origin + phase + k*period; fire on the FIRST SAMPLE at or
+        // after an unconsumed occurrence. Position-within-window
+        // comparison (pos >= phase) is WRONG under sampling: a 10 s
+        // pass grid leaves the last sampling gap of every window
+        // unreachable, killing every instance slotted there.
+        if (now - slot_origin_ < slot_phase_) return false;   // before first occurrence
+        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
+        return (uint32_t) (occ - slot_last_occurrence_) >= 1u;
+    }
+
+    void slot_mark_fired_(uint32_t now) {
+        if (!slot_period_) return;
+        if (now - slot_origin_ < slot_phase_) return;
+        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
+        if ((uint32_t) (occ - slot_last_occurrence_) >= 1u) slot_last_occurrence_ = occ;
     }
 
     bool check(bool new_val) {
@@ -287,8 +423,16 @@ struct HysteresisString {
     bool first = true;
     uint32_t last_publish = 0;
     std::string pending_val_;
+    uint32_t slot_origin_ = 0, slot_phase_ = 0, slot_period_ = 0;
+    uint32_t slot_last_occurrence_ = 0;
 
     bool decide(const std::string& new_val, uint32_t heartbeat_ms = 0) {
+        if (slot_period_) {
+            if (slot_due_(millis())) {
+                pending_val_ = new_val;
+                return true;
+            }
+        }
         if (first || new_val != last_val) {
             pending_val_ = new_val;
             return true;
@@ -305,6 +449,33 @@ struct HysteresisString {
         last_val = pending_val_;
         last_publish = millis();
         first = false;
+        slot_mark_fired_(millis());
+    }
+
+    void assign_slot(uint32_t now_ms, uint32_t phase_ms, uint32_t period_ms) {
+        slot_origin_ = now_ms;
+        slot_phase_ = phase_ms;
+        slot_period_ = period_ms;
+        slot_last_occurrence_ = 0xFFFFFFFF;   // no occurrence consumed yet
+    }
+
+    bool slot_due_(uint32_t now) const {
+        // occurrence-indexed: the k-th slot occurrence happens at
+        // origin + phase + k*period; fire on the FIRST SAMPLE at or
+        // after an unconsumed occurrence. Position-within-window
+        // comparison (pos >= phase) is WRONG under sampling: a 10 s
+        // pass grid leaves the last sampling gap of every window
+        // unreachable, killing every instance slotted there.
+        if (now - slot_origin_ < slot_phase_) return false;   // before first occurrence
+        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
+        return (uint32_t) (occ - slot_last_occurrence_) >= 1u;
+    }
+
+    void slot_mark_fired_(uint32_t now) {
+        if (!slot_period_) return;
+        if (now - slot_origin_ < slot_phase_) return;
+        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
+        if ((uint32_t) (occ - slot_last_occurrence_) >= 1u) slot_last_occurrence_ = occ;
     }
 
     bool check(const std::string& new_val) {
