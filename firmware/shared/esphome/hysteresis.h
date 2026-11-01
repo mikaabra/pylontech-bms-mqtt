@@ -4,24 +4,28 @@
 #include <cstring>
 
 // #53 pacing note: every heartbeat-bearing instance gets a FIXED slot —
-// a window position assigned once (assign_slot, k*H/N spread) that no
-// publish, commit or outage can move. The slot re-sends each value once
-// per period at its position, so regrouping mechanisms (a shared commit
-// instant after a reconnect, the poll walk committing a cohort together)
-// cannot rebuild bursts: a value committed during an outage still fires at
-// its next slot occurrence, never at the reconnect instant. Changes and
-// crossings publish immediately and never touch slot state.
+// a periodic occurrence time assigned once (assign_slot, k*H/N spread)
+// that no publish, commit or outage can move. A value re-sends at the
+// first pass at/after each of its occurrences, so regrouping mechanisms
+// (a shared commit instant, the poll walk committing a cohort together)
+// cannot rebuild CADENCE — steady passes stay flat (idle: ~18-19 dues).
+// An outage still owes one occurrence per missed instance: the first
+// pass back carries the accumulated backlog (60 s gap ~114 dues, 360 s
+// ~239) and the producer-side pass stop paces it away over the following
+// passes. What survives the outage unregrouped is the slot SPACING, not
+// the absence of a catch-up burst. Changes and crossings publish
+// immediately and never touch slot state.
 //
 // Slot mode coexists with the legacy path: without assign_slot, decide()
 // and check() behave exactly as rack-solar/epever consumed them before
-// #53 (change/first immediate, elapsed-since-commit heartbeat). armed
-// instances (arm()) keep the legacy boot-phased first publish for legacy
-// consumers; the deye handler uses slots for boot wave AND heartbeat.
+// #53 (change/first immediate, elapsed-since-commit heartbeat). The deye
+// handler uses slots for boot wave AND heartbeat.
 //
 // In slot mode the FIRST publish of a numeric instance waits for its slot
-// (boot spread); changes/crossings stay immediate. commit-on-acceptance
-// throughout: a refused publish leaves the slot occurrence unconsumed and
-// the value retries next pass — refusals cost at most one pass of staleness.
+// (boot spread); change-type firsts/changes stay immediate (alarm
+// latency). commit-on-acceptance throughout: a refused publish leaves the
+// slot occurrence unconsumed and retries next pass; a sustained pool
+// squeeze defers the backlog across passes, bounded by the same pass stop.
 // Slot arithmetic is modulo 2^32: millis() wraps at 49.7 days and the
 // occurrence indices then reset — accepted, devices power-cycle far more
 // often.
@@ -111,7 +115,6 @@ struct HysteresisFloat {
     float last_val = NAN;
     uint32_t last_publish = 0;
     bool first = true;
-    bool armed = false;
     float pending_val_ = NAN;
     uint32_t slot_origin_ = 0, slot_phase_ = 0, slot_period_ = 0;
     uint32_t slot_last_occurrence_ = 0;
@@ -131,14 +134,6 @@ struct HysteresisFloat {
             }
             if (first) return false;   // boot spread: first publish rides its slot
             if (fabs(new_val - last_val) >= threshold) {
-                pending_val_ = new_val;
-                return true;
-            }
-            return false;
-        }
-        if (armed) {
-            // phased first publish: only the slotted heartbeat path fires
-            if (safe_elapsed(now, last_publish) >= heartbeat_ms) {
                 pending_val_ = new_val;
                 return true;
             }
@@ -164,17 +159,7 @@ struct HysteresisFloat {
         last_val = pending_val_;
         last_publish = millis();
         first = false;
-        armed = false;
         slot_mark_fired_(millis());
-    }
-
-    // phase-staggered (re)arm: first publish fires ~phase_ms from now_ms,
-    // spread across one heartbeat window. Usable at boot and on reconnect —
-    // armed state communicates only through decide/commit.
-    void arm(uint32_t now_ms, uint32_t phase_ms, uint32_t heartbeat_ms) {
-        armed = true;
-        last_publish = now_ms + phase_ms - heartbeat_ms;  // uint wrap-safe
-        pending_val_ = NAN;
     }
 
     // #53 fixed slot: window position assigned ONCE; refires the value at
@@ -223,7 +208,6 @@ struct HysteresisFloat {
         pending_val_ = NAN;
         last_publish = 0;
         first = true;
-        armed = false;
     }
 };
 
@@ -231,7 +215,6 @@ struct HysteresisInt {
     int last_val = -2147483647;
     uint32_t last_publish = 0;
     bool first = true;
-    bool armed = false;
     int pending_val_ = -2147483647;
     uint32_t slot_origin_ = 0, slot_phase_ = 0, slot_period_ = 0;
     uint32_t slot_last_occurrence_ = 0;
@@ -247,16 +230,6 @@ struct HysteresisInt {
             }
             if (first) return false;   // boot spread: first publish rides its slot
             if (std::abs(new_val - last_val) >= threshold) {
-                pending_val_ = new_val;
-                return true;
-            }
-            return false;
-        }
-        if (armed) {
-            // phased first publish; the armed gate itself suppresses the
-            // first/threshold branches until the first slot commit (relevant
-            // whether last_val is still the sentinel or a valid re-arm value)
-            if (safe_elapsed(now, last_publish) >= heartbeat_ms) {
                 pending_val_ = new_val;
                 return true;
             }
@@ -281,14 +254,7 @@ struct HysteresisInt {
         last_val = pending_val_;
         last_publish = millis();
         first = false;
-        armed = false;
         slot_mark_fired_(millis());
-    }
-
-    void arm(uint32_t now_ms, uint32_t phase_ms, uint32_t heartbeat_ms) {
-        armed = true;
-        last_publish = now_ms + phase_ms - heartbeat_ms;  // uint wrap-safe
-        pending_val_ = -2147483647;
     }
 
     void assign_slot(uint32_t now_ms, uint32_t phase_ms, uint32_t period_ms) {
@@ -329,7 +295,6 @@ struct HysteresisInt {
         pending_val_ = -2147483647;
         last_publish = 0;
         first = true;
-        armed = false;
     }
 };
 

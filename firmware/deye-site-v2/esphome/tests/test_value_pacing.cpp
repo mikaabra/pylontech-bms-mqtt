@@ -307,29 +307,7 @@ int main() {
         printf("S4 accepted-then-discarded heal: ok (healed %u ms after commit)\n", healed_at - tc);
     }
 
-    // ---------- S5: armed-slot deferral + post-commit immediacy (legacy arm() API pin) ----------
-    {
-        HysteresisFloat h;
-        g_clock = 10000;
-        h.arm(g_clock, 25000, HB_FAST);
-        bool fired_early = false;
-        for (g_clock = 11000; g_clock < 34000; g_clock += 10000)
-            if (h.decide(9.9f, 0.005f, -50.0f, 5000.0f, HB_FAST)) fired_early = true;
-        assert(!fired_early);
-        g_clock = 36000;
-        assert(h.decide(9.9f, 0.005f, -50.0f, 5000.0f, HB_FAST));
-        h.commit();
-        g_clock = 46000;
-        assert(h.decide(2.0f, 0.005f, -50.0f, 5000.0f, HB_FAST));
-        h.commit();
-        g_clock = 50000;
-        assert(!h.decide(2.0f, 0.005f, -50.0f, 5000.0f, HB_FAST));
-        g_clock = 107000;
-        assert(h.decide(2.0f, 0.005f, -50.0f, 5000.0f, HB_FAST));
-        printf("S5 armed-slot deferral (legacy API): ok\n");
-    }
-
-    // ---------- S6: legacy check() compat (rack-solar path incl. new types) ----------
+    // ---------- S6: legacy check() compat (S5, the armed API pin, removed with arm()) (rack-solar path incl. new types) ----------
     {
         HysteresisFloat h;
         g_clock = 1000;

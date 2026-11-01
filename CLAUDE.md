@@ -58,7 +58,7 @@ done
 - **`test_discovery_driver.cpp`** — the two-stream discovery driver: 15-tick convergence (36 CAN + 261 RS485 sites), starvation negative control (pins the pre-#44 semantics at 132 ticks / 2,637 publishes), pool-rejection resume, reconnect + short-gap cursor rewind, yaml-exact button blast. Models stream sizes, not real payloads — the on-device retained-config count (285) is the real-stream proof.
 - **`test_breadcrumbs.cpp`** — breadcrumb stage marks, snapshot/report gating, result-controllable stub MQTT client
 - **`test_rs485_info_decode.cpp`** / **`test_rs485_temp_decode.cpp`** — RS485 INFO + temperature decoders
-- **`test_value_pacing.cpp`** — issue #53 pacing oracle: pool-only admission (the 29-slot pool is the only gate, concurrent-drain sim), k*H/N phase slots, commit-on-acceptance retry, Bool/String 300 s repair heartbeats (accepted-then-discarded heal), storm fairness + bounded cell recovery, flap resilience (anchors hold through 30 s flaps, liveness + bounded convergence), slow-drain shaping
+- **`test_value_pacing.cpp`** — issue #53 pacing oracle: pool-only admission (the 29-slot pool is the only gate, concurrent-drain sim), fixed slot occurrences (change types included), commit-on-acceptance retry, pass stops at the first client refusal, storm fairness + bounded cell recovery, flap resilience (slots immovable through 30 s flaps; reconnect catch-up burst bounded by the pass stop; post-flap steady passes fit the pool), slow-drain shaping
 
 NOTE: do NOT add `-I../../shared/esphome` to these compiles — on macOS's case-insensitive filesystem it shadows the SDK's own `<Availability.h>` and corrupts the libc headers. The shared headers resolve via relative includes from the test files.
 
@@ -68,7 +68,7 @@ All v2 firmware uses the same pattern: YAML (component wiring) + C++ header hand
 
 ### Shared Headers (`firmware/shared/esphome/`)
 
-- **`hysteresis.h`** — `HysteresisFloat`/`Int`/`Bool`/`String` with threshold + heartbeat logic; issue #53 adds `decide()/commit()` commit-on-acceptance, `arm()` phase slots (k*H/N), and slow Bool/String repair heartbeats — deye consumes the new API, legacy `check()` wrapper keeps rack-solar/epever untouched
+- **`hysteresis.h`** — `HysteresisFloat`/`Int`/`Bool`/`String` with threshold + heartbeat logic; issue #53 adds `decide()/commit()` commit-on-acceptance and fixed slot heartbeats (`assign_slot`, k*H/N occurrence spread, outage-proof, strings included) — deye consumes the new API, legacy `check()` keeps rack-solar/epever untouched
 - **`availability.h`** — `AvailabilityTracker` for stale detection; `stale` (data-age truth) flips unconditionally while the retained online/offline stamp flips only on accepted publishes; heartbeat republishes in both states (CAN 10s via diagnostics, RS485 30s repair pass)
 - **`mqtt_helpers.h`** — `build_ha_sensor_payload()`, `build_ha_binary_sensor_payload()`, `PublishPacer` (1 ms producer pacing under async), `PublishBudget` (per-tick discovery budget)
 - **`breadcrumbs.h`** — RTC noinit forensic breadcrumbs: sticky stage marks survive task-watchdog resets, scope guards, boot snapshot with a checked retried report publish through the normal client path (deye-bms-can only; host-tested)
@@ -77,7 +77,7 @@ All v2 firmware uses the same pattern: YAML (component wiring) + C++ header hand
 ### Deye Site v2 (`firmware/deye-site-v2/esphome/`)
 
 - **`includes/pylontech_can.h`** — CAN frame parsing (0x351, 0x355, 0x359, 0x35C, 0x370), diagnostics, stale detection, resumable budgeted discovery stream + 10s availability heartbeat
-- **`includes/pylontech_rs485.h`** — RS485 polling state machine, per-battery data, stack aggregation, resumable budgeted discovery stream + 10s pool-gated staggered value pass (issue #53: k*H/N phase slots, stamps-first repair pass every 30s, pack rotation + stack position alternation)
+- **`includes/pylontech_rs485.h`** — RS485 polling state machine, per-battery data, stack aggregation, resumable budgeted discovery stream + 10s pool-gated staggered value pass (issue #53: fixed slot occurrences per instance, stamps-first repair pass every 30s, pack rotation + stack position alternation, pass stops at the first pool refusal)
 - **`includes/pylontech_protocol.h`** — Shared protocol pure helpers + RS485 INFO decoders (0x42 analog / 0x44 alarm), host-oracle tested (`tests/`)
 
 ### Rack Solar BLE v2 (`firmware/rack-solar-site/esphome-smartshunt-epever-ble-v2/`)
