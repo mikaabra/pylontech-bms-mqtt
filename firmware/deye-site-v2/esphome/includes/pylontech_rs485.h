@@ -50,6 +50,7 @@ public:
         uint32_t now = millis();
         static const uint8_t phase_by_state[5] = {BC_IDLE, BC_TX_ANALOG, BC_WAIT_ANALOG, BC_TX_ALARM, BC_WAIT_ALARM};
         bc_mark(phase_by_state[state_], state_ >= 3 ? (uint8_t) alarm_batt_ : (uint8_t) current_batt_);
+        BcScopeGuard bc_tick_guard_;
 
         switch (state_) {
         case 0: {
@@ -335,6 +336,7 @@ public:
         int valid_batts = 0;
 
         for (int batt = 0; batt < num_batteries_; batt++) {
+            bc_mark(BC_SWEEP_BATT, (uint8_t) batt);
             float batt_min = 99.0f, batt_max = 0.0f;
 
             if (batteries_[batt].has_analog) {
@@ -799,6 +801,7 @@ public:
                 pacer.pace();
             }
         }
+        bc_mark(BC_IDLE);
     }
 
 private:

@@ -13,9 +13,9 @@ struct AvailabilityTracker {
     explicit AvailabilityTracker(const char* topic) : status_topic(topic) {}
 
     void publish_stamp_(esphome::mqtt::MQTTClientComponent* mqtt, const char* payload) {
-        bc_mark(BC_PUB_AVAIL);
+        bc_pub_begin(BC_PUB_AVAIL);
         mqtt->publish(status_topic, std::string(payload), (uint8_t)0, true);
-        bc_mark(BC_IDLE);
+        bc_pub_end();
     }
 
     void mark_online(esphome::mqtt::MQTTClientComponent* mqtt) {

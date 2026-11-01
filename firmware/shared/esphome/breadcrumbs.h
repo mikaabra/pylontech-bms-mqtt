@@ -29,13 +29,16 @@ enum BcStage : uint8_t {
     BC_CAN_FRAME = 10,    // CAN frame handler (aux = low arb-id byte)
     BC_CAN_DIAG = 11,     // CAN diagnostics publish
     BC_PUB_AVAIL = 12,    // channel availability stamp publishes
+    BC_SWEEP_BATT = 13,   // 30s sweep, per-battery section (aux = batt)
 };
 
 inline constexpr uint32_t BC_MAGIC = 0xBC0DEC5A;
 
 // Live RTC record: sticky stage (the load-bearing crumb), total mark count
-// (loop-progress watermark), and the duration of the last publish that
-// returned (slow-but-completing publishes are the warning-ramp signature).
+// (loop-progress watermark), and publish durations — the most recent one
+// that returned plus the slowest since boot with its stage/aux, so a run of
+// slow-but-completing publishes leaves a signature even when the last one
+// before a wedge happened to be fast.
 // The live record is reset at every boot, after the previous session's
 // values are snapshotted for reporting, so each session arms a fresh record.
 RTC_NOINIT_ATTR inline uint32_t bc_magic_ = 0;
@@ -45,6 +48,15 @@ RTC_NOINIT_ATTR inline uint32_t bc_stage_ms_ = 0;
 RTC_NOINIT_ATTR inline uint32_t bc_mark_count_ = 0;
 RTC_NOINIT_ATTR inline uint32_t bc_last_pub_ms_ = 0;
 RTC_NOINIT_ATTR inline uint32_t bc_pub_start_ms_ = 0;
+RTC_NOINIT_ATTR inline uint32_t bc_max_pub_ms_ = 0;
+RTC_NOINIT_ATTR inline uint8_t bc_max_pub_stage_ = BC_NONE;
+RTC_NOINIT_ATTR inline uint8_t bc_max_pub_aux_ = 0;
+
+// RAM (per-boot, not RTC): the section the loop is running in. Any
+// non-publish mark updates it, and publish marks carry it as their aux so a
+// wedge inside a publish still shows which section called it — without
+// touching every publish call site.
+inline uint8_t bc_section_ = 0;
 
 // RAM snapshot of the previous session, taken at boot before the live record
 // is reset; the broker pass reports the snapshot, not the overwritten live
@@ -56,6 +68,9 @@ inline uint8_t bc_snap_aux_ = 0;
 inline uint32_t bc_snap_mark_count_ = 0;
 inline uint32_t bc_snap_stage_ms_ = 0;
 inline uint32_t bc_snap_last_pub_ms_ = 0;
+inline uint32_t bc_snap_max_pub_ms_ = 0;
+inline uint8_t bc_snap_max_pub_stage_ = BC_NONE;
+inline uint8_t bc_snap_max_pub_aux_ = 0;
 inline int bc_snap_reset_reason_ = 0;
 
 // Per-boot guard for the broker pass; reset by bc_setup() so each session
@@ -68,52 +83,77 @@ inline void bc_mark(uint8_t stage, uint8_t aux = 0) {
     bc_aux_ = aux;
     bc_stage_ms_ = millis();
     bc_mark_count_++;
+    if (stage != BC_PUB_DATA && stage != BC_PUB_AVAIL && stage != BC_IDLE) bc_section_ = stage;
 }
+
+// Scope guard for section-style loop callbacks such as tick(): marks
+// BC_IDLE on every scope exit including early returns — unless the loop
+// never comes back, which leaves the section's entry mark as the panic
+// answer. Use one per callback scope, after the entry mark.
+struct BcScopeGuard {
+    ~BcScopeGuard() { bc_mark(BC_IDLE); }
+};
 
 // Called by the publish chokepoints just before the blocking socket write;
 // a publish that never returns leaves this mark as the crash-site answer.
-inline void bc_pub_begin() {
+inline void bc_pub_begin(uint8_t stage = BC_PUB_DATA) {
     bc_pub_start_ms_ = millis();
-    bc_mark(BC_PUB_DATA);
+    bc_mark(stage, bc_section_);
 }
 
 inline void bc_pub_end() {
-    bc_last_pub_ms_ = millis() - bc_pub_start_ms_;
+    uint32_t dur = millis() - bc_pub_start_ms_;
+    bc_last_pub_ms_ = dur;
+    if (dur > bc_max_pub_ms_) {
+        bc_max_pub_ms_ = dur;
+        bc_max_pub_stage_ = bc_stage_;
+        bc_max_pub_aux_ = bc_aux_;
+    }
     bc_mark(BC_IDLE);
 }
 
-inline bool bc_reason_is_panic_(int reason) {
-    return reason == ESP_RST_PANIC || reason == ESP_RST_INT_WDT ||
-           reason == ESP_RST_TASK_WDT || reason == ESP_RST_BROWNOUT;
+// Routine means provably benign: OTA/software restart, power-on, or
+// deep-sleep wake. Everything else — including unknown reasons and power
+// glitches — reports at ERROR severity so nothing crash-shaped hides
+// behind the routine label.
+inline bool bc_reason_is_routine_() {
+    return bc_snap_reset_reason_ == ESP_RST_SW || bc_snap_reset_reason_ == ESP_RST_POWERON ||
+           bc_snap_reset_reason_ == ESP_RST_DEEPSLEEP;
 }
 
 // Emit the boot snapshot. Serial pass at boot keeps the snapshot pending so
-// the broker pass can deliver it to the recorder once MQTT connects; panic
-// resets log at ERROR, routine resets (OTA, manual) at INFO/WARN so they
-// stay distinguishable in HA despite both landing there.
+// the broker pass can deliver it to the recorder once MQTT connects;
+// non-routine resets log at ERROR, routine resets (OTA, manual) at
+// INFO/WARN so they stay distinguishable in HA despite both landing there.
 inline void bc_log_snapshot_(bool to_broker) {
     const char *names[] = {"none", "idle", "tx_analog", "wait_analog",
                            "tx_alarm", "wait_alarm", "pub_data", "pub_stack",
-                           "pub_disc", "check_stale", "can_frame", "can_diag", "pub_avail"};
-    const char *name = bc_snap_stage_ <= BC_PUB_AVAIL ? names[bc_snap_stage_] : "?";
-    if (bc_reason_is_panic_(bc_snap_reset_reason_)) {
+                           "pub_disc", "check_stale", "can_frame", "can_diag",
+                           "pub_avail", "sweep_batt"};
+    const char *name = bc_snap_stage_ <= BC_SWEEP_BATT ? names[bc_snap_stage_] : "?";
+    const char *max_name = bc_snap_max_pub_stage_ <= BC_SWEEP_BATT ? names[bc_snap_max_pub_stage_] : "?";
+    const bool routine = bc_reason_is_routine_();
+    if (!routine) {
         ESP_LOGE("breadcrumbs",
-                 "prior session ended in stage %u(%s) aux=%u marks=%lu last_pub_ms=%lu stage_ms=%lu reset_reason=%d",
+                 "prior session ended in stage %u(%s) aux=%u marks=%lu last_pub_ms=%lu max_pub_ms=%lu(max stage %u(%s) aux %u) stage_ms=%lu reset_reason=%d",
                  bc_snap_stage_, name, bc_snap_aux_, (unsigned long) bc_snap_mark_count_,
-                 (unsigned long) bc_snap_last_pub_ms_, (unsigned long) bc_snap_stage_ms_,
-                 bc_snap_reset_reason_);
+                 (unsigned long) bc_snap_last_pub_ms_, (unsigned long) bc_snap_max_pub_ms_,
+                 bc_snap_max_pub_stage_, max_name, bc_snap_max_pub_aux_,
+                 (unsigned long) bc_snap_stage_ms_, bc_snap_reset_reason_);
     } else if (to_broker) {
         ESP_LOGW("breadcrumbs",
-                 "prior session ended in stage %u(%s) aux=%u marks=%lu last_pub_ms=%lu stage_ms=%lu reset_reason=%d (routine reset, not a crash)",
+                 "prior session ended in stage %u(%s) aux=%u marks=%lu last_pub_ms=%lu max_pub_ms=%lu(max stage %u(%s) aux %u) stage_ms=%lu reset_reason=%d (routine reset, not a crash)",
                  bc_snap_stage_, name, bc_snap_aux_, (unsigned long) bc_snap_mark_count_,
-                 (unsigned long) bc_snap_last_pub_ms_, (unsigned long) bc_snap_stage_ms_,
-                 bc_snap_reset_reason_);
+                 (unsigned long) bc_snap_last_pub_ms_, (unsigned long) bc_snap_max_pub_ms_,
+                 bc_snap_max_pub_stage_, max_name, bc_snap_max_pub_aux_,
+                 (unsigned long) bc_snap_stage_ms_, bc_snap_reset_reason_);
     } else {
         ESP_LOGI("breadcrumbs",
-                 "prior session ended in stage %u(%s) aux=%u marks=%lu last_pub_ms=%lu stage_ms=%lu reset_reason=%d (routine reset, not a crash)",
+                 "prior session ended in stage %u(%s) aux=%u marks=%lu last_pub_ms=%lu max_pub_ms=%lu(max stage %u(%s) aux %u) stage_ms=%lu reset_reason=%d (routine reset, not a crash)",
                  bc_snap_stage_, name, bc_snap_aux_, (unsigned long) bc_snap_mark_count_,
-                 (unsigned long) bc_snap_last_pub_ms_, (unsigned long) bc_snap_stage_ms_,
-                 bc_snap_reset_reason_);
+                 (unsigned long) bc_snap_last_pub_ms_, (unsigned long) bc_snap_max_pub_ms_,
+                 bc_snap_max_pub_stage_, max_name, bc_snap_max_pub_aux_,
+                 (unsigned long) bc_snap_stage_ms_, bc_snap_reset_reason_);
     }
 }
 
@@ -130,6 +170,9 @@ inline void bc_setup() {
         bc_mark_count_ = 0;
         bc_last_pub_ms_ = 0;
         bc_pub_start_ms_ = 0;
+        bc_max_pub_ms_ = 0;
+        bc_max_pub_stage_ = BC_NONE;
+        bc_max_pub_aux_ = 0;
         return;
     }
     bc_have_snapshot_ = true;
@@ -138,6 +181,9 @@ inline void bc_setup() {
     bc_snap_mark_count_ = bc_mark_count_;
     bc_snap_stage_ms_ = bc_stage_ms_;
     bc_snap_last_pub_ms_ = bc_last_pub_ms_;
+    bc_snap_max_pub_ms_ = bc_max_pub_ms_;
+    bc_snap_max_pub_stage_ = bc_max_pub_stage_;
+    bc_snap_max_pub_aux_ = bc_max_pub_aux_;
     bc_snap_reset_reason_ = (int) esp_reset_reason();
     bc_stage_ = BC_NONE;
     bc_aux_ = 0;
@@ -145,6 +191,10 @@ inline void bc_setup() {
     bc_mark_count_ = 0;
     bc_last_pub_ms_ = 0;
     bc_pub_start_ms_ = 0;
+    bc_max_pub_ms_ = 0;
+    bc_max_pub_stage_ = BC_NONE;
+    bc_max_pub_aux_ = 0;
+    bc_section_ = 0;
     bc_log_snapshot_(false);
     bc_broker_attempted_ = false;
 }

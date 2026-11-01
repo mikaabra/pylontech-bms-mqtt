@@ -8,6 +8,8 @@ enum esp_reset_reason_t {
     ESP_RST_PANIC = 4,
     ESP_RST_INT_WDT = 5,
     ESP_RST_TASK_WDT = 6,
+    ESP_RST_WDT = 7,
+    ESP_RST_DEEPSLEEP = 8,
     ESP_RST_BROWNOUT = 9,
 };
 inline int g_reset_reason = ESP_RST_POWERON;

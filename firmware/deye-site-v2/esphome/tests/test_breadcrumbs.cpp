@@ -70,10 +70,10 @@ int main() {
     bc_setup();
     // broker reconnect never happened before this reboot; serial shows the
     // blocked-in-publish position with the entry timestamp.
-    assert(count_logs("ERROR", "stage 6(pub_data)") == 1);
+    assert(count_logs("ERROR", "ended in stage 6(pub_data)") == 1);
     assert(bc_snap_stage_ms_ == 3000);
     bc_report_to_broker(true);
-    assert(count_logs("ERROR", "stage 6(pub_data)") == 2);
+    assert(count_logs("ERROR", "ended in stage 6(pub_data)") == 2);
 
     // Session 4: routine OTA reboot (software reset) — serial INFO, broker
     // WARN flagged as routine, so HA keeps the reset_reason field without
@@ -96,8 +96,70 @@ int main() {
     g_ms = 5100;  // loop continues into unmarked code and "hangs" here
     g_reset_reason = ESP_RST_TASK_WDT;
     bc_setup();
-    assert(count_logs("ERROR", "stage 1(idle)") == 1);
+    assert(count_logs("ERROR", "ended in stage 1(idle)") == 1);
     assert(bc_snap_stage_ms_ == 5060);
+
+    // Session 6: scope guard — normal exit marks IDLE, a leaked guard keeps
+    // the section's entry mark as the panic answer.
+    bc_mark(BC_TX_ANALOG);
+    {
+        BcScopeGuard g;
+        g_ms = 6010;
+    }
+    assert(bc_stage_ == BC_IDLE);  // guard fired at scope exit
+    {
+        BcScopeGuard *leaked = new BcScopeGuard();
+        bc_mark(BC_WAIT_ALARM, 3);
+        g_ms = 6050;
+        (void) leaked;  // destructor never runs: "hang inside the scope"
+        g_reset_reason = ESP_RST_TASK_WDT;
+        bc_setup();
+        delete leaked;  // test hygiene only; the snapshot is already taken
+    }
+    assert(count_logs("ERROR", "ended in stage 5(wait_alarm)") == 1);
+    assert(bc_snap_stage_ms_ == 6010);  // written at mark time, not hang time
+    bc_report_to_broker(true);
+
+    // Session 7: unknown and non-enum'd reasons are NOT routine — ERROR, no
+    // routine label. Only SW/POWERON/DEEPSLEEP get the benign treatment.
+    g_reset_reason = ESP_RST_UNKNOWN;
+    bc_setup();
+    assert(count_logs("ERROR", "reset_reason=0") == 1);
+    assert(count_logs("ERROR", "routine reset") == 0);
+    g_reset_reason = ESP_RST_WDT;
+    bc_setup();
+    assert(count_logs("ERROR", "reset_reason=7") == 1);
+    assert(count_logs("ERROR", "routine reset") == 0);
+    g_reset_reason = ESP_RST_DEEPSLEEP;
+    bc_setup();
+    assert(count_logs("INFO", "routine reset") == 2);  // sessions 4 and now
+
+    // Session 8: slowest-publish capture (max, not just last) and the
+    // section surviving in a publish mark's aux.
+    bc_mark(BC_CHECK_STALE);  // section entry
+    g_ms = 7000;
+    bc_pub_begin();           // value publish inside the stale check
+    assert(bc_stage_ == BC_PUB_DATA && bc_aux_ == BC_CHECK_STALE);
+    g_ms = 7007;
+    bc_pub_end();
+    assert(bc_last_pub_ms_ == 7);
+
+    bc_mark(BC_PUB_STACK);    // stack section of the 30s sweep
+    g_ms = 7100;
+    bc_pub_begin();
+    g_ms = 7350;
+    bc_pub_end();
+    assert(bc_last_pub_ms_ == 250);
+    assert(bc_max_pub_ms_ == 250);          // the slowest, not the last
+    assert(bc_max_pub_stage_ == BC_PUB_DATA);
+    assert(bc_max_pub_aux_ == BC_PUB_STACK);  // origin survived in aux
+
+    g_ms = 7400;
+    bc_pub_begin();           // blocked mid-publish after a fast one
+    g_reset_reason = ESP_RST_TASK_WDT;
+    bc_setup();
+    assert(count_logs("ERROR", "max_pub_ms=250") == 1);
+    bc_report_to_broker(true);
 
     printf("breadcrumbs oracle passed\n");
     return 0;
