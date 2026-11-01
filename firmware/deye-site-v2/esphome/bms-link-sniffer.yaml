@@ -65,6 +65,10 @@ wifi:
   # mains-powered (USB charger) instrumentation device: keep the radio
   # always on, same rationale as deye-bms-can
   power_save_mode: none
+  # review round 3: NEVER reboot on connectivity loss - a network or broker
+  # outage must not wipe the RAM incident ring or re-open the unmeasured DE
+  # reset window (the 15-minute default reboots the device)
+  reboot_timeout: 0s
   ap:
     ssid: "${device_name}-fallback"
     password: !secret captive_portal_password
@@ -78,6 +82,8 @@ mqtt:
   username: !secret mqtt_user
   password: !secret mqtt_password
   idf_send_async: true
+  # same no-reboot rule for broker loss; api: already carries 0s below
+  reboot_timeout: 0s
 
   birth_message:
     topic: ${device_name}/status
@@ -394,13 +400,24 @@ text_sensor:
     name: "ESPHome Version"
 
 button:
+  # review round 3: restart and dump keep their MQTT command topics by
+  # default - a retained PRESS would reboot the device on every broker
+  # reconnect (each reboot re-opens the unmeasured DE reset window; a
+  # boot loop can end in safe mode with GPIO21 unclaimed for minutes),
+  # and a press of Dump releases the incident freeze. Both are
+  # MQTT-stripped: operator reach is the HA ESPHome integration (native
+  # API) or the device web server (digest auth, LAN only).
   - platform: restart
     name: "Restart"
+    state_topic: null
+    command_topic: null
 
   - platform: template
     name: "Dump Anomaly Ring"
     icon: "mdi:math-log"
     entity_category: diagnostic
+    state_topic: null
+    command_topic: null
     on_press:
       - lambda: |-
           if (id(link_sniffer))

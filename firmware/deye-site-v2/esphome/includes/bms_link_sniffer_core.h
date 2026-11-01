@@ -46,7 +46,11 @@ static constexpr uint32_t kWatchdogTripMs   = 2000;  // over 624 & 1264 ms slots
 static constexpr int      kPackMuteSlots    = 3;     // unanswered consecutive polls
 static constexpr uint32_t kByteGapGarbleMs  = 100;   // silence inside a frame = garbled
 static constexpr size_t   kMaxFrameChars    = 600;   // A222 block responses ~590 + slack
-static constexpr size_t   kRingSlots        = 16;
+static constexpr size_t   kRingSlots        = 32;
+// incident-window release delay after a recovery event (review round 3:
+// a freeze must not outlive the incident - one month-1 mute must not eat
+// the month-3 lockup's capture)
+static constexpr uint32_t kRingReleaseDelayMs = 5000;
 static constexpr uint32_t kStatsWindowMs    = 60000;
 
 // The captured bare ack (RTN 00, empty INFO), interior without SOI/EOI.
@@ -90,6 +94,7 @@ enum class EventKind {
     WatchdogRecover,
     PackMute,         // pack hit kPackMuteSlots unanswered polls
     PackRecover,
+    RingReleased,     // incident window re-opened after recovery + delay (wrapper publishes)
 };
 
 struct LinkEvent {
@@ -180,6 +185,14 @@ public:
             garble(t_ms, frame_.size());
             in_frame_ = false;
         }
+        // incident window release: recovery re-opened the ring; after the
+        // delay the wrapper publishes the full arc (pre-incident context,
+        // the trigger, the post-recovery traffic). A new trip during the
+        // delay cancels this via freeze_ring().
+        if (release_pending_ && (int32_t)(t_ms - release_at_ms_) >= 0) {
+            release_pending_ = false;
+            push_event(EventKind::RingReleased, t_ms, 0, "incident window released");
+        }
         // slot watchdog
         if (!watchdog_tripped_ && has_requests_ &&
             t_ms - last_request_start_ms_ > kWatchdogTripMs) {
@@ -237,8 +250,14 @@ public:
     // every-couple-months lockup). While frozen, new entries do NOT
     // overwrite the pre-incident window; they are counted instead. The
     // Dump button (wrapper) publishes the frozen window and releases.
-    void freeze_ring() { ring_frozen_ = true; }
-    void resume_ring() { ring_frozen_ = false; }
+    void reopen_ring_after_incident_(uint32_t t_ms) {
+        ring_frozen_ = false;
+        release_pending_ = true;
+        release_at_ms_ = t_ms + kRingReleaseDelayMs;
+    }
+    void freeze_ring() { ring_frozen_ = true; release_pending_ = false; }
+    // operator override for the ring-dump button
+    void resume_ring() { ring_frozen_ = false; release_pending_ = false; }
     bool ring_frozen() const { return ring_frozen_; }
     uint32_t ring_dropped() const { return ring_dropped_; }
 
@@ -304,7 +323,7 @@ private:
         std::string info = raw.substr(12, (size_t)len);
 
         if (cid2 == "42" || cid2 == "44") {
-            on_request(t_ms, info);
+            on_request(t_ms, cid2, info);
             return;
         }
         if (cid2 == "00") {
@@ -319,7 +338,7 @@ private:
         ring_now(t_ms, raw.substr(0, kRingHexBudget));
     }
 
-    void on_request(uint32_t t_ms, const std::string& info) {
+    void on_request(uint32_t t_ms, const std::string& cid2, const std::string& info) {
         unsigned long pk;
         int pack = 0;
         if (info.size() >= 2 && parse_hex(info.substr(0, 2), pk) && pk <= 4) pack = (int)pk;
@@ -337,12 +356,13 @@ private:
         has_requests_ = true;
         if (watchdog_tripped_) {
             watchdog_tripped_ = false;
+            reopen_ring_after_incident_(t_ms);
             push_event(EventKind::WatchdogRecover, t_ms, pack, "cadence resumed");
         }
 
         // pairing: a new request closes the previous slot as unanswered
         if (open_req_.valid) close_open_slot_unanswered();
-        open_req_ = OpenReq{pack, t_ms, frame_end_t_ms_, true};
+        open_req_ = OpenReq{pack, cid2, t_ms, frame_end_t_ms_, true};
 
         if (pack >= 1 && pack <= 4) {
             PackStats& s = packs_[pack];
@@ -362,9 +382,11 @@ private:
             return;
         }
         int pack = open_req_.pack;
+        std::string pair_cid = open_req_.cid2;
         int latency = (int)(frame_start_t_ms_ - open_req_.req_end_ms);
         open_req_.valid = false;
         last_frame_end_ms_ = frame_end_t_ms_;
+        ring_now(frame_end_t_ms_, pair_cid + " p" + std::to_string(pack));  // compact normal-traffic context entry
         if (pack >= 1 && pack <= 4) {
             PackStats& s = packs_[pack];
             s.responses++;
@@ -373,6 +395,7 @@ private:
             s.last_response_ms = t_ms;
             if (s.muting) {
                 s.muting = false;
+                reopen_ring_after_incident_(t_ms);
                 push_event(EventKind::PackRecover, t_ms, pack, "pack answered");
             }
             s.responding = true;
@@ -392,6 +415,8 @@ private:
 
     // ---- helpers -------------------------------------------------------------
     void close_open_slot_unanswered() {
+        ring_now(last_request_start_ms_,
+                 open_req_.cid2 + " p" + std::to_string(open_req_.pack) + " -");  // unanswered poll close
         if (open_req_.pack >= 1 && open_req_.pack <= 4) {
             PackStats& s = packs_[open_req_.pack];
             if (s.unanswered >= kPackMuteSlots && !s.muting) {
@@ -468,8 +493,8 @@ public:
 private:
     static constexpr size_t kRingHexBudget = 240;
 
-    struct OpenReq { int pack; uint32_t start_ms; uint32_t req_end_ms; bool valid; };
-    OpenReq open_req_{0, 0, 0, false};
+    struct OpenReq { int pack; std::string cid2; uint32_t start_ms; uint32_t req_end_ms; bool valid; };
+    OpenReq open_req_{0, "", 0, 0, false};
 
     // scanner state
     bool        in_frame_ = false;
@@ -499,6 +524,8 @@ private:
     size_t      ring_head_ = 0;
     size_t      ring_count_ = 0;
     bool        ring_frozen_ = false;
+    bool        release_pending_ = false;
+    uint32_t    release_at_ms_ = 0;
     uint32_t    ring_dropped_ = 0;
     std::vector<GapSample> gap_ring_;
     size_t      gap_head_ = 0;

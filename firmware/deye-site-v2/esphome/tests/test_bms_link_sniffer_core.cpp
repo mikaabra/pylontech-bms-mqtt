@@ -53,6 +53,9 @@ static std::string poll_req(int pack, const char* cid2) {
     return "~" + b + rs485_calc_chksum(b) + "\r";
 }
 
+// ring release delay (mirrors kRingReleaseDelayMs in the core)
+static constexpr uint32_t kReleaseDelayTick() { return 5001; }
+
 static bool has_event(const std::vector<linksniff::LinkEvent>& ev, EventKind k,
                       int pack = -1) {
     for (const auto& e : ev)
@@ -332,10 +335,57 @@ static void test_ring_bounds() {
     }
 }
 
-// Incident capture: the ring freezes on the two events this device
-// exists to catch. Post-freeze anomalies must not overwrite the window;
-// the Dump button (core: resume_ring) releases it.
+// Incident capture, review round 3 contract: freeze on the trigger,
+// publish immediately; a recovery event re-opens recording right away and
+// publishes the full arc after a 5 s delay; a new trip during the release
+// window cancels it and starts a fresh capture. Normal pairs and
+// unanswered-poll closes are compact entries, so the frozen window carries
+// pre-incident context.
 static void test_incident_freeze() {
+    BmsLinkCore c;
+    uint32_t t = 1000;
+    send(c, poll_req(2, "42"), t);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
+    t += 624;
+    send(c, poll_req(2, "42"), t);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
+    std::string context = c.dump_bounded();
+    check(context.find("42 p2") != std::string::npos,
+          "normal pair recorded as a compact context entry");
+
+    t += 624;
+    uint32_t last = t;
+    c.tick(last + 2100);  // silence trips the watchdog -> freeze
+    check(c.watchdog_tripped(), "watchdog tripped");
+    check(c.ring_frozen(), "watchdog trip froze the ring");
+    std::string frozen = c.dump_bounded();
+    check(frozen.find("(watchdog)") != std::string::npos, "freeze marker is the newest entry");
+    check(frozen.find("42 p2") != std::string::npos, "pre-incident context preserved in the window");
+
+    // during the freeze: post-freeze anomalies counted, not recorded
+    send(c, std::string(REAL_WRITE_INSTACK) + "\r", last + 2500);
+    check(c.ring_dropped() == 1, "post-freeze anomaly counted as dropped");
+    check(c.dump_bounded() == frozen, "ring window stable under freeze");
+
+    // recovery re-opens recording immediately (new traffic lands in the arc)
+    uint32_t rec = last + 3000;
+    send(c, poll_req(2, "42"), rec);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", rec + 15);
+    check(!c.ring_frozen(), "recovery re-opened the ring");
+    auto ev = c.drain_events();
+    check(has_event(ev, EventKind::WatchdogRecover), "recovery event emitted");
+
+    // the release publish fires after the 5 s delay, carrying the arc
+    c.tick(rec + 15 + kReleaseDelayTick());
+    ev = c.drain_events();
+    check(has_event(ev, EventKind::RingReleased), "ring released after recovery + delay");
+    std::string arc = c.dump_bounded();
+    check(arc != frozen, "post-recovery traffic recorded into the arc");
+}
+
+// a fresh trip during the release window re-freezes and cancels the release
+// (the newest incident owns the capture)
+static void test_retrip_cancels_release() {
     BmsLinkCore c;
     uint32_t t = 1000;
     for (int i = 0; i < 3; i++) {
@@ -343,31 +393,19 @@ static void test_incident_freeze() {
         send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
         t += 624;
     }
-    uint32_t last = t - 624;
-    c.tick(last + 2100);  // bus silence trips the watchdog
-    check(c.watchdog_tripped(), "watchdog tripped");
-    check(c.ring_frozen(), "watchdog trip froze the ring");
-    std::string frozen = c.dump_bounded();
-    check(frozen.find("(watchdog)") != std::string::npos,
-          "freeze marker is the newest ring entry");
-    check(frozen.find("…") != std::string::npos || frozen.size() > 0,
-          "frozen window carries pre-incident context");
-
-    // post-freeze anomaly: counted, not recorded; window stays stable
-    send(c, std::string(REAL_WRITE_INSTACK) + "\r", last + 2500);
-    check(c.ring_dropped() == 1, "post-freeze anomaly counted as dropped");
-    check(c.dump_bounded() == frozen, "ring window stable under freeze");
-
-    // recovery does NOT auto-release; the operator does
-    send(c, poll_req(2, "42"), last + 3000);
-    check(c.ring_frozen(), "recovery keeps the freeze (operator releases)");
-
-    c.resume_ring();
-    check(!c.ring_frozen(), "resume releases the freeze");
-    send(c, std::string(REAL_WRITE_INSTACK) + "\r", last + 4000);
-    std::string resumed = c.dump_bounded();
-    check(resumed != frozen || c.ring_dropped() >= 1,
-          "post-resume anomaly recorded into the ring");
+    c.tick(t - 624 + 2100);   // watchdog trip -> freeze
+    check(c.ring_frozen(), "frozen on first trip");
+    uint32_t rec = t - 624 + 3000;
+    send(c, poll_req(2, "42"), rec);   // recovery re-opens
+    send(c, std::string(REAL_42_RESPONSE) + "\r", rec + 15);
+    check(!c.ring_frozen(), "re-opened by recovery");
+    c.tick(rec + 15 + 3000);  // still inside the 5 s release delay
+    // bus dies again: new trip cancels the release and re-freezes
+    c.tick(rec + 15 + 3000 + 2100);
+    check(c.watchdog_tripped(), "second trip");
+    check(c.ring_frozen(), "re-trip re-froze the ring");
+    auto ev = c.drain_events();
+    check(!has_event(ev, EventKind::RingReleased), "release canceled by the re-trip");
 }
 
 static void test_mute_freezes() {
@@ -383,6 +421,20 @@ static void test_mute_freezes() {
     send(c, poll_req(1, "42"), t);  // next request closes the muted slot
     check(c.ring_frozen(), "pack mute froze the ring");
     check(!c.pack(3).responding, "pack3 muted");
+    auto ev = c.drain_events();
+    check(has_event(ev, EventKind::PackMute), "PackMute event");
+    check(c.dump_bounded().find("42 p3 -") != std::string::npos,
+          "unanswered-poll closes recorded around the mute");
+
+    // pack answers again: ring re-opens, release publish follows
+    uint32_t t2 = t + 100;
+    send(c, poll_req(3, "42"), t2);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t2 + 15);
+    check(!c.ring_frozen(), "mute recovery re-opened the ring");
+    c.tick(t2 + 15 + kReleaseDelayTick());
+    ev = c.drain_events();
+    check(has_event(ev, EventKind::PackRecover), "PackRecover event");
+    check(has_event(ev, EventKind::RingReleased), "released after mute recovery + delay");
 }
 
 int main() {
@@ -402,6 +454,7 @@ int main() {
     test_ring_bounds();
     test_incident_freeze();
     test_mute_freezes();
+    test_retrip_cancels_release();
 
     if (failures == 0) {
         printf("test_bms_link_sniffer_core: ALL PASS\n");

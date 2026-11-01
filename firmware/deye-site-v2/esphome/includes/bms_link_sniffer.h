@@ -94,12 +94,14 @@ private:
             case linksniff::EventKind::WatchdogRecover: kind = "slot-watchdog-recover"; break;
             case linksniff::EventKind::PackMute:       kind = "pack-mute"; break;
             case linksniff::EventKind::PackRecover:    kind = "pack-recover"; break;
+            case linksniff::EventKind::RingReleased:
+                // incident window re-opened by recovery; the dump below
+                // publishes the full arc (pre-incident context, trigger,
+                // post-recovery traffic)
+                kind = "ring-released";
+                break;
         }
         if (!anomaly_like) return;
-        // anomalies ride the WARN log stream too (bms_link/logs on the
-        // broker) so months-unattended incidents reach the recorder via
-        // the Log Tail entity even if discovery or push entities glitch
-        ESP_LOGW("link", "%s", e.detail.c_str());
         char line[160];
         if (e.pack)
             snprintf(line, sizeof line, "[%lu.%03lu] pack %d %s: %s",
@@ -109,11 +111,18 @@ private:
             snprintf(line, sizeof line, "[%lu.%03lu] %s: %s",
                      (unsigned long)(e.t_ms / 1000), (unsigned long)(e.t_ms % 1000),
                      kind, e.detail.c_str());
+        // full formatted line to the WARN stream (bms_link/logs -> Link Log
+        // Tail), per review round 3: the pack number and kind, not a bare
+        // detail fragment
+        ESP_LOGW("link", "%s", line);
         last_anomaly_->publish_state(line);
         if (anomaly_dump_ && (e.kind == linksniff::EventKind::WatchdogTrip ||
-                              e.kind == linksniff::EventKind::PackMute)) {
-            // keep the pre-incident window intact; operator releases via
-            // the Dump button
+                              e.kind == linksniff::EventKind::PackMute ||
+                              e.kind == linksniff::EventKind::RingReleased)) {
+            // trip/mute: the freshly frozen window; release: the full arc -
+            // the core re-opened the ring at recovery, so post-recovery
+            // traffic is included; a re-trip cancels the release and the
+            // newest incident owns the capture
             anomaly_dump_->publish_state(core_.dump_bounded());
         }
     }
