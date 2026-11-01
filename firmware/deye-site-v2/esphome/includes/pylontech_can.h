@@ -3,6 +3,7 @@
 #include "mqtt_helpers.h"
 #include "hysteresis.h"
 #include "availability.h"
+#include "breadcrumbs.h"
 #include "pylontech_protocol.h"
 
 #ifdef USE_MQTT
@@ -20,6 +21,7 @@ public:
     }
 
     void handle_0x351(const std::vector<uint8_t>& x) {
+        bc_mark(BC_CAN_FRAME, 0x51);
         frame_count_++;
 
         if (x.size() < 8) { error_count_++; return; }
@@ -73,6 +75,7 @@ public:
     }
 
     void handle_0x355(const std::vector<uint8_t>& x) {
+        bc_mark(BC_CAN_FRAME, 0x55);
         frame_count_++;
 
         if (x.size() < 4) { error_count_++; return; }
@@ -108,6 +111,7 @@ public:
     }
 
     void handle_0x359(const std::vector<uint8_t>& x) {
+        bc_mark(BC_CAN_FRAME, 0x59);
         frame_count_++;
 
         if (x.size() < 8) { error_count_++; return; }
@@ -164,6 +168,7 @@ public:
     }
 
     void handle_0x35C(const std::vector<uint8_t>& x) {
+        bc_mark(BC_CAN_FRAME, 0x5C);
         frame_count_++;
 
         if (x.size() < 8) { error_count_++; return; }
@@ -189,6 +194,7 @@ public:
     }
 
     void handle_0x370(const std::vector<uint8_t>& x) {
+        bc_mark(BC_CAN_FRAME, 0x70);
         frame_count_++;
 
         if (x.size() < 8) { error_count_++; return; }
@@ -268,6 +274,7 @@ public:
     }
 
     void check_stale() {
+        bc_mark(BC_CHECK_STALE);
         uint32_t now = millis();
 
         if (!has_can_rx_) {
@@ -292,6 +299,7 @@ public:
     }
 
     void publish_diagnostics() {
+        bc_mark(BC_CAN_DIAG);
         char payload[16];
         uint32_t now = millis();
 

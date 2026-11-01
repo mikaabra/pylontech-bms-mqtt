@@ -23,12 +23,15 @@ esphome:
     - ../../shared/esphome/mqtt_helpers.h
     - ../../shared/esphome/hysteresis.h
     - ../../shared/esphome/availability.h
+    - ../../shared/esphome/breadcrumbs.h
     - includes/pylontech_protocol.h
     - includes/pylontech_can.h
     - includes/pylontech_rs485.h
   on_boot:
     priority: -100
     then:
+      - lambda: |-
+          bc_setup();
       - lambda: |-
           // text_sensor has update_interval: never; without this its state
           // stays blank until someone presses the toggle
@@ -208,6 +211,7 @@ interval:
             ((PylontechCAN*)id(pylontech_can))->on_mqtt_connect();
             ((PylontechRS485*)id(pylontech_rs485))->on_mqtt_connect();
           }
+          bc_report_to_broker(connected);
   - interval: 5s
     then:
       - lambda: |-

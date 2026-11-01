@@ -3,6 +3,7 @@
 #include "mqtt_helpers.h"
 #include "hysteresis.h"
 #include "availability.h"
+#include "breadcrumbs.h"
 #include "pylontech_protocol.h"
 
 #ifdef USE_MQTT
@@ -47,6 +48,8 @@ public:
 
     void tick() {
         uint32_t now = millis();
+        static const uint8_t phase_by_state[5] = {BC_IDLE, BC_TX_ANALOG, BC_WAIT_ANALOG, BC_TX_ALARM, BC_WAIT_ALARM};
+        bc_mark(phase_by_state[state_], current_batt_);
 
         switch (state_) {
         case 0: {
@@ -557,6 +560,7 @@ public:
     }
 
     void check_stale() {
+        bc_mark(BC_CHECK_STALE);
         uint32_t now = millis();
         if (!has_analog_rx_) {
             if (!availability_.stale) availability_.mark_stale(esphome::mqtt::global_mqtt_client);
@@ -594,6 +598,7 @@ public:
 
     void publish_discovery() {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
+        bc_mark(BC_PUB_DISC);
 
         char topic[160];
         char payload[768];
@@ -847,6 +852,7 @@ private:
 
     void publish_raw(const char* topic, const char* value) {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
+        bc_mark(BC_PUB_DATA);
         esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(value));
         raw_pacer_.pace();
     }
