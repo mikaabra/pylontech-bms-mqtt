@@ -104,9 +104,9 @@ public:
     float writes_sent() const { return (float)write_.tx_count(); }
     float write_collisions() const { return (float)write_.collision_count(); }
 
-    // Dump button: publish the ring and release a freeze. Auto-publish
-    // (in publish_event, below) never resumes - the operator decides
-    // when the incident window is no longer needed.
+    // Dump button: publish the ring and release a freeze. The core also
+    // releases automatically once every trigger has cleared (publish_event
+    // below); so this stays what it always was - the operator override.
     void publish_dump() {
         if (anomaly_dump_) anomaly_dump_->publish_state(core_.dump_bounded());
         core_.resume_ring();

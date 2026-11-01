@@ -402,6 +402,105 @@ static void test_cooldown_only_gate() {
     check(w.tx_count() == 2, "exactly two frames across the whole scenario");
 }
 
+// Round 5 must-fix oracle: latches idle for weeks flip the int32
+// ms-difference compares (~24.8-day wrap). The 10 ms tick must clear each
+// latch IN REAL TIME, so a far clock jump afterwards (ticks continue past
+// the cooldown first - a bare jump would never clear anything) sees clean
+// flags: a second press after ~30 days fires, and a stray bare ack lands
+// as an anomaly instead of feeding a ghost "value probably written".
+static void test_long_uptime_latches() {
+    BmsLinkCore c;
+    FakeBus bus;
+    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    c.set_ack_waiter(&w);
+    using S = WriteController::Status;
+
+    uint32_t t = 1000;
+    slot(c, t, 1);
+    check(w.request(0x01, 0x4C, 3420, 1040), "arm accepted");
+    w.tick(1180);   // TX
+    w.tick(1340);   // NoAck terminal
+    // device-time ticks past the cooldown horizon: latches clear by
+    // OBSERVED time passing, not by arithmetic
+    w.tick(4715);
+    w.tick(5210);   // > TX + 4 s: cooldown latch and late-ack window closed
+    send(c, std::string(REAL_ACK) + "\r", 5300);  // just past the window
+    auto ev = c.drain_events();
+    check(has_event(ev, EventKind::AnomalyAck), "bare ack past the listen window is an anomaly already");
+    check(w.status() == S::NoAck, "terminal state unchanged");
+
+    // jump ~30 days (inside the reviewer's 24.9-49 day wrap band) with the
+    // bus re-wired on device time afterwards
+    uint32_t t2 = 30u * 24u * 3600u * 1000u + 1000;
+    send(c, poll_req(3, "42"), t2);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t2 + 15);
+    send(c, std::string(REAL_ACK) + "\r", t2 + 500);  // stray ack, 30 days after our frame
+    ev = c.drain_events();
+    check(has_event(ev, EventKind::AnomalyAck),
+          "30-day-idle listen window does not swallow the stray ack");
+    check(w.status() == S::NoAck, "no late-ack state after long idle");
+    check(w.status_line().find("probably written") == std::string::npos,
+          "no ghost 'probably written' after long idle");
+    check(c.anomalies_total() >= 2, "both strays counted as anomalies");
+
+    // second press 30 days later: the cooldown latch cleared in real time,
+    // so this must FIRE (a stale int32 compare would wrap negative = hold)
+    check(w.request(0x03, 0x4C, 3420, t2 + 600), "press accepted 30 days later");
+    w.tick(t2 + 660);   // 160 ms after the last RX: window open
+    check(bus.tx_log.size() == 2, "press fires 30 days later - stale cooldown would hold it");
+    send(c, std::string(REAL_ACK) + "\r", t2 + 700);
+    check(w.status() == S::Acked, "post-jump operation completes normally");
+    check(w.tx_count() == 2, "two frames total across the month");
+}
+
+// Round 5 oracle gap (reviewer mutation): removing need_clean_slot_ = true
+// passed the whole oracle because the cooldown always covered for it.
+// Here the cooldown has ELAPSED, the silence window is open, the cadence is
+// fresh - but only unanswered polls have been seen since our TX. It must
+// hold; the first answered pair after the TX lets it fire.
+static void test_clean_pair_only_gate() {
+    BmsLinkCore c;
+    FakeBus bus;
+    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    c.set_ack_waiter(&w);
+
+    uint32_t t = 1000;
+    slot(c, t, 1);
+    check(w.request(0x01, 0x4C, 3420, 1040), "arm accepted");
+    w.tick(1180);   // TX
+    w.tick(1340);   // NoAck terminal
+    check(w.request(0x01, 0x4C, 3420, 1400), "second press accepted post-terminal");
+
+    // unanswered polls only (rotated across packs so no pack mutes), each
+    // followed by an open-window tick - a failed clean-pair latch is the
+    // ONLY gate that can hold the last ones
+    int packs[] = {1, 2, 3, 4, 1, 2};
+    uint32_t downs[] = {2000, 2624, 3248, 3872, 4496, 5120};
+    for (int i = 0; i < 6; i++) {
+        send(c, poll_req(packs[i], "42"), downs[i]);   // never answered
+        w.tick(downs[i] + 215);                        // window open
+        if (i == 5) {
+            // cooldown elapsed here (4155 ms since TX): clean-pair wait is
+            // the only gate left, and it MUST hold
+            check(bus.tx_log.size() == 1,
+                  "cooldown + cadence + window all satisfied: only unanswered polls since TX - HOLDS");
+        } else {
+            check(bus.tx_log.size() == 1, "no frame during the unanswered-poll phase");
+        }
+    }
+    check(w.status() == WriteController::Status::Armed, "still armed through the holds");
+
+    // the first ANSWERED pair after our TX clears the latch; next open
+    // window fires exactly once
+    send(c, poll_req(3, "42"), 5744);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", 5744 + 15);
+    w.tick(5960);   // window open (201 ms), clean pair now observed
+    check(bus.tx_log.size() == 2, "fires after the first clean pair");
+    w.tick(6115);
+    check(w.status() == WriteController::Status::NoAck, "terminal NoAck");
+    check(w.tx_count() == 2, "exactly two frames, both deliberate");
+}
+
 static void test_collision_detected() {
     BmsLinkCore c;
     FakeBus bus;
@@ -593,6 +692,8 @@ int main() {
     test_late_ack_reported();
     test_explicit_second_press();
     test_cooldown_only_gate();
+    test_long_uptime_latches();
+    test_clean_pair_only_gate();
     test_collision_detected();
     test_has_tx_reset_wordings();
     test_enable_off_aborts();

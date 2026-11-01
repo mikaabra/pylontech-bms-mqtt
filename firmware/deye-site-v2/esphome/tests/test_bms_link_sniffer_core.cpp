@@ -532,6 +532,51 @@ static void test_watchdog_clear_with_mute_holds() {
     check(has_event(ev, EventKind::RingReleased), "released after the last trigger cleared");
 }
 
+// Round 5 oracle gap (reviewer mutation): the watchdog clause in
+// any_incident_active() had no oracle. A muted pack answering LATE while
+// the watchdog is still tripped: the PackRecover event fires, but the
+// window must stay frozen until a request clears the watchdog too.
+static void test_late_answer_while_watchdog_tripped() {
+    BmsLinkCore c;
+    uint32_t t = 1000;
+    send(c, poll_req(3, "42"), t);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
+    t += 624;
+    for (int i = 0; i < 3; i++) {  // pack 3 goes mute
+        send(c, poll_req(3, "42"), t);
+        t += 624;
+    }
+    send(c, poll_req(1, "42"), t);  // closes pack 3's third slot: mute + freeze
+    t += 624;
+    send(c, poll_req(3, "42"), t);  // keep a pack-3 request OPEN (unanswered)
+    check(c.pack(3).muting, "pack3 muted");
+    check(c.ring_frozen(), "mute froze the ring");
+    std::string frozen = c.dump_bounded();
+    // silence: the watchdog trips ON TOP of the live mute
+    c.tick(t + 2100);
+    check(c.watchdog_tripped(), "watchdog tripped over the mute");
+    // pack 3 answers LATE - after the trip, to the still-open request:
+    // the recovery event fires, but the watchdog still holds the window
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t + 2200);
+    check(!c.pack(3).muting, "pack3 answered");
+    auto ev = c.drain_events();
+    check(has_event(ev, EventKind::PackRecover, 3), "PackRecover event emitted");
+    check(c.watchdog_tripped(), "watchdog STILL tripped - no request seen");
+    check(c.ring_frozen(), "window HELD: pack recovered but the watchdog is live");
+    c.tick(t + 2200 + kReleaseDelayTick() + 1000);
+    ev = c.drain_events();
+    check(!has_event(ev, EventKind::RingReleased), "no release while the watchdog holds");
+    check(c.dump_bounded() == frozen, "pre-incident context intact");
+    // a request returns: watchdog recovers, every trigger clear -> release
+    uint32_t t3 = t + 2600;
+    send(c, poll_req(1, "42"), t3);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t3 + 15);
+    check(!c.ring_frozen(), "all clear: ring re-opened");
+    c.tick(t3 + 15 + kReleaseDelayTick());
+    ev = c.drain_events();
+    check(has_event(ev, EventKind::RingReleased), "released once the watchdog cleared");
+}
+
 int main() {
     test_lenid4();
     test_real_frames_parse_clean();
@@ -551,6 +596,7 @@ int main() {
     test_mute_freezes();
     test_partial_release_two_mutes();
     test_watchdog_clear_with_mute_holds();
+    test_late_answer_while_watchdog_tripped();
     test_retrip_cancels_release();
 
     if (failures == 0) {

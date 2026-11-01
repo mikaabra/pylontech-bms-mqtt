@@ -348,7 +348,9 @@ public:
     // catch (slot-watchdog trip = master-side outage, pack mute = the
     // every-couple-months lockup). While frozen, new entries do NOT
     // overwrite the pre-incident window; they are counted instead. The
-    // Dump button (wrapper) publishes the frozen window and releases.
+    // window auto-releases once EVERY trigger has cleared (recovery
+    // re-opens recording, the publish follows after 5 s); the Dump button
+    // (wrapper) stays as the operator's manual release.
     void reopen_ring_after_incident_(uint32_t t_ms) {
         // round 4 (reviewer): a single recovery must not release the
         // window while another fault is still active - pack 1 answering
@@ -508,6 +510,7 @@ private:
         last_frame_end_ms_ = frame_end_t_ms_;
         ring_now(frame_end_t_ms_, pair_cid + " p" + std::to_string(pack));  // compact normal-traffic context entry
         last_pair_ms_ = frame_end_t_ms_;  // clean request/response pair completed
+        pairs_total_++;
         if (pack >= 1 && pack <= 4) {
             PackStats& s = packs_[pack];
             s.responses++;
@@ -601,6 +604,10 @@ public:
     uint32_t last_frame_end_ms() const { return last_frame_end_ms_; }
     uint32_t last_rx_ms() const { return last_rx_t_ms_; }
     uint32_t last_pair_ms() const { return last_pair_ms_; }
+    // completed request/response pairs since boot - a monotonic COUNT the
+    // write controller baselines its clean-slot wait on (round 5: no
+    // timestamp arithmetic, no millis wrap)
+    uint32_t pairs_total() const { return pairs_total_; }
 
 private:
     static constexpr size_t kRingHexBudget = 240;
@@ -628,6 +635,7 @@ private:
     uint32_t last_request_start_ms_ = 0;
     uint32_t last_frame_end_ms_ = 0;
     uint32_t last_pair_ms_ = 0;
+    uint32_t pairs_total_ = 0;
     uint32_t rate_anchor_ms_ = 0;
     uint32_t rate_anchor_total_ = 0;
     PackStats packs_[kNumPacks + 1];
@@ -712,6 +720,26 @@ public:
     }
 
     void tick(uint32_t t_ms) {
+        // Long-uptime hygiene (review round 5): this device stays up for
+        // months, and a timestamp that sits idle for weeks flips the int32
+        // ms-difference compares at the ~24.8-day wrap - a stale cooldown
+        // could block later presses and a stale listen window could swallow
+        // a stray bare ack and append a ghost "value probably written".
+        // This tick runs every 10 ms in EVERY state, so each latch is
+        // cleared here the moment it expires and the state machines below
+        // only ever test latches (or see intervals the 10 ms cadence keeps
+        // short):
+        //   - the write cooldown latch clears at kTxDueCooldownMs
+        //   - the late-ack listen window closes once it passes
+        //   - a completed pair AFTER our TX clears the clean-slot wait -
+        //     the baseline is core's pair COUNT, not a clock: a bus silent
+        //     for weeks moves no count, so it cannot wrap by construction
+        if (cooldown_active_ && (int32_t)(t_ms - last_tx_ms_) >= (int32_t)kTxDueCooldownMs)
+            cooldown_active_ = false;
+        if (late_ack_until_ms_ != 0 && (int32_t)(late_ack_until_ms_ - t_ms) <= 0)
+            late_ack_until_ms_ = 0;
+        if (need_clean_slot_ && core_.pairs_total() > clean_pair_baseline_)
+            need_clean_slot_ = false;
         switch (status_) {
             case Status::Armed:    tick_armed(t_ms); break;
             case Status::WaitAck:  tick_wait_ack(t_ms); break;
@@ -725,7 +753,7 @@ public:
             last_ack_latency_ms_ = (int)(t_ms - tx_started_ms_);
             line_ = "ack ok in " + std::to_string(last_ack_latency_ms_) +
                     " ms (bare RTN-00 ack, pack not identified: ack-level verification only)";
-            end_tx_op_(t_ms);
+            end_tx_op_();
         } else if (ack_listen_active_(t_ms)) {
             // report-only: the operation already ended; the status
             // unchanged, the straggler fact appended for the operator
@@ -755,15 +783,19 @@ private:
         line_ = "denied: " + why;
     }
 
-    // any TX of ours demands one clean observed pair before the next fire
-    void require_clean_(uint32_t t_ms) {
+    // any TX of ours demands one clean observed pair before the next fire.
+    // Round 5: the baseline is core's completed-pair COUNT, not a stored
+    // timestamp - "a pair completed after our TX" cannot wrap, and tick()
+    // clears the latch as soon as the count moves, so the armed gate never
+    // does 25-day-old clock arithmetic.
+    void require_clean_() {
         need_clean_slot_ = true;
-        failed_at_ms_ = t_ms;
+        clean_pair_baseline_ = core_.pairs_total();
     }
     // every TX-ending outcome also opens the late-ack listen window,
-    // bounded by the cooldown after our frame
-    void end_tx_op_(uint32_t t_ms) {
-        require_clean_(t_ms);
+    // bounded by the cooldown after our frame (tick() closes the latch)
+    void end_tx_op_() {
+        require_clean_();
         late_ack_until_ms_ = last_tx_ms_ + kTxDueCooldownMs;
     }
     bool ack_listen_active_(uint32_t now) const {
@@ -782,8 +814,6 @@ private:
             return;
         }
         if ((int32_t)(t_ms - armed_at_ms_) > (int32_t)kArmExpiryMs) {
-            // round 4: has_tx_ is always false in tick_armed (a successful
-            // TX moves the status to WaitAck) - the "after TX" branches were dead code
             status_ = Status::Expired;
             line_ = "expired: no safe window within " + std::to_string(kArmExpiryMs / 1000) +
                     " s (watchdog, cadence, clean-slot or silence waits); press Send again";
@@ -791,18 +821,12 @@ private:
         }
         if (core_.watchdog_tripped()) return;           // bus in unknown state: hold
         if (!core_.bus_established(t_ms)) return;       // no fresh poll cadence: hold
-        if (need_clean_slot_) {
-            if ((int32_t)(core_.last_pair_ms() - failed_at_ms_) > 0)
-                need_clean_slot_ = false;               // clean pair observed AFTER the TX/failure
-            else
-                return;
-        }
-        // round 4 must-fix: the cooldown is keyed on tx_count_ (never reset),
-        // not on has_tx_ (reset per operation by request()) - the per-op
-        // reset for the round-3 status fix silently disarmed this gate, so
-        // rapid repeat presses fired ~620 ms apart instead of 4 s apart.
-        // Flush failures count too: bytes may be on the wire either way.
-        if (tx_count_ > 0 && (int32_t)(t_ms - last_tx_ms_) < (int32_t)kTxDueCooldownMs) return;
+        if (need_clean_slot_) return;                   // no clean pair observed since our TX (latch: tick clears)
+        // cooldown across operations (rounds 4-5): a LATCH set at every
+        // TX attempt (flush failures included - bytes may be on the wire
+        // either way) and cleared by tick() 4 s later, so this gate never
+        // compares a weeks-idle timestamp
+        if (cooldown_active_) return;
         uint32_t since = core_.since_last_rx(t_ms);
         if (since < kGapConfirmMs || since > kGapMaxMs) return;  // land mid-idle, not at the next poll's edge
 
@@ -811,12 +835,13 @@ private:
         bool ok = tx_(frame, ctx_);
         has_tx_ = true;
         last_tx_ms_ = t_ms;
+        cooldown_active_ = true;  // round 5: latch, tick() clears it 4 s later
         tx_count_++;  // every TX attempt counts, flush failures included:
                       // bytes may be on the wire (round 3: never undercount)
         if (!ok) {
             status_ = Status::Aborted;
             line_ = "aborted: uart flush failed - bytes may be on the wire; result unknown";
-            end_tx_op_(t_ms);
+            end_tx_op_();
             return;
         }
         status_ = Status::WaitAck;
@@ -827,7 +852,7 @@ private:
         if (!enable_(ctx_)) {
             status_ = Status::Aborted;
             line_ = "sent; result unknown (aborted after TX - write enable switched off)";
-            end_tx_op_(t_ms);
+            end_tx_op_();
             return;
         }
         if ((int32_t)(t_ms - tx_started_ms_) < (int32_t)kAckDeadlineMs) return;
@@ -838,7 +863,7 @@ private:
         line_ = std::string(verdict) + " after the single frame; disarmed - result unknown"
                 " (the pack may still have taken the value). Listening for a late ack until the"
                 " cooldown passes; press Send for a new one-shot";
-        end_tx_op_(t_ms);
+        end_tx_op_();
     }
 
     static std::string hex2(uint8_t v) {
@@ -856,7 +881,8 @@ private:
     Status status_ = Status::Idle;
     bool has_tx_ = false;
     bool need_clean_slot_ = false;
-    uint32_t failed_at_ms_ = 0;
+    bool cooldown_active_ = false;       // round 5: latch, cleared by tick() at 4 s
+    uint32_t clean_pair_baseline_ = 0;  // round 5: pair-count baseline for the clean-slot wait
     uint32_t armed_at_ms_ = 0;
     uint32_t last_tx_ms_ = 0;
     uint32_t tx_started_ms_ = 0;
