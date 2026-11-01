@@ -1,0 +1,383 @@
+# ESPHome configuration for Waveshare ESP32-S3-RS485-CAN
+# bms-link-sniffer — passive listener on the BMS073 battery-battery Link bus
+# (issue #58; part 2, the guarded balance-voltage write client, is #59)
+#
+# Hardware: Waveshare ESP32-S3-RS485-CAN, second unit, clipped onto the
+# pack-to-pack RS485 chain of the 5-pack Richpower BMS073 stack.
+#   RS485: RX=GPIO18, 9600 baud (TX=GPIO17 and DE/RE=GPIO21 are unused here)
+#
+# RX-ONLY GUARANTEE (part 1): this yaml declares no tx_pin and no
+# flow_control_pin — ESPHome cannot key DE via the UART driver. DE/RE is
+# hardwired to GPIO21 on this board, so that pin is claimed by an internal
+# ALWAYS_OFF gpio switch holding it LOW: receive enabled, driver disabled.
+# Part 2 (#59) replaces the pin-holder with uart flow_control in its own
+# reviewed change; until then there is no write path anywhere in the tree.
+#
+# Discovery: native ESPHome MQTT (low-volume diagnostics, ~15 state topics
+# at 60 s). The hand-rolled budgeted discovery stream on deye-bms-can exists
+# for its ~300-site fleet; nothing here justifies that machinery. If
+# first-boot soak shows discovery gaps after reboots (the ESP32-S3/IDF
+# on_connect flakiness class), the fallback is deye's 3 s-interval debounced
+# republish pattern.
+
+substitutions:
+  device_name: bms-link-sniffer
+  friendly_name: "BMS Link Sniffer"
+  link_prefix: bms_link
+
+esphome:
+  name: ${device_name}
+  friendly_name: ${friendly_name}
+  min_version: "2026.9.1"
+  includes:
+    - includes/pylontech_protocol.h
+    - includes/bms_link_sniffer_core.h
+    - includes/bms_link_sniffer.h
+  on_boot:
+    priority: -100
+    then:
+      - lambda: |-
+          id(link_sniffer) = (void*) new BmsLinkSniffer(id(link_uart));
+          ((BmsLinkSniffer*)id(link_sniffer))->bind_entities(id(link_last_anomaly), id(link_anomaly_dump));
+
+esp32:
+  board: esp32-s3-devkitc-1
+  framework:
+    type: esp-idf
+
+logger:
+  level: DEBUG
+  initial_level: WARN
+  id: logger_level_global
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  # mains-powered (USB charger) instrumentation device: keep the radio
+  # always on, same rationale as deye-bms-can
+  power_save_mode: none
+  ap:
+    ssid: "${device_name}-fallback"
+    password: !secret captive_portal_password
+
+captive_portal:
+
+mqtt:
+  id: mqtt_client
+  broker: !secret mqtt_host
+  port: 1883
+  username: !secret mqtt_user
+  password: !secret mqtt_password
+  idf_send_async: true
+
+  birth_message:
+    topic: ${device_name}/status
+    payload: "online"
+    retain: true
+  will_message:
+    topic: ${device_name}/status
+    payload: "offline"
+    retain: true
+
+  # WARN+ log lines to the broker like deye-bms-can: the Link-bus capture
+  # must survive months unattended; nothing may depend on a connected laptop
+  log_topic:
+    topic: bms_link/logs
+    level: WARN
+    retain: false
+
+api:
+  reboot_timeout: 0s
+  encryption:
+    key: !secret ota_encryption_key
+
+ota:
+  - platform: esphome
+    encryption:
+      key: !secret ota_encryption_key
+
+web_server:
+  port: 80
+  auth:
+    username: !secret web_server_username
+    password: !secret web_server_password
+    type: digest
+  ota: false
+
+uart:
+  id: link_uart
+  # rx-only by design — see the header comment block. DE/RE (GPIO21) is
+  # held low by the internal switch below, never by the UART driver.
+  rx_pin: GPIO18
+  baud_rate: 9600
+  data_bits: 8
+  stop_bits: 1
+  parity: NONE
+  rx_buffer_size: 1024
+
+switch:
+  # Pin-holder only, hidden from HA (internal): DE/RE low = receiver on,
+  # driver off. Do not convert to a visible entity; part 2 swaps it for
+  # uart flow_control_pin in the same change that adds tx_pin.
+  - platform: gpio
+    pin: GPIO21
+    id: link_de_hold
+    internal: true
+    restore_mode: ALWAYS_OFF
+
+globals:
+  - id: link_sniffer
+    type: void*
+    initial_value: 'nullptr'
+
+interval:
+  - interval: 10ms
+    then:
+      - lambda: |-
+          if (id(link_sniffer))
+            ((BmsLinkSniffer*)id(link_sniffer))->tick();
+
+sensor:
+  - platform: wifi_signal
+    name: "WiFi Signal"
+    update_interval: 60s
+
+  - platform: uptime
+    name: "Uptime"
+
+  - platform: template
+    name: "Link Frames Total"
+    id: link_frames_total
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->frames_total();
+
+  - platform: template
+    name: "Link Frames per Second"
+    id: link_frames_rate
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 2
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->rate_per_s();
+
+  - platform: template
+    name: "Link Checksum Errors"
+    id: link_checksum_errors
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->checksum_errors();
+
+  - platform: template
+    name: "Link Anomalies Total"
+    id: link_anomalies_total
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->anomalies_total();
+
+  - platform: template
+    name: "Link Slot Cadence ms"
+    id: link_cadence_ms
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->cadence_ms();
+
+  - platform: template
+    name: "Link Idle Gap Min ms"
+    id: link_idle_gap_min
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->idle_gap_min_ms();
+
+  - platform: template
+    name: "Link Idle Gap Avg ms"
+    id: link_idle_gap_avg
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->idle_gap_avg_ms();
+
+  - platform: template
+    name: "Pack 1 Response Latency ms"
+    id: pack1_latency
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->pack_latency_ms(1);
+
+  - platform: template
+    name: "Pack 1 Last Response Age s"
+    id: pack1_age
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->pack_age_s(1);
+
+  - platform: template
+    name: "Pack 2 Response Latency ms"
+    id: pack2_latency
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->pack_latency_ms(2);
+
+  - platform: template
+    name: "Pack 2 Last Response Age s"
+    id: pack2_age
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->pack_age_s(2);
+
+  - platform: template
+    name: "Pack 3 Response Latency ms"
+    id: pack3_latency
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->pack_latency_ms(3);
+
+  - platform: template
+    name: "Pack 3 Last Response Age s"
+    id: pack3_age
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->pack_age_s(3);
+
+  - platform: template
+    name: "Pack 4 Response Latency ms"
+    id: pack4_latency
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->pack_latency_ms(4);
+
+  - platform: template
+    name: "Pack 4 Last Response Age s"
+    id: pack4_age
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->pack_age_s(4);
+
+  - platform: template
+    name: "Free Heap"
+    id: sensor_free_heap
+    unit_of_measurement: "bytes"
+    icon: "mdi:memory"
+    entity_category: diagnostic
+    update_interval: 60s
+    lambda: 'return heap_caps_get_free_size(MALLOC_CAP_INTERNAL);'
+
+binary_sensor:
+  - platform: template
+    name: "Link Slot Watchdog"
+    id: link_slot_watchdog
+    entity_category: diagnostic
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->watchdog();
+
+  - platform: template
+    name: "Pack 1 Responding"
+    id: pack1_responding
+    entity_category: diagnostic
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->pack_responding(1);
+
+  - platform: template
+    name: "Pack 2 Responding"
+    id: pack2_responding
+    entity_category: diagnostic
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->pack_responding(2);
+
+  - platform: template
+    name: "Pack 3 Responding"
+    id: pack3_responding
+    entity_category: diagnostic
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->pack_responding(3);
+
+  - platform: template
+    name: "Pack 4 Responding"
+    id: pack4_responding
+    entity_category: diagnostic
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->pack_responding(4);
+
+  - platform: template
+    name: "MQTT Connected"
+    id: mqtt_connected
+    icon: "mdi:cloud-check"
+    lambda: 'return id(mqtt_client).is_connected();'
+
+text_sensor:
+  - platform: template
+    name: "Link Last Anomaly"
+    id: link_last_anomaly
+    entity_category: diagnostic
+    # push-only: the wrapper publishes on anomaly events
+    update_interval: never
+
+  - platform: template
+    name: "Link Anomaly Dump"
+    id: link_anomaly_dump
+    entity_category: diagnostic
+    # push-only: the Dump Anomaly Ring button publishes on demand
+    update_interval: never
+
+  - platform: version
+    name: "ESPHome Version"
+
+button:
+  - platform: restart
+    name: "Restart"
+
+  - platform: template
+    name: "Dump Anomaly Ring"
+    icon: "mdi:math-log"
+    entity_category: diagnostic
+    on_press:
+      - lambda: |-
+          if (id(link_sniffer))
+            ((BmsLinkSniffer*)id(link_sniffer))->publish_dump();
