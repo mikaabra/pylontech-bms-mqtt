@@ -144,9 +144,10 @@ inline bool bc_build_report_(char *buf, size_t buf_size, bool routine) {
     return n >= 0 && (size_t) n < buf_size;
 }
 
-// Serial pass at boot: keep the snapshot pending so the post-discovery
-// broker pass can deliver it into the HA recorder; non-routine resets at
-// ERROR, routine resets at INFO so they stay distinguishable.
+// Serial pass at boot: keep the snapshot pending so the broker report pass
+// (first on the connected tick) can deliver it into the HA recorder;
+// non-routine resets at ERROR, routine resets at INFO so they stay
+// distinguishable.
 inline void bc_log_snapshot_serial_() {
     char buf[288];
     bool fit = bc_build_report_(buf, sizeof(buf), bc_reason_is_routine_());
