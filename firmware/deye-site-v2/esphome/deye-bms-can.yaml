@@ -204,6 +204,13 @@ interval:
               // but value updates lost during the outage must be re-sent.
               ((PylontechCAN*)id(pylontech_can))->on_short_reconnect();
               ((PylontechRS485*)id(pylontech_rs485))->on_short_reconnect();
+              // An in-flight discovery also rewinds: the drain task may have
+              // discarded up to 29 accepted-but-unsent messages during the
+              // gap, and resuming mid-cursor would leave permanent holes.
+              if (!id(discovery_published)) {
+                ((PylontechCAN*)id(pylontech_can))->restart_discovery();
+                ((PylontechRS485*)id(pylontech_rs485))->restart_discovery();
+              }
             }
             id(mqtt_was_connected) = true;
             id(mqtt_disconnect_count) = 0;

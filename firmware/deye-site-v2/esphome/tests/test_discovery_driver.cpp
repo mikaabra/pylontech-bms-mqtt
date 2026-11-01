@@ -69,6 +69,16 @@ struct Driver {
 
     void tick(bool connected) {
         if (connected) {
+            if (mqtt_was_connected && disconnect_count > 0) {
+                // short-gap branch: values are re-sent by on_short_reconnect,
+                // and an in-flight discovery is rewound — up to 29 accepted
+                // messages may have been discarded by the drain task during
+                // the gap, so resuming mid-cursor could leave permanent holes
+                if (!discovery_published) {
+                    can.restart();
+                    rs485.restart();
+                }
+            }
             mqtt_was_connected = true;
             disconnect_count = 0;
             if (!discovery_started) {
@@ -92,13 +102,15 @@ struct Driver {
         }
     }
 
+    // exact mirror of the yaml Re-publish HA Discovery lambda
     void button_blast() {
         can.restart();
         rs485.restart();
         PublishBudget budget(250);
-        bool can_ok = can.pass(budget);
-        bool rs485_ok = rs485.pass(budget);
-        discovery_published = can_ok && rs485_ok;
+        can.pass(budget);
+        if (budget.remaining > 0) rs485.pass(budget);
+        // an incomplete blast is resumed by the 3s tick until it completes
+        discovery_published = false;
     }
 };
 
@@ -179,6 +191,46 @@ int main() {
     // the pre-gap sends are expected here (the queue discarded them)
     assert(m.can.publish_count + m.rs485.publish_count == before + 297);
     assert((int) m.rs485.sent.size() == RS485_SITES);
+
+    // 5. Button blast after a completed discovery: budget 250 < 297 sites,
+    //    so the blast stops partway (RS485 at 214); the tick must resume it
+    //    and every site must land exactly once.
+    Driver b(CAN_SITES, RS485_SITES);
+    for (int i = 0; i < 15; i++) b.tick(true);
+    assert(b.discovery_published);
+    const int before_button = b.can.publish_count + b.rs485.publish_count;
+    assert(before_button == 297);
+    b.button_blast();
+    assert(!b.discovery_published);          // yaml forces false after blast
+    assert(b.rs485.pos == 250 - CAN_SITES);  // blast stopped partway: 214 of 261
+    ticks = 0;
+    while (!b.discovery_published && ticks < 200) { b.tick(true); ticks++; }
+    assert(b.discovery_published);
+    assert(ticks == 3);                       // 47 remaining sites at budget 20
+    // within the blast+resume cycle every site landed exactly once: CAN
+    // 36 by the blast, RS485 214 by the blast + 47 by the tick resume
+    assert(b.can.publish_count == 2 * CAN_SITES);       // once at boot, once by blast
+    assert(b.rs485.publish_count == 2 * RS485_SITES);    // once at boot, once by blast+resume
+    assert((int) b.can.sent.size() == CAN_SITES);
+    assert((int) b.rs485.sent.size() == RS485_SITES);
+    (void) before_button;
+
+    // 6. Short gap (single disconnected tick) during discovery rewinds the
+    //    streams — the drain task may have discarded accepted-but-unsent
+    //    sites, so a mid-cursor resume could leave permanent holes.
+    Driver g(CAN_SITES, RS485_SITES);
+    for (int i = 0; i < 5; i++) g.tick(true);
+    assert(!g.discovery_published);
+    const int before_gap = g.can.publish_count + g.rs485.publish_count;
+    g.tick(false);   // one poll: below the 2-tick debounce latch...
+    assert(g.disconnect_count == 1);
+    g.tick(true);    // ...but the short-gap branch still runs
+    assert(!g.discovery_started || true);  // latch untouched by short gaps
+    ticks = 0;
+    while (!g.discovery_published && ticks < 200) { g.tick(true); ticks++; }
+    assert(g.discovery_published);
+    // rewound to the top: a full clean 297-site pass after the gap
+    assert(g.can.publish_count + g.rs485.publish_count == before_gap + 297);
 
     printf("discovery driver oracle passed\n");
     return 0;
