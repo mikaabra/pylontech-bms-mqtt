@@ -225,7 +225,7 @@ int main() {
     g.tick(false);   // one poll: below the 2-tick debounce latch...
     assert(g.disconnect_count == 1);
     g.tick(true);    // ...but the short-gap branch still runs
-    assert(!g.discovery_started || true);  // latch untouched by short gaps
+    assert(g.discovery_started);           // short gaps never clear the latch
     ticks = 0;
     while (!g.discovery_published && ticks < 200) { g.tick(true); ticks++; }
     assert(g.discovery_published);
