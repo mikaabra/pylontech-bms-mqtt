@@ -25,8 +25,17 @@ struct PublishPacer {
             // yield() alone is a scheduler hint (vPortYield) and does not
             // guarantee a task-watchdog reset; App.feed_wdt() does
             App.feed_wdt();
-            yield();
         }
+        yield();
+#if defined(USE_MQTT_IDF_ENQUEUE)
+        // Async mode: the loop-side enqueue is a pool copy while a separate
+        // mqtt task performs the network write. Without pacing, a discovery
+        // burst (~130 messages) outruns the drain task and exhausts the
+        // ~29-slot pool even on a healthy LAN, so every burst drops. One
+        // millisecond per publish keeps the producer at or below the drain
+        // rate; checked enqueue results catch what the pacing misses.
+        delay(1);
+#endif
     }
 };
 

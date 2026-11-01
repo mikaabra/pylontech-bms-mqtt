@@ -577,7 +577,7 @@ public:
         }
     }
 
-    void on_mqtt_connect() {
+    bool on_mqtt_connect() {
         availability_.on_connect(esphome::mqtt::global_mqtt_client);
         reset_all_hysteresis();
         has_any_alarm_ = false;
@@ -587,7 +587,7 @@ public:
             publish_poll_alarm(batt, batteries_[batt].analog_poll_alarm);
             publish_alarm_poll_alarm(batt, batteries_[batt].alarm_poll_alarm);
         }
-        publish_discovery();
+        return publish_discovery();
     }
 
     // short MQTT gap (< 6s debounce): discovery survives (retained), but
@@ -601,9 +601,11 @@ public:
         }
     }
 
-    void publish_discovery() {
-        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
+    bool publish_discovery() {
+        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return false;
         bc_mark(BC_PUB_DISC);
+        BcScopeGuard bc_disc_guard_;
+        bool ok = true;
 
         char topic[160];
         char payload[768];
@@ -641,7 +643,7 @@ public:
                 snprintf(st, sizeof(st), "%s/stack/%s", mqtt_prefix_.c_str(), stack_sensors[i][0] + 6);
             snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", stack_sensors[i][0]);
             if (build_ha_sensor_payload(payload, sizeof(payload), stack_sensors[i][1], st, uid, stack_sensors[i][2], stack_sensors[i][3], stack_sensors[i][4], avail_str.c_str(), device_json.c_str())) {
-                esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                ok = esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true) && ok;
                 pacer.pace();
             }
         }
@@ -657,7 +659,7 @@ public:
             snprintf(st, sizeof(st), "%s/stack/%s", mqtt_prefix_.c_str(), stack_bin_names[i][0] + 6);
             snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", stack_bin_names[i][0]);
             if (build_ha_binary_sensor_payload(payload, sizeof(payload), stack_bin_names[i][1], st, uid, "", "mdi:scale-balance", "1", "0", avail_str.c_str(), device_json.c_str())) {
-                esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                ok = esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true) && ok;
                 pacer.pace();
             }
         }
@@ -700,7 +702,7 @@ public:
 
                 snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
                 if (build_ha_sensor_payload(payload, sizeof(payload), name, st, uid, batt_sensor_names[i][2], batt_sensor_names[i][3], batt_sensor_names[i][4], avail_str.c_str(), device_json.c_str())) {
-                    esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                    ok = esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true) && ok;
                     pacer.pace();
                 }
             }
@@ -722,7 +724,7 @@ public:
 
                 snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", obj_id);
                 if (build_ha_binary_sensor_payload(payload, sizeof(payload), name, st, uid, "", "", "1", "0", avail_str.c_str(), device_json.c_str())) {
-                    esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                    ok = esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true) && ok;
                     pacer.pace();
                 }
             }
@@ -736,7 +738,7 @@ public:
 
                 snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
                 if (build_ha_sensor_payload(payload, sizeof(payload), name, st, uid, "V", "voltage", "measurement", avail_str.c_str(), device_json.c_str(), "", "", R"("suggested_display_precision":3)")) {
-                    esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                    ok = esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true) && ok;
                     pacer.pace();
                 }
             }
@@ -750,7 +752,7 @@ public:
 
                 snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/%s/config", obj_id);
                 if (build_ha_sensor_payload(payload, sizeof(payload), name, st, uid, "°C", "temperature", "measurement", avail_str.c_str(), device_json.c_str())) {
-                    esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                    ok = esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true) && ok;
                     pacer.pace();
                 }
             }
@@ -764,7 +766,7 @@ public:
 
                 snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", obj_id);
                 if (build_ha_binary_sensor_payload(payload, sizeof(payload), name, st, uid, "problem", "mdi:lan-disconnect", "ON", "OFF", avail_str.c_str(), device_json.c_str())) {
-                    esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                    ok = esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true) && ok;
                     pacer.pace();
                 }
             }
@@ -778,7 +780,7 @@ public:
 
                 snprintf(topic, sizeof(topic), "homeassistant/binary_sensor/pylontech_rs485/%s/config", obj_id);
                 if (build_ha_binary_sensor_payload(payload, sizeof(payload), name, st, uid, "problem", "mdi:lan-disconnect", "ON", "OFF", avail_str.c_str(), device_json.c_str())) {
-                    esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                    ok = esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true) && ok;
                     pacer.pace();
                 }
             }
@@ -799,11 +801,11 @@ public:
             snprintf(topic, sizeof(topic), "homeassistant/sensor/pylontech_rs485/bms_log_tail/config");
             if (build_ha_sensor_payload(payload, sizeof(payload), "BMS Log Tail", st, uid, "", "", "",
                                         log_avail, device_json.c_str(), "mdi:text-box", "diagnostic")) {
-                esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true);
+                ok = esphome::mqtt::global_mqtt_client->publish(std::string(topic), std::string(payload), 0, true) && ok;
                 pacer.pace();
             }
         }
-        bc_mark(BC_IDLE);
+        return ok;
     }
 
 private:

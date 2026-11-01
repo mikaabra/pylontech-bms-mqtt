@@ -68,6 +68,12 @@ mqtt:
   port: 1883
   username: !secret mqtt_user
   password: !secret mqtt_password
+  # Async enqueue: the loop only copies into the 29-slot pool; a dedicated
+  # mqtt task performs the network writes. The loop can no longer block in
+  # esp_mqtt_client_publish (the 2026-11-01 watchdog hang class, issue #42).
+  # Dropped enqueues are detected via checked discovery results + hysteresis
+  # heartbeats.
+  idf_send_async: true
 
   birth_message:
     topic: ${device_name}/status
@@ -206,10 +212,12 @@ interval:
             }
           }
           if (!id(discovery_published) && connected) {
-            id(discovery_published) = true;
             ESP_LOGI("mqtt", "Publishing discovery...");
-            ((PylontechCAN*)id(pylontech_can))->on_mqtt_connect();
-            ((PylontechRS485*)id(pylontech_rs485))->on_mqtt_connect();
+            bool can_ok = ((PylontechCAN*)id(pylontech_can))->on_mqtt_connect();
+            bool rs485_ok = ((PylontechRS485*)id(pylontech_rs485))->on_mqtt_connect();
+            // a rejected enqueue (pool full) means an incomplete sweep:
+            // stay un-published so the next 3s pass re-drives discovery
+            id(discovery_published) = can_ok && rs485_ok;
           }
           bc_report_to_broker(connected);
   - interval: 5s
