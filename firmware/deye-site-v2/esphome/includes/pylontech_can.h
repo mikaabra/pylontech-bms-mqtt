@@ -401,6 +401,7 @@ public:
 
     void publish_discovery() {
         if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
+        bc_mark(BC_PUB_DISC);
 
         char topic[160];
         char payload[768];
