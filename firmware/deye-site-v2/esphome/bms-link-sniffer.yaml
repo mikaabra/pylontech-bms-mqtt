@@ -154,6 +154,10 @@ switch:
     entity_category: config
     optimistic: true
     restore_mode: ALWAYS_OFF
+    # auto-off after every completed operation (wrapper), so each write
+    # needs deliberate re-enabling - the per-write confirmation analog
+    state_topic: null
+    command_topic: null
 
 globals:
   - id: link_sniffer
@@ -444,21 +448,28 @@ number:
     initial_value: 3420
     optimistic: true
     restore_value: true
+    state_topic: null
+    command_topic: null
 
 select:
+  # "None" boots unselected and never restores - a target must be chosen
+  # for every session (review round 2: no silent Pack-01 fallback)
   - platform: template
     name: "Write Target Pack"
     id: link_target_pack
     icon: "mdi:battery"
     entity_category: config
     options:
+      - "None"
       - "Pack 01"
       - "Pack 02"
       - "Pack 03"
       - "Pack 04"
     optimistic: true
-    initial_option: "Pack 01"
-    restore_value: true
+    initial_option: "None"
+    restore_value: false
+    state_topic: null
+    command_topic: null
 
 button:
   # review round 3: restart and dump keep their MQTT command topics by
@@ -473,16 +484,19 @@ button:
     state_topic: null
     command_topic: null
 
+  # index 0 is "None" - the wrapper refuses a send without a selection
   - platform: template
     name: "Send Balance Voltage Write"
     icon: "mdi:pencil"
     entity_category: config
+    state_topic: null
+    command_topic: null
     on_press:
       - lambda: |-
           if (!id(link_sniffer)) return;
-          int pack = 1;
+          int pack = 0;
           if (id(link_target_pack).active_index().has_value())
-            pack = 1 + (int)*id(link_target_pack).active_index();
+            pack = (int)*id(link_target_pack).active_index();
           uint16_t mv = (uint16_t)id(link_balance_mv).state;
           ((BmsLinkSniffer*)id(link_sniffer))->arm_write((uint8_t)pack, mv);
 

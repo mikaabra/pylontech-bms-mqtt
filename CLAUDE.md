@@ -55,7 +55,7 @@ Desktop oracle tests run directly with clang, no esphome toolchain needed:
 
 ```bash
 cd firmware/deye-site-v2/esphome
-for t in test_breadcrumbs test_discovery_driver test_rs485_info_decode test_rs485_temp_decode test_bms_link_sniffer_core; do
+for t in test_breadcrumbs test_discovery_driver test_rs485_info_decode test_rs485_temp_decode test_bms_link_sniffer_core test_bms_link_sniffer_inject; do
   clang++ -std=gnu++20 -Wall -Wextra -I. -Itests/stubs -Iincludes tests/$t.cpp -o /tmp/$t && /tmp/$t
 done
 ```

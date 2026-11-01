@@ -39,12 +39,18 @@ public:
         write_enable_ = write_enable;
     }
 
-    // one-shot trigger from the Send Balance Voltage Write button
+    // one-shot trigger from the Send Balance Voltage Write button. Pack 0
+    // is the select's "None" (no restore, deliberate re-selection per
+    // review round 2) - refuse rather than fall back to a default target.
     void arm_write(uint8_t pack, uint16_t value_mv) {
         if (!write_status_) return;
         if (!write_enable_ || !write_enable_->state) {
             write_status_->publish_state(
                 "refused: Link Write Enable is off (turn it on deliberately)");
+            return;
+        }
+        if (pack == 0) {
+            write_status_->publish_state("refused: select a target pack first");
             return;
         }
         write_.request(pack, 0x4C, value_mv, esphome::millis());
@@ -67,6 +73,16 @@ public:
         if (write_status_ && write_.status_line() != last_write_line_) {
             last_write_line_ = write_.status_line();
             write_status_->publish_state(last_write_line_);
+        }
+        // review round 2: the enable gate auto-closes after every
+        // operation completes (ack, no-ack, collision, abort, expiry) -
+        // confirmation per press, matching the Mac tool's typed WRITE
+        auto prev = write_status_prev_;
+        write_status_prev_ = write_.status();
+        if (write_enable_ && write_enable_->state && prev != write_.status() &&
+            write_status_ && write_terminal(write_.status())) {
+            write_enable_->turn_off();
+            write_status_->publish_state(last_write_line_ + " [enable auto-off]");
         }
     }
 
@@ -174,15 +190,29 @@ private:
     esphome::text_sensor::TextSensor* write_status_ = nullptr;
     esphome::switch_::Switch* write_enable_ = nullptr;
     std::string last_write_line_;
+    linksniff::WriteController::Status write_status_prev_ = linksniff::WriteController::Status::Idle;
+
+    static bool write_terminal(linksniff::WriteController::Status s) {
+        using S = linksniff::WriteController::Status;
+        return s == S::Acked || s == S::NoAck || s == S::Collision ||
+               s == S::Aborted || s == S::Expired || s == S::Denied;
+    }
 
     static bool enable_cb_(void* ctx) {
         BmsLinkSniffer* self = (BmsLinkSniffer*)ctx;
         return self->write_enable_ && self->write_enable_->state;
     }
     static bool tx_cb_(const std::string& frame, void* ctx) {
+        // review round 2 nit: the flush result is checked - a timeout or
+        // driver failure after the write is a real, reported abort, not
+        // dead code. ASSUMED_SUCCESS (platform cannot confirm) also
+        // returns true; FAILED/TIMEOUT return false and the controller
+        // treats the attempt as sent-unknown (bytes may be on the wire).
         BmsLinkSniffer* self = (BmsLinkSniffer*)ctx;
-        for (char ch : frame) self->uart_->write_byte((uint8_t)ch);
-        self->uart_->flush();
-        return true;
+        self->uart_->write_array(reinterpret_cast<const uint8_t*>(frame.data()),
+                                 (size_t)frame.size());
+        auto r = self->uart_->flush();
+        return r == esphome::uart::UARTFlushResult::UART_FLUSH_RESULT_SUCCESS ||
+               r == esphome::uart::UARTFlushResult::UART_FLUSH_RESULT_ASSUMED_SUCCESS;
     }
 };

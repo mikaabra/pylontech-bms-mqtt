@@ -126,12 +126,23 @@ inline std::string build_write_frame(uint8_t pack, uint8_t param, uint16_t value
 }
 
 // Injection timing (docs/PROTOCOL_REFERENCE.md measured Link bus):
-//   624 ms slots leave ~436 ms idle; >=150 ms confirmed silence is the
-//   experimentally proven injection threshold; frame is ~26 chars (~27 ms
-//   at 9600); ack turnaround ~15 ms; give the ack up to ~130 ms after TX
-//   start (30 ms wire time + 100 ms slack).
+//   624 ms slots leave ~436 ms idle; the accepted-silence window sits at
+//   150..250 ms after the last RX - deep enough to be real idle, far
+//   enough from the master's next poll (~436 ms) that our ~27 ms frame +
+//   ack turnaround (~15 ms measured) land inside the same slot. The ack
+//   deadline (250 ms) is a first-pass verdict only: a late ack still
+//   disarms the retry before it fires. kTxDueCooldownMs rate-limits
+//   consecutive frames (flash endurance of these packs is unknown);
+//   kArmExpiryMs mirrors the Mac tool's give-up-when-no-gap behavior, so
+//   an armed write cannot out-wait an outage or hide inside watchdog
+//   holds. kCadenceFreshMs requires a live poll cadence - silence alone
+//   is not a window.
 static constexpr uint32_t kGapConfirmMs    = 150;
-static constexpr uint32_t kAckDeadlineMs   = 130;
+static constexpr uint32_t kGapMaxMs        = 250;
+static constexpr uint32_t kAckDeadlineMs   = 250;
+static constexpr int32_t  kCadenceFreshMs  = 1500;
+static constexpr uint32_t kArmExpiryMs    = 6000;
+static constexpr uint32_t kTxDueCooldownMs = 4000;
 static constexpr int      kMaxAttempts     = 2;  // initial + single retry on no-ack
 
 // The captured bare ack (RTN 00, empty INFO), interior without SOI/EOI.
@@ -358,6 +369,13 @@ public:
     void resume_ring() { ring_frozen_ = false; release_pending_ = false; }
     bool ring_frozen() const { return ring_frozen_; }
     uint32_t ring_dropped() const { return ring_dropped_; }
+
+    // Fire-discipline gate for the write client: a poll cadence seen
+    // recently. No request ever seen, or a stale cadence, both read as
+    // not-established - silence alone is not a window.
+    bool bus_established(uint32_t now) const {
+        return has_requests_ && (int32_t)(now - last_request_start_ms_) <= kCadenceFreshMs;
+    }
 
     // last anomaly line (Last Anomaly entity) — built on drain by the wrapper
     std::vector<LinkEvent> drain_events() {
@@ -627,17 +645,34 @@ private:
 };
 
 // ---------------------------------------------------------------------------
-// Guarded injection controller (issue #59). One-shot per request(): at most
-// initial + single retry; every state transition re-checks the enable gate
-// (mid-sequence switch-off aborts); fires only into a >=150 ms confirmed
-// silence; never while the slot watchdog is tripped; a failed attempt must
-// observe one clean request/response pair before the retry may fire.
-// Verification is ack-level ONLY: the bare ack does not identify the
-// responding pack - status lines say so and must never claim more.
+// Guarded injection controller, review round 2 (issue #59).
+//
+// The external reviewer's scenario harness found the round-1 controller
+// could out-wait an outage indefinitely, reset on a second press, flurry
+// frames under button spam, fire with no established cadence, and treat
+// a late ack as no-ack (duplicate-write risk). All blocked; every rule
+// below maps to one of those findings and to the Mac tool's posture
+// (docs/analysis/bms073-tools/rs485_write_param.py):
+//   - presses while an operation is in flight are IGNORED, never reset
+//   - every TX of ours demands one observed clean request/response pair
+//     before the next fire, across operations (sticky need_clean_slot_)
+//   - kTxDueCooldownMs rate-limits consecutive frames (flash endurance
+//     unknown - deliberate, documentable friction)
+//   - fire needs BOTH a fresh poll cadence (kCadenceFreshMs) and a
+//     150..250 ms window after the last RX (inside the measured ~436 ms
+//     idle, so our frame ends well before the master's next poll)
+//   - an armed write expires after kArmExpiryMs if no window appears,
+//     including while waiting out the watchdog or a clean slot
+//   - the ack is accepted late (after the deadline, before the retry
+//     fires): a straggler ack disarms the retry instead of risking a
+//     duplicate write - bounded by the expiry window
+//   - every TX-ending path sets the clean-pair requirement and every
+//     wording states that "no ack"/"collision"/"aborted after TX" never
+//     means the value was not written
 // ---------------------------------------------------------------------------
 class WriteController {
 public:
-    enum class Status { Idle, Denied, Armed, WaitAck, Acked, NoAck, Collision, Aborted };
+    enum class Status { Idle, Denied, Armed, WaitAck, Acked, NoAck, Collision, Aborted, Expired };
 
     using EnableFn = bool (*)(void*);
     using TxFn = bool (*)(const std::string&, void*);
@@ -645,15 +680,16 @@ public:
     WriteController(BmsLinkCore& core, EnableFn enable, TxFn tx, void* ctx)
         : core_(core), enable_(enable), tx_(tx), ctx_(ctx) {}
 
-    // explicit one-shot trigger (the Send button). Validation failures go to
-    // Denied with the reason; nothing is queued or auto-retried afterwards.
-    // Pressing Send while an operation is in flight RESETS it: the pending
-    // one-shot (including its ack wait) is abandoned and a fresh initial +
-    // retry budget starts. Any straggler ack from the abandoned window is no
-    // longer ack_expected(), so the core routes it to the unexpected-ack
-    // anomaly - visible in Last Anomaly, not silently consumed.
+    // explicit one-shot trigger (the Send button). A press while an
+    // operation is in flight is IGNORED - it never resets the pending
+    // one-shot's ack window. need_clean_slot_ is deliberately sticky: any
+    // TX of ours (this press or a previous one) demands one clean
+    // request/response pair before anything may fire next.
     bool request(uint8_t pack, uint8_t param, uint16_t value_mv, uint32_t now) {
-        (void)now;
+        if (status_ == Status::Armed || status_ == Status::WaitAck) {
+            line_ = "ignored: previous write still in flight";
+            return false;
+        }
         std::string why;
         if (!write_request_valid(pack, param, value_mv, &why)) {
             deny(why);
@@ -661,36 +697,44 @@ public:
         }
         pending_ = Pending{pack, param, value_mv};
         attempts_ = 0;
-        need_clean_slot_ = false;
+        armed_at_ms_ = now;
         status_ = Status::Armed;
         line_ = "armed: pack " + hex2(pack) + " param " + hex2(param) +
-                " (" + std::to_string(value_mv) + " mV), waiting for gap";
+                " (" + std::to_string(value_mv) + " mV); waiting for a window, expires in 6 s";
         return true;
     }
 
     void tick(uint32_t t_ms) {
         switch (status_) {
-            case Status::Armed:
-                tick_armed(t_ms);
-                break;
-            case Status::WaitAck:
-                tick_wait_ack(t_ms);
-                break;
-            default:
-                break;  // terminal states: Idle/Denied/Acked/NoAck/Collision/Aborted
+            case Status::Armed:    tick_armed(t_ms); break;
+            case Status::WaitAck:  tick_wait_ack(t_ms); break;
+            default: break;  // terminal: nothing fires without a fresh press
         }
     }
 
-    // core consults this on every bare ack; when true the ack is consumed
+    // The core consults this on every bare ack. True while a returned ack
+    // belongs to our write: in-window, or late (after the deadline, before
+    // the retry fires - a straggler ack disarms the retry instead of
+    // risking a duplicate write).
     void on_ack(uint32_t t_ms) {
-        if (status_ != Status::WaitAck) return;
-        status_ = Status::Acked;
-        last_ack_latency_ms_ = (int)(t_ms - tx_started_ms_);
-        line_ = "ack ok in " + std::to_string(last_ack_latency_ms_) +
-                " ms (bare RTN-00 ack, pack not identified: ack-level verification only)";
+        if (status_ == Status::WaitAck) {
+            status_ = Status::Acked;
+            last_ack_latency_ms_ = (int)(t_ms - tx_started_ms_);
+            line_ = "ack ok in " + std::to_string(last_ack_latency_ms_) +
+                    " ms (bare RTN-00 ack, pack not identified: ack-level verification only)";
+        } else if (status_ == Status::Armed && attempts_ >= 1) {
+            status_ = Status::Acked;
+            last_ack_latency_ms_ = (int)(t_ms - tx_started_ms_);
+            line_ = "late ack accepted " + std::to_string(t_ms - tx_started_ms_) +
+                    " ms after deadline: assuming it answers our last frame - no retry will fire"
+                    " (ack-level verification only, pack not identified)";
+        } else {
+            return;
+        }
+        require_clean_(t_ms);
     }
 
-    bool ack_expected() const { return status_ == Status::WaitAck; }
+    bool ack_expected() const { return status_ == Status::WaitAck || (status_ == Status::Armed && attempts_ >= 1); }
 
     Status status() const { return status_; }
     const std::string& status_line() const { return line_; }
@@ -705,33 +749,53 @@ private:
         line_ = "denied: " + why;
     }
 
+    // any TX of ours demands one clean observed pair before the next fire
+    void require_clean_(uint32_t t_ms) {
+        need_clean_slot_ = true;
+        failed_at_ms_ = t_ms;
+    }
+
     void tick_armed(uint32_t t_ms) {
         if (!enable_(ctx_)) {
             status_ = Status::Aborted;
-            line_ = "aborted: write enable switched off";
+            line_ = has_tx_ ? "sent; result unknown (aborted after TX - write enable switched off)"
+                           : "aborted: write enable switched off";
+            if (has_tx_) require_clean_(t_ms);
             return;
         }
-        if (core_.watchdog_tripped()) return;  // bus in unknown state: hold fire
-        if (need_clean_slot_) {
-            // subtract-compare keeps the ordering correct across the
-            // uint32 millis() wrap (49.7 days)
-            if ((int32_t)(core_.last_pair_ms() - failed_at_ms_) > 0) {
-                need_clean_slot_ = false;  // one clean slot observed since failure
-            } else {
-                return;
-            }
+        if ((int32_t)(t_ms - armed_at_ms_) > (int32_t)kArmExpiryMs) {
+            status_ = Status::Expired;
+            line_ = "expired: no safe window within " + std::to_string(kArmExpiryMs / 1000) +
+                    " s (watchdog, cadence, clean-slot or silence waits); press Send again" +
+                    (has_tx_ ? std::string(" - result unknown") : std::string());
+            if (has_tx_) require_clean_(t_ms);
+            return;
         }
-        if (core_.since_last_rx(t_ms) < kGapConfirmMs) return;
+        if (core_.watchdog_tripped()) return;           // bus in unknown state: hold
+        if (!core_.bus_established(t_ms)) return;       // no fresh poll cadence: hold
+        if (need_clean_slot_) {
+            if ((int32_t)(core_.last_pair_ms() - failed_at_ms_) > 0)
+                need_clean_slot_ = false;               // clean pair observed AFTER the TX/failure
+            else
+                return;
+        }
+        if (has_tx_ && (int32_t)(t_ms - last_tx_ms_) < (int32_t)kTxDueCooldownMs) return;
+        uint32_t since = core_.since_last_rx(t_ms);
+        if (since < kGapConfirmMs || since > kGapMaxMs) return;  // land mid-idle, not at the next poll's edge
+
         std::string frame = build_write_frame(pending_.pack, pending_.param, pending_.value_mv);
         tx_started_ms_ = t_ms;
-        if (!tx_(frame, ctx_)) {
+        bool ok = tx_(frame, ctx_);
+        has_tx_ = true;
+        last_tx_ms_ = t_ms;
+        armed_at_ms_ = t_ms;  // expiry clock restarts at each TX
+        if (!ok) {
             status_ = Status::Aborted;
-            line_ = "aborted: uart write failed";
+            line_ = "aborted: uart flush failed - bytes may be on the wire; result unknown";
+            require_clean_(t_ms);
             return;
         }
         tx_count_++;
-        tx_started_ms_ = t_ms;  // deadline check uses (t - tx_started) so the
-                                 // uint32 wrap cannot invert the comparison
         status_ = Status::WaitAck;
         line_ = "sent, waiting for ack (frame " + std::to_string(frame.size()) + " chars)";
     }
@@ -739,27 +803,26 @@ private:
     void tick_wait_ack(uint32_t t_ms) {
         if (!enable_(ctx_)) {
             status_ = Status::Aborted;
-            line_ = "aborted: write enable switched off";
+            line_ = "sent; result unknown (aborted after TX - write enable switched off)";
+            require_clean_(t_ms);
             return;
         }
-        if (t_ms - tx_started_ms_ < kAckDeadlineMs) return;
-        // deadline passed: any RX during our window that was not the ack is
-        // collision evidence (the master's poll arrived inside our slot)
-        bool traffic = core_.last_rx_ms() > tx_started_ms_;
+        if ((int32_t)(t_ms - tx_started_ms_) < (int32_t)kAckDeadlineMs) return;
+        bool traffic = (int32_t)(core_.last_rx_ms() - tx_started_ms_) > 0;
+        if (traffic) collision_count_++;
         attempts_++;
-        bool retry = attempts_ < kMaxAttempts;
         const char* verdict = traffic ? "collision" : "no ack";
-        if (retry) {
-            need_clean_slot_ = true;
-            failed_at_ms_ = t_ms;
+        if (attempts_ < kMaxAttempts) {
+            require_clean_(t_ms);
             status_ = Status::Armed;
             line_ = std::string(verdict) + " on attempt " + std::to_string(attempts_) +
-                    "; one clean slot required before the single retry";
+                    "; single retry after a clean slot and cooldown (result unknown so far)";
         } else {
-            if (traffic) collision_count_++;
             status_ = traffic ? Status::Collision : Status::NoAck;
             line_ = std::string(verdict) + " after " + std::to_string(attempts_) +
-                    " attempts; disarmed (press Send again for a new one-shot)";
+                    " attempts; disarmed - result unknown (the pack may still have taken the value);"
+                    " press Send again for a new one-shot";
+            require_clean_(t_ms);
         }
     }
 
@@ -774,11 +837,14 @@ private:
     TxFn tx_;
     void* ctx_;
 
-    Status status_ = Status::Idle;
     Pending pending_{0, 0, 0};
+    Status status_ = Status::Idle;
     int attempts_ = 0;
+    bool has_tx_ = false;
     bool need_clean_slot_ = false;
     uint32_t failed_at_ms_ = 0;
+    uint32_t armed_at_ms_ = 0;
+    uint32_t last_tx_ms_ = 0;
     uint32_t tx_started_ms_ = 0;
     uint32_t tx_count_ = 0;
     uint32_t collision_count_ = 0;
