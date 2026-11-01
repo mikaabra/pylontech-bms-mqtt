@@ -68,9 +68,9 @@ All v2 firmware uses the same pattern: YAML (component wiring) + C++ header hand
 ### Shared Headers (`firmware/shared/esphome/`)
 
 - **`hysteresis.h`** — `HysteresisFloat`/`Int`/`Bool`/`String` with threshold + heartbeat logic
-- **`availability.h`** — `AvailabilityTracker` for stale detection; stamps flip state only on accepted publishes, heartbeat republishes in both states (CAN 10s via diagnostics, RS485 30s repair pass)
+- **`availability.h`** — `AvailabilityTracker` for stale detection; `stale` (data-age truth) flips unconditionally while the retained online/offline stamp flips only on accepted publishes; heartbeat republishes in both states (CAN 10s via diagnostics, RS485 30s repair pass)
 - **`mqtt_helpers.h`** — `build_ha_sensor_payload()`, `build_ha_binary_sensor_payload()`, `PublishPacer` (1 ms producer pacing under async), `PublishBudget` (per-tick discovery budget)
-- **`breadcrumbs.h`** — RTC noinit forensic breadcrumbs: sticky stage marks survive task-watchdog resets, scope guards, boot snapshot with a checked retried direct publish (deye-bms-can only; host-tested)
+- **`breadcrumbs.h`** — RTC noinit forensic breadcrumbs: sticky stage marks survive task-watchdog resets, scope guards, boot snapshot with a checked retried report publish through the normal client path (deye-bms-can only; host-tested)
 - **`epever_handler.h`** — EPEVER MPPT handler (shared by both rack-solar variants)
 
 ### Deye Site v2 (`firmware/deye-site-v2/esphome/`)
@@ -104,7 +104,7 @@ id(handler) = (void*) new HandlerType();
 
 ### MQTT Discovery (deye-bms-can: async + budgeted)
 
-`deye-bms-can` runs with `idf_send_async: true` (issue #42 fix, merged 1919071): publishes enqueue into esphome's 30-slot pool and a dedicated mqtt task performs all network I/O — the 3s loop task never blocks on a publish, so task-watchdog resets from a stalled broker are gone (stall-tested 2026-11-01). Consequences: "accepted" means queued, not delivered; queued-but-unsent items are discarded on disconnect, so every new connection rewinds the discovery cursors.
+`deye-bms-can` runs with `idf_send_async: true` (issue #42 fix, merged 1919071): publishes enqueue into esphome's 29-usable-slot pool (MQTT_QUEUE_LENGTH=30) and a dedicated mqtt task performs all network I/O — the main loop task never blocks on a publish, so the mechanism behind the 2026-11-01 crash is closed (the device survived a 45 s stall test 2026-11-01; the original 02:00 trigger itself is still unidentified). Consequences: "accepted" means queued, not delivered; queued-but-unsent items are discarded on disconnect, so every new connection rewinds the discovery cursors.
 
 Discovery streams (CAN + RS485) are resumable: per-handler cursor + shared `PublishBudget(20)` per tick converges in ~15 ticks / 297 messages; a completed stream is a skip-all no-op. The 3s tick order is: crash report first → once-per-connection resets → budgeted discovery (incomplete passes log one WARN and resume next tick). `rack-solar-bridge` is still on the synchronous publish path — async adoption is issue #45.
 

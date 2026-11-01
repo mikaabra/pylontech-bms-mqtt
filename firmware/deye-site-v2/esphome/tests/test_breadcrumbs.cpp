@@ -63,17 +63,17 @@ int main() {
     // it; a later call with nothing pending is a no-op.
     assert(count_logs("ERROR") == 1);
     g_pub_accept = false;
-    assert(!bc_publish_report_direct());
+    assert(!bc_publish_report());
     assert(bc_have_snapshot_);
-    assert(!bc_publish_report_direct());  // rejection is retryable
+    assert(!bc_publish_report());  // rejection is retryable
     assert(bc_have_snapshot_);
     g_pub_accept = true;
-    assert(bc_publish_report_direct());
+    assert(bc_publish_report());
     assert(!bc_have_snapshot_);
     assert(g_pub_messages.size() == 1);
     assert(strstr(g_pub_messages[0].c_str(), "stage 4(tx_alarm)") != nullptr);
     assert(strstr(g_pub_messages[0].c_str(), "reset_reason=6") != nullptr);
-    assert(bc_publish_report_direct());  // nothing pending
+    assert(bc_publish_report());  // nothing pending
     assert(g_pub_messages.size() == 1);
 
     // Session 3: a publish that never returns. Entry mark stays sticky —
@@ -86,7 +86,7 @@ int main() {
     bc_setup();
     assert(count_logs("ERROR", "ended in stage 6(pub_data)") == 1);
     assert(bc_snap_stage_ms_ == 3000);
-    assert(bc_publish_report_direct());
+    assert(bc_publish_report());
     assert(g_pub_messages.size() == 2);
     assert(strstr(g_pub_messages[1].c_str(), "pub_data") != nullptr);
 
@@ -98,7 +98,7 @@ int main() {
     bc_setup();
     assert(count_logs("INFO", "routine reset") == 1);
     assert(bc_have_snapshot_);
-    assert(bc_publish_report_direct());
+    assert(bc_publish_report());
     assert(g_pub_messages.size() == 3);
     assert(strstr(g_pub_messages[2].c_str(), "routine reset, not a crash") != nullptr);
     assert(count_logs("ERROR", "routine reset") == 0);
@@ -135,7 +135,7 @@ int main() {
     }
     assert(count_logs("ERROR", "ended in stage 5(wait_alarm)") == 1);
     assert(bc_snap_stage_ms_ == 6010);  // written at mark time, not hang time
-    assert(bc_publish_report_direct());
+    assert(bc_publish_report());
     assert(g_pub_messages.size() == 4);
 
     // Guard clears the section origin: a publish from an unmarked caller
@@ -190,7 +190,7 @@ int main() {
     g_reset_reason = ESP_RST_TASK_WDT;
     bc_setup();
     assert(count_logs("ERROR", "max_pub_ms=250") == 1);
-    assert(bc_publish_report_direct());
+    assert(bc_publish_report());
     assert(msgs_containing("max_pub_ms=250") == 1);
 
     printf("breadcrumbs oracle passed\n");

@@ -61,8 +61,8 @@ inline uint8_t bc_section_ = 0;
 
 // RAM snapshot of the previous session, taken at boot before the live record
 // is reset; the broker pass reports the snapshot, not the overwritten live
-// values; the snapshot stays pending until the direct post-discovery
-// publish is accepted.
+// values; the snapshot stays pending until the report publish is accepted
+// (it goes first on the connected tick, before budgeted discovery).
 inline bool bc_have_snapshot_ = false;
 inline uint8_t bc_snap_stage_ = BC_NONE;
 inline uint8_t bc_snap_aux_ = 0;
@@ -123,9 +123,9 @@ inline bool bc_reason_is_routine_() {
 }
 
 // Per-boot: build the snapshot report once. Shared by the serial pass at
-// boot (ESP_LOG* below) and the direct broker publish after discovery
-// completes. Returns false only if the format outgrew the buffer — callers
-// must not publish a truncated report.
+// boot (ESP_LOG* below) and the broker report publish, which runs first on
+// each connected tick. Returns false only if the format outgrew the buffer —
+// callers must not publish a truncated report.
 inline bool bc_build_report_(char *buf, size_t buf_size, bool routine) {
     const char *names[] = {"none", "idle", "tx_analog", "wait_analog",
                            "tx_alarm", "wait_alarm", "pub_data", "pub_stack",
@@ -144,9 +144,10 @@ inline bool bc_build_report_(char *buf, size_t buf_size, bool routine) {
     return n >= 0 && (size_t) n < buf_size;
 }
 
-// Serial pass at boot: keep the snapshot pending so the post-discovery
-// broker pass can deliver it into the HA recorder; non-routine resets at
-// ERROR, routine resets at INFO so they stay distinguishable.
+// Serial pass at boot: keep the snapshot pending so the broker report pass
+// (first on the connected tick) can deliver it into the HA recorder;
+// non-routine resets at ERROR, routine resets at INFO so they stay
+// distinguishable.
 inline void bc_log_snapshot_serial_() {
     char buf[288];
     bool fit = bc_build_report_(buf, sizeof(buf), bc_reason_is_routine_());
@@ -205,12 +206,14 @@ inline void bc_setup() {
     bc_log_snapshot_serial_();
 }
 
-// Call from the 3s interval AFTER discovery has completed. Publishing the
-// report straight to the log-tail topic (not through the logger, which has
-// no retry) is checked: the snapshot stays pending until the publish is
-// accepted into the queue, so a crash record cannot be lost to a full pool
-// at the worst moment. Rides with the Log Tail entity into the recorder.
-inline bool bc_publish_report_direct() {
+// Call from the 3s interval, FIRST on each connected tick (before budgeted
+// discovery can fill the pool). Publishing to the log-tail topic through the
+// normal MQTT client path (not the logger, which has no retry) is checked:
+// under idf_send_async this enqueues rather than sends, and the snapshot
+// stays pending until the publish is accepted into the queue, so a crash
+// record cannot be lost to a full pool at the worst moment. Rides with the
+// Log Tail entity into the recorder.
+inline bool bc_publish_report() {
     if (!bc_have_snapshot_) return true;  // nothing pending
     if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return false;
     char buf[288];

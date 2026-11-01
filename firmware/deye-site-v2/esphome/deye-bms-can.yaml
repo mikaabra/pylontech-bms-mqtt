@@ -218,7 +218,7 @@ interval:
             // discovery no longer floods the pool, and a crash loop shorter
             // than discovery convergence still gets its report out. A
             // rejected publish stays pending; every connected tick retries it.
-            bc_publish_report_direct();
+            bc_publish_report();
             if (!id(discovery_started)) {
               id(discovery_started) = true;
               ESP_LOGI("mqtt", "Publishing discovery...");
