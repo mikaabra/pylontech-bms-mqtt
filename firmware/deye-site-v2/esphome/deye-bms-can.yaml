@@ -75,6 +75,14 @@ mqtt:
     payload: "offline"
     retain: true
 
+  # WARN+ log lines → broker; the "BMS Log Tail" HA entity (discovered in
+  # pylontech_rs485.h) records them in the always-on HA database. Overnight
+  # capture can't depend on a connected log client — laptops sleep.
+  log_topic:
+    topic: deye_bms/logs
+    level: WARN
+    retain: false
+
   discovery: false
   # on_connect trigger doesn't fire reliably on this ESP32-S3 + ESP-IDF build.
   # Discovery publishing is handled by the 3s interval fallback below, which
