@@ -260,7 +260,7 @@ interval:
       - lambda: |-
           if (!id(pylontech_rs485)) return;
           ((PylontechRS485*)id(pylontech_rs485))->tick();
-  - interval: 30s
+  - interval: 10s
     then:
       - lambda: |-
           if (!id(pylontech_rs485)) return;
@@ -314,7 +314,6 @@ sensor:
     lambda: |-
       if (!id(pylontech_rs485)) return {};
       return (float) ((PylontechRS485*)id(pylontech_rs485))->get_max_pass_ms();
-
 text_sensor:
   - platform: template
     name: "Debug Logging Level"
