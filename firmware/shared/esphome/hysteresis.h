@@ -34,10 +34,48 @@ inline uint32_t safe_elapsed(uint32_t now, uint32_t last) {
     return now - last;
 }
 
+// Fixed-slot schedule shared by every hysteresis type (#53): occurrence-
+// indexed periodic re-send times assigned once, held once.
+struct SlotSchedule {
+    uint32_t origin_ = 0, phase_ = 0, period_ = 0;
+    uint32_t last_occurrence_ = 0;
+
+    bool assigned() const { return period_ != 0; }
+
+    void assign(uint32_t now_ms, uint32_t phase_ms, uint32_t period_ms) {
+        origin_ = now_ms;
+        phase_ = phase_ms;
+        period_ = period_ms;
+        last_occurrence_ = 0xFFFFFFFF;   // no occurrence consumed yet
+    }
+
+    // occurrence-indexed: the k-th slot occurrence happens at
+    // origin + phase + k*period; fire on the FIRST SAMPLE at or
+    // after an unconsumed occurrence. Position-within-window
+    // comparison (pos >= phase) is WRONG under sampling: a 10 s
+    // pass grid leaves the last sampling gap of every window
+    // unreachable, killing every instance slotted there.
+    bool due(uint32_t now) const {
+        if (now - origin_ < phase_) return false;   // before first occurrence
+        uint32_t occ = (now - (origin_ + phase_)) / period_;
+        return (uint32_t) (occ - last_occurrence_) >= 1u;
+    }
+
+    // consume the LATEST occurrence when the commit landed at or
+    // after it — a change before the occurrence leaves it to fire at
+    // its time (idempotent re-send); nothing ever moves
+    void mark_fired(uint32_t now) {
+        if (!period_) return;
+        if (now - origin_ < phase_) return;
+        uint32_t occ = (now - (origin_ + phase_)) / period_;
+        if ((uint32_t) (occ - last_occurrence_) >= 1u) last_occurrence_ = occ;
+    }
+};
+
 inline bool check_threshold_float(float new_val, float& last_val, uint32_t& last_publish,
                                    float threshold,
                                    float min_val = -INFINITY, float max_val = INFINITY,
-                                   uint32_t heartbeat_ms = 60000) {
+                                   float heartbeat_ms = 60000) {
     if (std::isnan(new_val) || !std::isfinite(new_val)) return false;
     if (new_val < min_val || new_val > max_val) return false;
 
@@ -116,8 +154,9 @@ struct HysteresisFloat {
     uint32_t last_publish = 0;
     bool first = true;
     float pending_val_ = NAN;
-    uint32_t slot_origin_ = 0, slot_phase_ = 0, slot_period_ = 0;
-    uint32_t slot_last_occurrence_ = 0;
+    SlotSchedule slot_;
+
+    bool slot_assigned() const { return slot_.assigned(); }
 
     // would-publish decision without side effects; pairs with commit()
     bool decide(float new_val, float threshold, float min_val = -INFINITY, float max_val = INFINITY,
@@ -125,10 +164,10 @@ struct HysteresisFloat {
         if (std::isnan(new_val) || !std::isfinite(new_val)) return false;
         if (new_val < min_val || new_val > max_val) return false;
         uint32_t now = millis();
-        if (slot_period_) {
+        if (slot_.assigned()) {
             // fixed-slot heartbeat: once per period at the window position,
             // independent of any publish/commit/outage timing
-            if (slot_due_(now)) {
+            if (slot_.due(now)) {
                 pending_val_ = new_val;
                 return true;
             }
@@ -159,38 +198,13 @@ struct HysteresisFloat {
         last_val = pending_val_;
         last_publish = millis();
         first = false;
-        slot_mark_fired_(millis());
+        slot_.mark_fired(millis());
     }
 
     // #53 fixed slot: window position assigned ONCE; refires the value at
     // that position every period_ms, immune to commit timing and outages
     void assign_slot(uint32_t now_ms, uint32_t phase_ms, uint32_t period_ms) {
-        slot_origin_ = now_ms;
-        slot_phase_ = phase_ms;
-        slot_period_ = period_ms;
-        slot_last_occurrence_ = 0xFFFFFFFF;   // no occurrence consumed yet
-    }
-
-    bool slot_due_(uint32_t now) const {
-        // occurrence-indexed: the k-th slot occurrence happens at
-        // origin + phase + k*period; fire on the FIRST SAMPLE at or
-        // after an unconsumed occurrence. Position-within-window
-        // comparison (pos >= phase) is WRONG under sampling: a 10 s
-        // pass grid leaves the last sampling gap of every window
-        // unreachable, killing every instance slotted there.
-        if (now - slot_origin_ < slot_phase_) return false;   // before first occurrence
-        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
-        return (uint32_t) (occ - slot_last_occurrence_) >= 1u;
-    }
-
-    void slot_mark_fired_(uint32_t now) {
-        if (!slot_period_) return;
-        // consume the LATEST occurrence when the commit landed at or
-        // after it — a change before the occurrence leaves it to fire at
-        // its time (idempotent re-send); nothing ever moves
-        if (now - slot_origin_ < slot_phase_) return;
-        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
-        if ((uint32_t) (occ - slot_last_occurrence_) >= 1u) slot_last_occurrence_ = occ;
+        slot_.assign(now_ms, phase_ms, period_ms);
     }
 
     // legacy decide+assume-success; kept for consumers not yet on
@@ -216,15 +230,16 @@ struct HysteresisInt {
     uint32_t last_publish = 0;
     bool first = true;
     int pending_val_ = -2147483647;
-    uint32_t slot_origin_ = 0, slot_phase_ = 0, slot_period_ = 0;
-    uint32_t slot_last_occurrence_ = 0;
+    SlotSchedule slot_;
+
+    bool slot_assigned() const { return slot_.assigned(); }
 
     bool decide(int new_val, int threshold = 1, int min_val = -2147483647, int max_val = 2147483647,
-               uint32_t heartbeat_ms = 60000) {
+                uint32_t heartbeat_ms = 60000) {
         if (new_val < min_val || new_val > max_val) return false;
         uint32_t now = millis();
-        if (slot_period_) {
-            if (slot_due_(now)) {
+        if (slot_.assigned()) {
+            if (slot_.due(now)) {
                 pending_val_ = new_val;
                 return true;
             }
@@ -254,33 +269,11 @@ struct HysteresisInt {
         last_val = pending_val_;
         last_publish = millis();
         first = false;
-        slot_mark_fired_(millis());
+        slot_.mark_fired(millis());
     }
 
     void assign_slot(uint32_t now_ms, uint32_t phase_ms, uint32_t period_ms) {
-        slot_origin_ = now_ms;
-        slot_phase_ = phase_ms;
-        slot_period_ = period_ms;
-        slot_last_occurrence_ = 0xFFFFFFFF;   // no occurrence consumed yet
-    }
-
-    bool slot_due_(uint32_t now) const {
-        // occurrence-indexed: the k-th slot occurrence happens at
-        // origin + phase + k*period; fire on the FIRST SAMPLE at or
-        // after an unconsumed occurrence. Position-within-window
-        // comparison (pos >= phase) is WRONG under sampling: a 10 s
-        // pass grid leaves the last sampling gap of every window
-        // unreachable, killing every instance slotted there.
-        if (now - slot_origin_ < slot_phase_) return false;   // before first occurrence
-        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
-        return (uint32_t) (occ - slot_last_occurrence_) >= 1u;
-    }
-
-    void slot_mark_fired_(uint32_t now) {
-        if (!slot_period_) return;
-        if (now - slot_origin_ < slot_phase_) return;
-        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
-        if ((uint32_t) (occ - slot_last_occurrence_) >= 1u) slot_last_occurrence_ = occ;
+        slot_.assign(now_ms, phase_ms, period_ms);
     }
 
     bool check(int new_val, int threshold = 1, int min_val = -2147483647, int max_val = 2147483647,
@@ -315,12 +308,13 @@ struct HysteresisBool {
     bool first = true;
     uint32_t last_publish = 0;
     bool pending_val_ = false;
-    uint32_t slot_origin_ = 0, slot_phase_ = 0, slot_period_ = 0;
-    uint32_t slot_last_occurrence_ = 0;
+    SlotSchedule slot_;
+
+    bool slot_assigned() const { return slot_.assigned(); }
 
     bool decide(bool new_val, uint32_t heartbeat_ms = 0) {
-        if (slot_period_) {
-            if (slot_due_(millis())) {
+        if (slot_.assigned()) {
+            if (slot_.due(millis())) {
                 pending_val_ = new_val;
                 return true;
             }
@@ -341,33 +335,11 @@ struct HysteresisBool {
         last_val = pending_val_;
         last_publish = millis();
         first = false;
-        slot_mark_fired_(millis());
+        slot_.mark_fired(millis());
     }
 
     void assign_slot(uint32_t now_ms, uint32_t phase_ms, uint32_t period_ms) {
-        slot_origin_ = now_ms;
-        slot_phase_ = phase_ms;
-        slot_period_ = period_ms;
-        slot_last_occurrence_ = 0xFFFFFFFF;   // no occurrence consumed yet
-    }
-
-    bool slot_due_(uint32_t now) const {
-        // occurrence-indexed: the k-th slot occurrence happens at
-        // origin + phase + k*period; fire on the FIRST SAMPLE at or
-        // after an unconsumed occurrence. Position-within-window
-        // comparison (pos >= phase) is WRONG under sampling: a 10 s
-        // pass grid leaves the last sampling gap of every window
-        // unreachable, killing every instance slotted there.
-        if (now - slot_origin_ < slot_phase_) return false;   // before first occurrence
-        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
-        return (uint32_t) (occ - slot_last_occurrence_) >= 1u;
-    }
-
-    void slot_mark_fired_(uint32_t now) {
-        if (!slot_period_) return;
-        if (now - slot_origin_ < slot_phase_) return;
-        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
-        if ((uint32_t) (occ - slot_last_occurrence_) >= 1u) slot_last_occurrence_ = occ;
+        slot_.assign(now_ms, phase_ms, period_ms);
     }
 
     bool check(bool new_val) {
@@ -388,12 +360,13 @@ struct HysteresisString {
     bool first = true;
     uint32_t last_publish = 0;
     std::string pending_val_;
-    uint32_t slot_origin_ = 0, slot_phase_ = 0, slot_period_ = 0;
-    uint32_t slot_last_occurrence_ = 0;
+    SlotSchedule slot_;
+
+    bool slot_assigned() const { return slot_.assigned(); }
 
     bool decide(const std::string& new_val, uint32_t heartbeat_ms = 0) {
-        if (slot_period_) {
-            if (slot_due_(millis())) {
+        if (slot_.assigned()) {
+            if (slot_.due(millis())) {
                 pending_val_ = new_val;
                 return true;
             }
@@ -414,33 +387,11 @@ struct HysteresisString {
         last_val = pending_val_;
         last_publish = millis();
         first = false;
-        slot_mark_fired_(millis());
+        slot_.mark_fired(millis());
     }
 
     void assign_slot(uint32_t now_ms, uint32_t phase_ms, uint32_t period_ms) {
-        slot_origin_ = now_ms;
-        slot_phase_ = phase_ms;
-        slot_period_ = period_ms;
-        slot_last_occurrence_ = 0xFFFFFFFF;   // no occurrence consumed yet
-    }
-
-    bool slot_due_(uint32_t now) const {
-        // occurrence-indexed: the k-th slot occurrence happens at
-        // origin + phase + k*period; fire on the FIRST SAMPLE at or
-        // after an unconsumed occurrence. Position-within-window
-        // comparison (pos >= phase) is WRONG under sampling: a 10 s
-        // pass grid leaves the last sampling gap of every window
-        // unreachable, killing every instance slotted there.
-        if (now - slot_origin_ < slot_phase_) return false;   // before first occurrence
-        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
-        return (uint32_t) (occ - slot_last_occurrence_) >= 1u;
-    }
-
-    void slot_mark_fired_(uint32_t now) {
-        if (!slot_period_) return;
-        if (now - slot_origin_ < slot_phase_) return;
-        uint32_t occ = (now - (slot_origin_ + slot_phase_)) / slot_period_;
-        if ((uint32_t) (occ - slot_last_occurrence_) >= 1u) slot_last_occurrence_ = occ;
+        slot_.assign(now_ms, phase_ms, period_ms);
     }
 
     bool check(const std::string& new_val) {

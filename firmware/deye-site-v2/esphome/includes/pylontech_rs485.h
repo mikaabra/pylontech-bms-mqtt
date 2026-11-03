@@ -1018,23 +1018,23 @@ private:
         const uint16_t n300 = (uint16_t) (22 * num_batteries_ + 53);   // cells/temps + change types
         uint16_t k60 = 0, k300 = 0;
         auto slot_f60 = [&](HysteresisFloat& h) {
-            if (h.slot_period_) return;
+            if (h.slot_assigned()) return;
             h.assign_slot(now, (uint32_t) ((uint64_t) k60++ * 60000 / n60), 60000);
         };
         auto slot_i60 = [&](HysteresisInt& h) {
-            if (h.slot_period_) return;
+            if (h.slot_assigned()) return;
             h.assign_slot(now, (uint32_t) ((uint64_t) k60++ * 60000 / n60), 60000);
         };
         auto slot_f300 = [&](HysteresisFloat& h) {
-            if (h.slot_period_) return;
+            if (h.slot_assigned()) return;
             h.assign_slot(now, (uint32_t) ((uint64_t) k300++ * 300000 / n300), 300000);
         };
         auto slot_s300 = [&](HysteresisString& h) {
-            if (h.slot_period_) return;
+            if (h.slot_assigned()) return;
             h.assign_slot(now, (uint32_t) ((uint64_t) k300++ * 300000 / n300), 300000);
         };
         auto slot_b300 = [&](HysteresisBool& h) {
-            if (h.slot_period_) return;
+            if (h.slot_assigned()) return;
             h.assign_slot(now, (uint32_t) ((uint64_t) k300++ * 300000 / n300), 300000);
         };
         // 60 s class first: stack (dashboard favorites) then per-pack

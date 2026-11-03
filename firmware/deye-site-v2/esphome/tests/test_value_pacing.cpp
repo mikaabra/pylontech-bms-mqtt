@@ -81,13 +81,13 @@ struct World {
     // slot), change types included in the 300 s class spread
     void assign_all(uint32_t now) {
         for (int i = 0; i < N_FAST; i++)
-            if (!fast[i].slot_period_) fast[i].assign_slot(now, (uint32_t) ((uint64_t) i * HB_FAST / N_FAST), HB_FAST);
+            if (!fast[i].slot_assigned()) fast[i].assign_slot(now, (uint32_t) ((uint64_t) i * HB_FAST / N_FAST), HB_FAST);
         for (int i = 0; i < N_STACK; i++)
-            if (!stack[i].slot_period_) stack[i].assign_slot(now, (uint32_t) ((uint64_t) (N_FAST + i) * HB_FAST / (N_FAST + N_STACK)), HB_FAST);
+            if (!stack[i].slot_assigned()) stack[i].assign_slot(now, (uint32_t) ((uint64_t) (N_FAST + i) * HB_FAST / (N_FAST + N_STACK)), HB_FAST);
         for (int i = 0; i < N_CELL; i++)
-            if (!cell[i].slot_period_) cell[i].assign_slot(now, (uint32_t) ((uint64_t) i * HB_CELL / N_SLOW), HB_CELL);
+            if (!cell[i].slot_assigned()) cell[i].assign_slot(now, (uint32_t) ((uint64_t) i * HB_CELL / N_SLOW), HB_CELL);
         for (int i = 0; i < N_CHANGE; i++)
-            if (!change[i].slot_period_) change[i].assign_slot(now, (uint32_t) ((uint64_t) (N_CELL + i) * HB_CELL / N_SLOW), HB_CELL);
+            if (!change[i].slot_assigned()) change[i].assign_slot(now, (uint32_t) ((uint64_t) (N_CELL + i) * HB_CELL / N_SLOW), HB_CELL);
     }
 
     // mirrors the handler reconnect paths: assign_slots_ is a no-op for
