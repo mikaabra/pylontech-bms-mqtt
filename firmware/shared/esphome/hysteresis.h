@@ -75,7 +75,7 @@ struct SlotSchedule {
 inline bool check_threshold_float(float new_val, float& last_val, uint32_t& last_publish,
                                    float threshold,
                                    float min_val = -INFINITY, float max_val = INFINITY,
-                                   float heartbeat_ms = 60000) {
+                                   uint32_t heartbeat_ms = 60000) {
     if (std::isnan(new_val) || !std::isfinite(new_val)) return false;
     if (new_val < min_val || new_val > max_val) return false;
 
