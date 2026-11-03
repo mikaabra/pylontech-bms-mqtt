@@ -10,11 +10,11 @@ ESPHome firmware for solar battery monitoring on ESP32-S3 hardware:
 
 All data published to MQTT with Home Assistant auto-discovery.
 
-## Active Deployments (verified 2026-11-01)
+## Active Deployments (verified 2026-11-03)
 
 | Device | Firmware | Status |
 |--------|----------|--------|
-| `deye-bms-can.local` | `firmware/deye-site-v2/esphome/deye-bms-can.yaml` | **ACTIVE** — production, ESPHome 2026.9.1, encrypted OTA, async MQTT (`idf_send_async`, issue #42 fix merged 1919071), flashed + stall-test accepted 2026-11-01, #42 closed |
+| `deye-bms-can.local` | `firmware/deye-site-v2/esphome/deye-bms-can.yaml` | **ACTIVE, #53 stage 2 on device; stage 3 next** — production, ESPHome 2026.9.1, encrypted OTA, async MQTT (`idf_send_async`, #42 merged 1919071). Stage 2 (`power_save_mode: none`, from main `1327628`, config hash `0x434a2cbd`) flashed 2026-11-02 18:37 local and **closed 2026-11-03: no large effect — modem sleep ruled out as a major cause under the pre-05:11 drain conditions; the post-05:11 zero-refusal regime is unattributed; line KEPT** (mains-powered, avoids an extra flash; postmortems and closure in the #57 comments). #55 (stage 3: pool-only pacing + commit-on-acceptance) approved on review and merged; **stage-3 flash pending, gated on the induced-refusal acceptance test** (both variants pre-registered in the #55 comments: broker restart + device-IP traffic drop), flash record to be added here after it runs. Refused counter stays on as a passive alarm; broker + native-log captures running. Rollback: unexplained reboot, MQTT disconnect, arrival gap >12 s, sustained RSSI drop |
 | — (board ordered) | `firmware/deye-site-v2/esphome/bms-link-sniffer.yaml` | **PENDING** — second Waveshare ESP32-S3-RS485-CAN for the BMS073 Link bus. Two-phase, both merged: passive listener (#58 — merged #60) + guarded balance-voltage write client (#59 — merged #61: tx via flow_control, Link Write Enable switch ALWAYS_OFF, single-entry allowlist 0x4C 3400-3500 mV, one frame per press with a 4 s cooldown latch, MQTT-command-free controls). STAGED FLASHING: the first clip-on and passive soak run the #60-merge build 148e8b1 (listen-only — that yaml declares no tx_pin at all); main (ad1757a, with the TX path) is flashed only for the first planned write, and the glitch sniff is REPEATED then because the pin setup changed. Deployment in both stages gated on the pre-bus glitch sniff (boots/OTA/forced safe mode — GPIO21 is unclaimed through reset) + 120 Ω termination check, per the checklist in PR #61 |
 | `rack-solar-bridge.local` | `firmware/rack-solar-site/esphome-smartshunt-epever-ble-v2/rack-solar-bridge.yaml` | **ACTIVE** — production (BLE SmartShunt + EPEVER), flashed 2026-11-01 with shared availability.h state-flip-on-success semantics (first on-device run; post-flash verified: all 6 stamps online, single clean reboot, data live). Async MQTT NOT yet adopted — see issue #45 |
 | — | `firmware/rack-solar-site/esphome-smartshunt-epever-v2/` | **NOT DEPLOYED** — VE.Direct variant, not in use (user confirmed). Do not flash. |
@@ -55,7 +55,7 @@ Desktop oracle tests run directly with clang, no esphome toolchain needed:
 
 ```bash
 cd firmware/deye-site-v2/esphome
-for t in test_breadcrumbs test_discovery_driver test_rs485_info_decode test_rs485_temp_decode test_bms_link_sniffer_core test_bms_link_sniffer_inject; do
+for t in test_breadcrumbs test_discovery_driver test_rs485_info_decode test_rs485_temp_decode test_bms_link_sniffer_core test_bms_link_sniffer_inject test_value_pacing; do
   clang++ -std=gnu++20 -Wall -Wextra -I. -Itests/stubs -Iincludes tests/$t.cpp -o /tmp/$t && /tmp/$t
 done
 ```
@@ -63,6 +63,7 @@ done
 - **`test_discovery_driver.cpp`** — the two-stream discovery driver: 15-tick convergence (36 CAN + 261 RS485 sites), starvation negative control (pins the pre-#44 semantics at 132 ticks / 2,637 publishes), pool-rejection resume, reconnect + short-gap cursor rewind, yaml-exact button blast. Models stream sizes, not real payloads — the on-device retained-config count (285) is the real-stream proof.
 - **`test_breadcrumbs.cpp`** — breadcrumb stage marks, snapshot/report gating, result-controllable stub MQTT client
 - **`test_rs485_info_decode.cpp`** / **`test_rs485_temp_decode.cpp`** — RS485 INFO + temperature decoders
+- **`test_value_pacing.cpp`** — issue #53 pacing oracle: pool-only admission (the 29-slot pool is the only gate, concurrent-drain sim), fixed slot occurrences (change types included), commit-on-acceptance retry, pass stops at the first client refusal, storm fairness + bounded cell recovery, flap resilience (slots immovable through 30 s flaps; reconnect catch-up burst bounded by the pass stop; post-flap steady passes fit the pool), slow-drain shaping
 
 NOTE: do NOT add `-I../../shared/esphome` to these compiles — on macOS's case-insensitive filesystem it shadows the SDK's own `<Availability.h>` and corrupts the libc headers. The shared headers resolve via relative includes from the test files.
 
@@ -72,7 +73,7 @@ All v2 firmware uses the same pattern: YAML (component wiring) + C++ header hand
 
 ### Shared Headers (`firmware/shared/esphome/`)
 
-- **`hysteresis.h`** — `HysteresisFloat`/`Int`/`Bool`/`String` with threshold + heartbeat logic
+- **`hysteresis.h`** — `HysteresisFloat`/`Int`/`Bool`/`String` with threshold + heartbeat logic; issue #53 adds `decide()/commit()` commit-on-acceptance and fixed slot heartbeats (`assign_slot`, k*H/N occurrence spread, outage-proof, strings included) — deye consumes the new API, legacy `check()` keeps rack-solar/epever untouched
 - **`availability.h`** — `AvailabilityTracker` for stale detection; `stale` (data-age truth) flips unconditionally while the retained online/offline stamp flips only on accepted publishes; heartbeat republishes in both states (CAN 10s via diagnostics, RS485 30s repair pass)
 - **`mqtt_helpers.h`** — `build_ha_sensor_payload()`, `build_ha_binary_sensor_payload()`, `PublishPacer` (1 ms producer pacing under async), `PublishBudget` (per-tick discovery budget)
 - **`breadcrumbs.h`** — RTC noinit forensic breadcrumbs: sticky stage marks survive task-watchdog resets, scope guards, boot snapshot with a checked retried report publish through the normal client path (deye-bms-can only; host-tested)
@@ -81,7 +82,7 @@ All v2 firmware uses the same pattern: YAML (component wiring) + C++ header hand
 ### Deye Site v2 (`firmware/deye-site-v2/esphome/`)
 
 - **`includes/pylontech_can.h`** — CAN frame parsing (0x351, 0x355, 0x359, 0x35C, 0x370), diagnostics, stale detection, resumable budgeted discovery stream + 10s availability heartbeat
-- **`includes/pylontech_rs485.h`** — RS485 polling state machine, per-battery data, stack aggregation, resumable budgeted discovery stream + 30s stamp repair pass
+- **`includes/pylontech_rs485.h`** — RS485 polling state machine, per-battery data, stack aggregation, resumable budgeted discovery stream + 10s pool-gated staggered value pass (issue #53: fixed slot occurrences per instance, stamps-first repair pass every 30s, pack rotation + stack position alternation, pass stops at the first pool refusal)
 - **`includes/pylontech_protocol.h`** — Shared protocol pure helpers + RS485 INFO decoders (0x42 analog / 0x44 alarm), host-oracle tested (`tests/`)
 - **`includes/bms_link_sniffer_core.h` / `bms_link_sniffer.h`** — BMS073 Link-bus sniffer (#58 listener + #59 guarded write client): pure core (frame scan/classify/pairing/stats/watchdog/anomaly ring; on top: write allowlist {0x4C 3400-3500 mV}, byte-exact captured builder, gap-injection state machine — one frame per press, 4 s cooldown + clean-pair + fresh-cadence + 150..250 ms silence gates, all latches long-uptime-safe (10 ms tick clears them; pair-count baselines, not idle timestamps) — all host-oracle tested) + thin UART wrapper (10 ms feed, event/text push into native ESPHome entities, gated TX via flow_control). Part 1 (#60, merged) is the passive listener; part 2 (#61, merged — the staged-flash deployment order is in the deployment table above and PR #61's checklist) adds the guarded TX path
 

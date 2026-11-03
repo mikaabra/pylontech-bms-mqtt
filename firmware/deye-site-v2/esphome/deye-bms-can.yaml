@@ -260,7 +260,7 @@ interval:
       - lambda: |-
           if (!id(pylontech_rs485)) return;
           ((PylontechRS485*)id(pylontech_rs485))->tick();
-  - interval: 30s
+  - interval: 10s
     then:
       - lambda: |-
           if (!id(pylontech_rs485)) return;
