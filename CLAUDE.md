@@ -30,6 +30,12 @@ When adding functionality that's similar to existing code, always propose consol
 
 ```bash
 # Deye site (Pylontech CAN + RS485)
+# NOTE: build secrets live in firmware/deye-site-v2/esphome/secrets.yaml — a
+# LOCAL, git-ignored file in each esphome dir (see the per-dir .gitignore;
+# ignored files never show in git status). It is the durable/authoritative
+# copy for deye-bms-can builds incl. its ota_encryption_key; never commit,
+# never rely on temp-worktree copies. bms-link-sniffer was flashed 2026-11-10
+# with a FRESH per-device set (kept by the user, ~/bms-link-sniffer-secrets.yaml).
 cd firmware/deye-site-v2/esphome
 esphome compile deye-bms-can.yaml
 esphome upload deye-bms-can.yaml --device deye-bms-can.local
