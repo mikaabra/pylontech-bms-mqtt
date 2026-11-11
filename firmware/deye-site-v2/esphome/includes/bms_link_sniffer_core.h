@@ -303,10 +303,8 @@ inline std::string build_telecontrol_enable(uint8_t variant, uint8_t gate) {
 // pair is new-gen-only and refuses old-gen targets rather than guess.
 static const char kLmchgDisableNewGen[] = "~8000D545A006040201FFC2\r";
 
-// The vendor session's captured probe-answer LENID (identity block, INFO
-// = 00 [id] ...). NOT a routing gate: acceptance is structural (the live
-// 17:18 pack-04 answer used a different shape). Kept for the oracle's
-// captured-shape realism.
+// The probe answer's LENID (identity block, INFO = 00 [id] ...; captured
+// literal "80 00 D5 00 90 52 00 [id] ..."). Routing matches LENID exactly.
 static const char kProbeAnswerLenid[] = "9052";
 
 // Tool-observed variant byte per Link address (PROTOCOL_REFERENCE
@@ -674,14 +672,12 @@ private:
         }
         if (cid2 == "00") {
             if (len == 0) return on_bare_ack(t_ms);
-            // any RTN-00 response inside a probe window is a candidate;
-            // acceptance is structural (first-frame, no open request, short
-            // delay), not shape-matched - the live 17:18 press answered
-            // with a non-9052 frame and a LENID gate would have rejected
-            // the pack's real answer. Rule two (no open request) keeps
-            // routine 0x44 telemetry out: those answers pair with their
-            // polls and never reach consume_probe_answer_.
-            if (consume_probe_answer_(t_ms, info, lenid)) return;
+            // a 9052 frame is only OUR probe answer when the controller's
+            // structural acceptance says so (first frame since our probe,
+            // no master request open, short turnaround); routine 0x44
+            // telemetry answers share the LENID and must fall through to
+            // normal pairing - the reviewer's blocker case
+            if (lenid == kProbeAnswerLenid && consume_probe_answer_(t_ms, info)) return;
             on_response(t_ms);
             return;
         }
@@ -903,7 +899,7 @@ private:
     TeleOpController* telecom_waiter_ = nullptr;
     // Defined after TeleOpController (incomplete-type boundary, same
     // pattern as on_bare_ack / on_read_candidate_)
-    bool consume_probe_answer_(uint32_t t_ms, const std::string& info, const std::string& lenid);
+    bool consume_probe_answer_(uint32_t t_ms, const std::string& info);
     void notify_telecom_probe_(uint32_t t_ms);
     bool route_teleop_ack_(uint32_t t_ms);
 };
@@ -1947,14 +1943,10 @@ inline bool BmsLinkCore::on_read_candidate_(uint32_t t_ms, const std::string& ra
 }
 
 // Structural acceptance lives with the controller's probe_accept(); this
-// side supplies the listener-state facts it cannot see, and records the
-// answer's real shape on the bus ledger (the live 17:18 answer was NOT
-// the vendor session's 9052 shape - the shape datum belongs in the ring).
-// Returns false for anything that must fall through to normal pairing -
-// the frame then pairs/responds like any other bus frame, listener
-// unharmed.
-inline bool BmsLinkCore::consume_probe_answer_(uint32_t t_ms, const std::string& info,
-                                               const std::string& lenid) {
+// side supplies the listener-state facts it cannot see. Returns false for
+// anything that must fall through to normal pairing - the frame then
+// pairs/responds like any other bus frame, listener unharmed.
+inline bool BmsLinkCore::consume_probe_answer_(uint32_t t_ms, const std::string& info) {
     if (!telecom_waiter_) return false;
     if (open_req_.valid) {
         telecom_waiter_->on_probe_answer_rejected(t_ms);
@@ -1968,8 +1960,8 @@ inline bool BmsLinkCore::consume_probe_answer_(uint32_t t_ms, const std::string&
     telecom_waiter_->on_probe_answer(t_ms, info);
     std::string id = info.size() > 2 ? info.substr(2, 8) : std::string("?");
     push_event(EventKind::ProbeAnswer, t_ms, telecom_waiter_->last_pack(),
-               "probe answer LENID " + lenid + " id " + id);
-    ring_now(t_ms, "probe ans " + lenid + " id " + id);
+               "9052 identity answer id " + id);
+    ring_now(t_ms, "9052 id " + id);
     return true;
 }
 
