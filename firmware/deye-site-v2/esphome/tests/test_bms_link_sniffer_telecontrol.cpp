@@ -140,8 +140,11 @@ static void bare_ack_at(BmsLinkCore& c, uint32_t t_ms) {
 // the captured literal ("80 00 D5 00 90 52 00 [id] ..."), the id bytes
 // are arbitrary test values, the checksum is the shared firmware
 // function (so the core's envelope + checksum verification accepts it).
-static std::string probe_answer_frame(const char* id4) {
-    std::string info = "00" + std::string(id4) + std::string(82 - 2 - 4, '0');
+static std::string probe_answer_frame(const std::string& id) {
+    // real serial-family ids (live-measured: 4A473235="JG25") are 8 chars;
+    // pad to the captured 82-char INFO regardless of id length
+    std::string info = "00" + id;
+    if (info.size() < 82) info += std::string(82 - info.size(), '0');
     std::string body = "8000D500" + std::string(linksniff::kProbeAnswerLenid) + info;
     return "~" + body + rs485_calc_chksum(body) + "\r";
 }
@@ -229,9 +232,9 @@ static void test_sys_off_end_to_end() {
     uint32_t probe_tx = pair_end + 170;
     // the pack's identity answer routes to the controller, not to the
     // unpaired-response anomaly path
-    send(h.c, probe_answer_frame("9003"), probe_tx + 60);
+    send(h.c, probe_answer_frame("4A473235"), probe_tx + 60);
     check(h.t.status() == TeleOpController::Status::WaitWindow, "probe answer accepted");
-    check_line_has(h.t.status_line(), "probe answered (id 9003", "answered line");
+    check_line_has(h.t.status_line(), "probe answered (id 4A473235", "answered line");
     auto ev = h.c.drain_events();
     check(has_event(ev, EventKind::ProbeAnswer), "ProbeAnswer event pushed");
     check(!has_event(ev, EventKind::AnomalyUnpaired),
@@ -326,7 +329,7 @@ static void test_probe_answer_after_master_traffic_rejected() {
     check(h.t.status() == TeleOpController::Status::NoAnswer, "interleave verdict");
     // the pack's real answer arriving NOW is a bystander on the listener's
     // ledger - an unpaired response, never our trigger
-    send(h.c, probe_answer_frame("9004"), pair_end + 700);
+    send(h.c, probe_answer_frame("4A473234"), pair_end + 700);
     check(h.t.status() == TeleOpController::Status::NoAnswer,
           "late real answer does not resurrect the sequence");
     check(h.bus.tx_log.size() == 1, "the write never fired");
@@ -367,7 +370,7 @@ static void test_wake_pair_end_to_end() {
     check_line_has(h.t.status_line(), "LMCHG wake pair pack 04", "arm line");
     h.t.tick(pair_end + 170);
     check(h.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
-    send(h.c, probe_answer_frame("9004"), pair_end + 170 + 60);
+    send(h.c, probe_answer_frame("4A473234"), pair_end + 170 + 60);
     check(h.t.status() == TeleOpController::Status::WaitWindow, "answer accepted");
 
     pair_at(h, 4, pair_end + 170 + 300);
@@ -418,7 +421,7 @@ static void test_wake_pair_disable_noack_continues() {
     check(h.t.request_wake_pair(3, pair_end + 30), "wake arm accepted");
     h.t.tick(pair_end + 170);
     check(h.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
-    send(h.c, probe_answer_frame("9005"), pair_end + 170 + 60);
+    send(h.c, probe_answer_frame("4A473235"), pair_end + 170 + 60);
     pair_at(h, 3, pair_end + 170 + 300);
     h.t.tick(pair_end + 640);
     check(h.t.status() == TeleOpController::Status::WaitAck, "disable fired");
@@ -484,7 +487,7 @@ static void test_sys_off_noack_then_late_ack() {
 
     check(h.t.request_sys_off(4, pair_end + 30), "arm accepted");
     h.t.tick(pair_end + 170);
-    send(h.c, probe_answer_frame("9006"), pair_end + 170 + 60);
+    send(h.c, probe_answer_frame("4A473234"), pair_end + 170 + 60);
     pair_at(h, 4, pair_end + 170 + 300);
     h.t.tick(pair_end + 640);
     check(h.t.status() == TeleOpController::Status::WaitAck, "write fired");
@@ -501,8 +504,8 @@ static void test_sys_off_noack_then_late_ack() {
 
     // a further probe-answer-shaped frame outside any window stays a
     // bystander unpaired response, never touching the teleop client
-    send(h.c, probe_answer_frame("9999"), write_tx + 500);
-    check(h.t.status_line().find("9999") == std::string::npos,
+    send(h.c, probe_answer_frame("4A473237"), write_tx + 500);
+    check(h.t.status_line().find("4A473237") == std::string::npos,
           "out-of-window 9052 frame does not touch the controller");
 }
 
@@ -516,7 +519,7 @@ static void test_shared_gate_after_done() {
     // complete a SYS_OFF
     check(h.t.request_sys_off(4, pair_end + 30), "arm accepted");
     h.t.tick(pair_end + 170);
-    send(h.c, probe_answer_frame("9007"), pair_end + 170 + 60);
+    send(h.c, probe_answer_frame("4A473235"), pair_end + 170 + 60);
     pair_at(h, 4, pair_end + 170 + 300);
     h.t.tick(pair_end + 640);
     uint32_t write_tx = pair_end + 640;
@@ -569,7 +572,7 @@ static void test_probe_answer_not_consumed_when_no_window() {
     uint32_t t0 = 900000;
     uint32_t pair_end = establish_cadence(h, t0);
     // no teleop window open: an identity answer on the wire is a bystander
-    send(h.c, probe_answer_frame("9008"), pair_end + 100);
+    send(h.c, probe_answer_frame("4A473234"), pair_end + 100);
     auto ev = h.c.drain_events();
     check(!has_event(ev, EventKind::ProbeAnswer),
           "no teleop window, no routing to the teleop client");
@@ -590,7 +593,7 @@ static void test_half_pair_warning() {
     check(h.t.request_wake_pair(4, pair_end + 30), "wake arm accepted");
     h.t.tick(pair_end + 170);
     check(h.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
-    send(h.c, probe_answer_frame("900A"), pair_end + 170 + 60);
+    send(h.c, probe_answer_frame("4A473234"), pair_end + 170 + 60);
     pair_at(h, 4, pair_end + 170 + 300);
     h.t.tick(pair_end + 640);
     check(h.t.status() == TeleOpController::Status::WaitAck, "disable fired");
@@ -623,7 +626,7 @@ static void test_answer_delay_bound() {
     check(h1.t.request_sys_off(4, pair_end1 + 30), "arm accepted");
     h1.t.tick(pair_end1 + 170);
     check(h1.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
-    send(h1.c, probe_answer_frame("900B"), pair_end1 + 170 + 390);
+    send(h1.c, probe_answer_frame("4A473234"), pair_end1 + 170 + 390);
     check(h1.t.status() == TeleOpController::Status::WaitWindow,
           "answer at +390 ms accepted (inside the 400 ms bound)");
     check_line_has(h1.t.status_line(), "in 390 ms", "measured delay on the answered line");
@@ -634,7 +637,7 @@ static void test_answer_delay_bound() {
     check(h2.t.request_sys_off(4, pair_end2 + 30), "arm accepted");
     h2.t.tick(pair_end2 + 170);
     check(h2.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
-    send(h2.c, probe_answer_frame("900C"), pair_end2 + 170 + 420);
+    send(h2.c, probe_answer_frame("4A473237"), pair_end2 + 170 + 420);
     check(h2.t.status() == TeleOpController::Status::WaitProbe,
           "answer at +420 ms not accepted (past the bound)");
     h2.t.tick(pair_end2 + 170 + 600);
@@ -646,6 +649,63 @@ static void test_answer_delay_bound() {
     auto ev = h2.c.drain_events();
     check(!has_event(ev, EventKind::ProbeAnswer),
           "past-bound answer is not routed as ours");
+}
+
+// ---- 15. the reviewer's content gate + stray recording, pinned ---------------
+// Route two of the #83 rejection: our probe garbles a master request so
+// badly the parser never sees it (frame count unmoved, nothing open),
+// and the polled pack's answer - a 9052 frame with TELEMETRY content -
+// passes shape and structure. The content gate rejects it: a battery
+// number (0001...) is not a printable-ASCII identity. And the 17:18
+// lesson: whatever arrives during a window and is not consumed must be
+// RECORDED (LENID + delay + first bytes) - identified, not argued about.
+
+static void test_content_gate_rejects_telemetry_in_disguise() {
+    Harness h;
+    uint32_t pair_end = establish_cadence(h, 1300000);
+    check(h.t.request_sys_off(4, pair_end + 30), "arm accepted");
+    h.t.tick(pair_end + 170);
+    check(h.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
+    // first frame after the probe, nothing open, fast: passes shape +
+    // structure, but the content is a battery number, not an identity
+    std::string info = "0001" + std::string(82 - 4, '0');
+    std::string body = "8000D500" + std::string(linksniff::kProbeAnswerLenid) + info;
+    send(h.c, "~" + body + rs485_calc_chksum(body) + "\r", pair_end + 170 + 60);
+    check(h.t.status() == TeleOpController::Status::WaitProbe,
+          "telemetry-content candidate not accepted");
+    h.t.tick(pair_end + 170 + 300);
+    check(h.t.status() == TeleOpController::Status::NoAnswer,
+          "interleave verdict on the rejected candidate");
+    check(h.bus.tx_log.size() == 1, "the write never fired on a disguised answer");
+    // the stray record: identified in the ring, bytes and all
+    std::string dump = h.c.dump_bounded();
+    check(dump.find("probe stray 9052") != std::string::npos,
+          "rejected candidate recorded with its LENID");
+    check(dump.find("+60ms 0001000") != std::string::npos,
+          "rejected candidate records delay and first bytes");
+}
+
+static void test_stray_frame_recorded_not_argued() {
+    Harness h;
+    uint32_t pair_end = establish_cadence(h, 1400000);
+    check(h.t.request_sys_off(4, pair_end + 30), "arm accepted");
+    h.t.tick(pair_end + 170);
+    check(h.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
+    uint32_t probe_tx = pair_end + 170;
+    // the 17:18 shape: a NON-9052 response arrives first - shape gate
+    // never makes it a candidate, but the window must record what it was
+    send(h.c, std::string(REAL_42_RESPONSE) + "\r", probe_tx + 169);
+    h.t.tick(probe_tx + 300);
+    check(h.t.status() == TeleOpController::Status::NoAnswer,
+          "sequence stays fail-closed on the unrecognized frame");
+    check(h.bus.tx_log.size() == 1, "no write fires");
+    std::string dump = h.c.dump_bounded();
+    check(dump.find("probe stray B07E") != std::string::npos,
+          "the 17:18-style frame now gets its LENID recorded");
+    check(dump.find("+169ms") != std::string::npos,
+          "the 17:18-style frame now gets its delay recorded");
+    check(dump.find("0000100CF9") != std::string::npos,
+          "the 17:18-style frame now gets its first bytes recorded");
 }
 
 int main() {
@@ -664,6 +724,8 @@ int main() {
     test_probe_answer_not_consumed_when_no_window();
     test_half_pair_warning();
     test_answer_delay_bound();
+    test_content_gate_rejects_telemetry_in_disguise();
+    test_stray_frame_recorded_not_argued();
     if (failures == 0)
         printf("telecontrol oracle: all scenarios passed\n");
     else
