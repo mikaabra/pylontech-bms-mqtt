@@ -199,6 +199,32 @@ static constexpr uint32_t kLongGapMs         = 700;
 static constexpr uint32_t kLongGapEverySlots = 3;
 static constexpr uint32_t kAimGapConfirmMs   = 115;  // above the 100 ms frame-pause ceiling
 static constexpr uint32_t kAimLatestFireMs   = 180;  // reviewer runway cap: fire + turnaround + wire <= gap
+
+// Pre-long corridor (2026-11-12 wire map, Pi+dongle two-ended captures):
+// the rotation on this bus = [42->p | ans150 | quiet ~455] / [44->p |
+// ans104 | quiet ~500] pairs at ~628 ms cadence, plus ONE ~1080 ms long
+// silence per ~2511 ms (longs open every kLongGapPeriodMs, wire-measured
+// 2511.4 +/- 2 ms on this rack; some cycles insert extra single slots -
+// absorbed by the stale slide in pre_long_quiet()). The 562-char block
+// answer is ~1094 ms head-to-tail (turnaround range 485-511 + ~585 of
+// wire) - LONGER than every quiet on this bus, so NO fire point inside a
+// long quiet can carry it whole: the predicted-long aim was the
+// guaranteed-cut class, wire-proven (all four sweep reads cut at bytes
+// 417-425 by the long quiet's closing poll). The only corridor where
+// the block rides collision-free is the SINGLE quiet that closes with
+// the 42-poll whose 150-ms answer OPENS the next long gap: fire at the
+// top of the window, the closing exchange transits the request-to-block
+// corridor clean (+24..+50 ms head margins against the 485-511
+// turnaround range), then the entire 1080 ms silence carries the block
+// (+460 ms tail margin) with nobody transmitting anywhere on the bus -
+// no superposition contest for the far pack to lose. corridor lead =
+// long-open minus quiet-open, measured 657 +/- 15 ms. A stale or
+// mis-predicted phase can only fire into an ordinary single quiet =
+// today's cut class (harmless, retry), never a new frame risk.
+static constexpr uint32_t kLongGapPeriodMs   = 2511;  // long-to-long quiet-open period (wire)
+static constexpr uint32_t kPreLongLeadMinMs  = 630;    // corridor lead window, lower bound
+static constexpr uint32_t kPreLongLeadMaxMs  = 690;    // corridor lead window, upper bound
+static constexpr uint32_t kPreLongFireFromMs = 175;     // top-of-window fire (head-margin math)
 static constexpr uint32_t kAckDeadlineMs   = 150;
 static constexpr int32_t  kCadenceFreshMs  = 1500;
 static constexpr uint32_t kArmExpiryMs    = 6000;
@@ -529,6 +555,20 @@ public:
 
     // idle-gap stats over the last kStatsWindowMs of request starts
     bool long_gap_due() const { return slots_since_long_gap_ >= kLongGapEverySlots - 1; }
+
+    // Pre-long-corridor query (see the kPreLongLead* comment block for the
+    // wire map): is the quiet that opened at quiet_open_ms the single one
+    // predicted to close right before the next long gap? The predicted
+    // long slides forward one period while stale (rotation inserted extra
+    // single slots); every observed long rewrites the base, resyncing the
+    // phase automatically.
+    bool pre_long_quiet(uint32_t quiet_open_ms, uint32_t now_ms) const {
+        if (!long_open_seen_) return false;
+        uint32_t p = last_long_open_ms_ + kLongGapPeriodMs;
+        while ((int32_t)(now_ms - (p + kLongGapMs)) > 0) p += kLongGapPeriodMs;
+        int32_t lead = (int32_t)(p - quiet_open_ms);
+        return lead >= (int32_t)kPreLongLeadMinMs && lead <= (int32_t)kPreLongLeadMaxMs;
+    }
     uint32_t idle_gap_min_ms(uint32_t now) const {
         uint32_t best = 0;
         for (size_t i = 0; i < gap_ring_.size(); i++) {
@@ -846,6 +886,13 @@ private:
         }
         gap_head_ = (gap_head_ + 1) % 32;
         slots_since_long_gap_ = (s.gap_ms >= kLongGapMs) ? 0 : slots_since_long_gap_ + 1;
+        if (s.gap_ms >= kLongGapMs) {
+            // quiet-open time of the observed long: feeds the corridor
+            // predictor (every long resyncs it; wrap-safe by construction -
+            // open = frame-start minus the measured gap)
+            last_long_open_ms_ = (s.t_ms >= s.gap_ms) ? s.t_ms - s.gap_ms : 0;
+            long_open_seen_ = true;
+        }
     }
 
     void ring_now(uint32_t t_ms, const std::string& hex) {
@@ -927,6 +974,8 @@ private:
     std::vector<GapSample> gap_ring_;
     size_t      gap_head_ = 0;
     uint32_t    slots_since_long_gap_ = 0;
+    uint32_t    last_long_open_ms_ = 0;   // quiet-open ms of the last observed long gap
+    bool        long_open_seen_ = false;  // corridor predictor lock (one observed long)
 
     std::vector<LinkEvent> events_;
 
@@ -1396,16 +1445,20 @@ private:
         uint32_t since = core_.since_last_rx(t_ms);
         const char* aim_class = nullptr;
         if (aim_long_gap_) {
-            // long-gap aim: fire only when the rotation phase predicts the
-            // opening gap is the due long one AND the fire sits inside the
-            // runway cap (early enough that fire + turnaround + ~585 ms of
-            // answer still lands inside the measured ~1100 ms gap - the
-            // reviewer's equation; 250 ms overran even healthy packs, and
-            // mid-gap detection could never satisfy it at all).
-            bool aim_at_predicted = core_.long_gap_due() &&
-                                    since >= kAimGapConfirmMs && since <= kAimLatestFireMs;
+            // PRE-LONG CORRIDOR (see BmsLinkCore::pre_long_quiet + the
+            // kPreLongLead* comment block): fire only into the single quiet
+            // predicted to close right before a long gap opens, at the TOP of
+            // the fire window - the closing exchange rides the
+            // request-to-block corridor clean, then the whole ~1080 ms
+            // silence carries the block. Firing anywhere inside a long
+            // quiet is the retired cut class: measured every-quiet length
+            // (~455/~500/~1080) is shorter than the ~1094 ms block.
+            uint32_t quiet_open = t_ms - since;
+            bool in_corridor = core_.pre_long_quiet(quiet_open, t_ms);
+            bool aim_at_predicted = in_corridor &&
+                                    since >= kPreLongFireFromMs && since <= kAimLatestFireMs;
             if (!aim_at_predicted) return;
-            aim_class = "predicted-long";
+            aim_class = "pre-long";
         } else if (since < kGapConfirmMs || since > kGapMaxMs) {
             return;  // mid-idle, not at the edge
         }
