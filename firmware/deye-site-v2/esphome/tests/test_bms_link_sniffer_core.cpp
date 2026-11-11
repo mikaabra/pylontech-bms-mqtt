@@ -577,6 +577,33 @@ static void test_late_answer_while_watchdog_tripped() {
     check(has_event(ev, EventKind::RingReleased), "released once the watchdog cleared");
 }
 
+static void test_publish_text_is_ascii() {
+    BmsLinkCore c;
+    // raw noise bytes riding a partial frame (captured live 2026-11-11:
+    // garbled ring entries carried \xFC\x98... and killed subscribed
+    // native-API consumers). The sanitized dump and every event detail
+    // must contain only printable ASCII.
+    send(c, "~80\xFC\x98" "M\"\xD5", 1000);
+    c.tick(1100);
+    auto ev = c.drain_events();
+    check(has_event(ev, EventKind::AnomalyGarbled), "noise partial flags garbled");
+    for (const auto& e : ev) {
+        bool clean = true;
+        for (char ch : e.detail)
+            if ((unsigned char)ch < 0x20 || (unsigned char)ch > 0x7E) clean = false;
+        check(clean, "event detail is printable ASCII");
+    }
+    // dump small enough to avoid the elision marker: strictly printable
+    std::string dump = c.dump_bounded();
+    bool all_ascii = true;
+    for (char ch : dump)
+        if ((unsigned char)ch < 0x20 || (unsigned char)ch > 0x7E) all_ascii = false;
+    check(all_ascii, "ring dump is printable ASCII");
+    check(dump.find("~80") != std::string::npos, "ASCII frame text kept verbatim");
+    check(dump.find("\\xFC") != std::string::npos, "noise byte escaped as \\xFC");
+    check(dump.find("\\x98") != std::string::npos, "noise byte escaped as \\x98");
+}
+
 int main() {
     test_lenid4();
     test_real_frames_parse_clean();
@@ -598,6 +625,7 @@ int main() {
     test_watchdog_clear_with_mute_holds();
     test_late_answer_while_watchdog_tripped();
     test_retrip_cancels_release();
+    test_publish_text_is_ascii();
 
     if (failures == 0) {
         printf("test_bms_link_sniffer_core: ALL PASS\n");
