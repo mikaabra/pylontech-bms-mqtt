@@ -190,6 +190,7 @@ static constexpr uint32_t kLongGapMs         = 700;
 static constexpr uint32_t kLongGapEverySlots = 3;
 static constexpr uint32_t kLongGapDetectMs   = 600;
 static constexpr uint32_t kLongGapDetectMaxMs = 1000;  // stay inside the long gap
+static constexpr uint32_t kAimGapConfirmMs  = 115;  // above the 100 ms frame-pause ceiling
 static constexpr uint32_t kAckDeadlineMs   = 150;
 static constexpr int32_t  kCadenceFreshMs  = 1500;
 static constexpr uint32_t kArmExpiryMs    = 6000;
@@ -1204,15 +1205,20 @@ private:
         if (gate_.need_clean_slot) return;               // no clean pair since our last frame, either client
         if (gate_.cooldown_active) return;               // the shared 4 s latch
         uint32_t since = core_.since_last_rx(t_ms);
+        const char* aim_class = nullptr;
         if (aim_long_gap_) {
             // long-gap aim: fire when the opening gap is the rotation's due
-            // long one (confirmed mid-band, maximal runway for the ~590 ms
-            // block answer), or when a gap has already out-lived every
-            // regular idle (>= 600 ms: it IS long, detected mid-flight)
+            // long one (confirmed early - 115 ms is above the 100 ms frame-
+            // pause ceiling, so it stays provably post-exchange - to hand
+            // the ~590 ms answer maximal runway), or when a gap has already
+            // out-lived every regular idle (>= 600 ms: it IS long, detected
+            // mid-flight). The class label on 'sent' turns each attempt
+            // into measured evidence for tuning.
             bool aim_at_predicted = core_.long_gap_due() &&
-                                    since >= kGapConfirmMs && since <= kGapMaxMs;
+                                    since >= kAimGapConfirmMs && since <= kGapMaxMs;
             bool aim_at_detected = since >= kLongGapDetectMs && since <= kLongGapDetectMaxMs;
             if (!aim_at_predicted && !aim_at_detected) return;
+            aim_class = aim_at_detected ? "detected-long" : "predicted-long";
         } else if (since < kGapConfirmMs || since > kGapMaxMs) {
             return;  // mid-idle, not at the edge
         }
@@ -1231,7 +1237,10 @@ private:
             return;
         }
         status_ = Status::WaitBlock;
-        line_ = "sent, collecting the parameter block (1.5 s window)";
+        line_ = aim_class
+            ? "sent, collecting the parameter block (1.5 s window; fired " +
+              std::to_string(since) + " ms into a " + aim_class + " gap)"
+            : "sent, collecting the parameter block (1.5 s window)";
     }
 
     void tick_wait_block(uint32_t t_ms) {

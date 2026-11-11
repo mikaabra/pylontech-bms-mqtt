@@ -524,6 +524,7 @@ static void test_aim_fires_in_predicted_long_gap() {
     h.r.tick(3371);        // confirm-band tick inside the due gap
     check(h.r.status() == ReadController::Status::WaitBlock,
           "aimed read fires in the predicted-long gap");
+    check_line_has(h.r.status_line(), "predicted-long", "fire line names the window class");
     check(h.bus.tx_log.size() == 1, "exactly one frame fired");
 }
 
@@ -561,6 +562,7 @@ static void test_aim_detects_early_long_gap() {
     h.r.tick(3320);        // since 654 >= kLongGapDetectMs: long gap detected mid-flight
     check(h.r.status() == ReadController::Status::WaitBlock,
           "fires mid-flight once the gap out-lives regular idle");
+    check_line_has(h.r.status_line(), "detected-long", "fire line names the detected window");
     check(h.bus.tx_log.size() == 1, "exactly one frame fired");
 }
 
