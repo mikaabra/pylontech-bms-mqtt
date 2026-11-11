@@ -54,6 +54,10 @@ public:
         balance_mv_[4] = balance_mv_pack4;
     }
 
+    void bind_debug_entities(esphome::sensor::Sensor* debug_value) {
+        debug_value_ = debug_value;
+    }
+
     // one-shot trigger from the Send Balance Voltage Write button. Pack 0
     // is the select's "None" (no restore, deliberate re-selection per
     // review round 2) - refuse rather than fall back to a default target.
@@ -79,7 +83,43 @@ public:
         write_status_->publish_state(write_.status_line());
         // the read-back client grades against the value this write sent
         last_written_valid_[pack] = true;
+        last_written_param_[pack] = 0x4C;
         last_written_mv_[pack] = value_mv;
+    }
+
+    // generic debug write (the allowlist still gates the param; each new
+    // writable param lands as its own allowlist entry + select option in
+    // its own reviewed change - there is deliberately no force path)
+    void arm_debug_write(uint8_t pack, uint8_t param, uint16_t raw_value) {
+        if (!write_status_) return;
+        if (!write_enable_ || !write_enable_->state) {
+            write_status_->publish_state(
+                "refused: Link Operate Enable is off (turn it on deliberately)");
+            return;
+        }
+        if (pack == 0) {
+            write_status_->publish_state("refused: select a target pack first");
+            return;
+        }
+        if (param == 0) {
+            write_status_->publish_state("refused: select a write parameter first");
+            return;
+        }
+        auto rs = read_.status();
+        if (rs == linksniff::ReadController::Status::Armed ||
+            rs == linksniff::ReadController::Status::WaitBlock) {
+            write_status_->publish_state(
+                "refused: a read is in flight - wait for its verdict before writing");
+            return;
+        }
+        write_.request(pack, param, raw_value, esphome::millis());
+        write_status_->publish_state(write_.status_line());
+        // only an ACCEPTED request records (denies carry no written value)
+        if (write_.status() == linksniff::WriteController::Status::Armed) {
+            last_written_valid_[pack] = true;
+            last_written_param_[pack] = param;
+            last_written_mv_[pack] = raw_value;
+        }
     }
 
     // one-shot trigger from the Read Balance Voltage button. The read is
@@ -103,7 +143,43 @@ public:
             read_status_->publish_state("refused: a write is in flight - wait for its verdict");
             return;
         }
-        read_.request(pack, last_written_valid_[pack], last_written_mv_[pack],
+        // the balance read only claims write-verify when the last accepted
+        // write to this pack was the balance param itself
+        bool expect_valid =
+            last_written_valid_[pack] && last_written_param_[pack] == linksniff::kReadBalanceParam;
+        read_.request(pack, linksniff::kReadBalanceParam, expect_valid,
+                      last_written_mv_[pack], esphome::millis());
+        read_status_->publish_state(read_.status_line());
+    }
+
+    // generic parameter read (u16 band 0x07-0x7C): the debug select names
+    // the param; the verdict line + Debug Parameter Value carry the raw
+    // reading (name/scale/unit live in the select label, from the vendor
+    // XML via gen_param_menus.py)
+    void arm_debug_read(uint8_t pack, uint8_t param) {
+        if (!read_status_) return;
+        if (!write_enable_ || !write_enable_->state) {
+            read_status_->publish_state(
+                "refused: Link Operate Enable is off (turn it on deliberately)");
+            return;
+        }
+        if (pack == 0) {
+            read_status_->publish_state("refused: select a target pack first");
+            return;
+        }
+        if (param == 0) {
+            read_status_->publish_state("refused: select a read parameter first");
+            return;
+        }
+        auto ws = write_.status();
+        if (ws == linksniff::WriteController::Status::Armed ||
+            ws == linksniff::WriteController::Status::WaitAck) {
+            read_status_->publish_state("refused: a write is in flight - wait for its verdict");
+            return;
+        }
+        bool expect_valid =
+            last_written_valid_[pack] && last_written_param_[pack] == param;
+        read_.request(pack, param, expect_valid, last_written_mv_[pack],
                       esphome::millis());
         read_status_->publish_state(read_.status_line());
     }
@@ -135,10 +211,15 @@ public:
         auto rstat = read_.status();
         auto prev_pair = op_status_prev_;
         if (rstat != prev_pair.r) {
-            if ((rstat == linksniff::ReadController::Status::ReadOk ||
-                 rstat == linksniff::ReadController::Status::Mismatch) &&
-                balance_mv_[read_.last_pack()])
-                balance_mv_[read_.last_pack()]->publish_state((float)read_.value_mv());
+            if (rstat == linksniff::ReadController::Status::ReadOk ||
+                rstat == linksniff::ReadController::Status::Mismatch) {
+                if (read_.last_param() == linksniff::kReadBalanceParam) {
+                    if (balance_mv_[read_.last_pack()])
+                        balance_mv_[read_.last_pack()]->publish_state((float)read_.value_raw());
+                } else if (debug_value_) {
+                    debug_value_->publish_state((float)read_.value_raw());
+                }
+            }
         }
         // review round 2: the enable gate auto-closes after every
         // operation completes (ack, no-ack, collision, abort, expiry -
@@ -283,9 +364,11 @@ private:
     esphome::text_sensor::TextSensor* read_status_ = nullptr;
     esphome::switch_::Switch* write_enable_ = nullptr;
     esphome::sensor::Sensor* balance_mv_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
+    esphome::sensor::Sensor* debug_value_ = nullptr;
     std::string last_write_line_;
     std::string last_read_line_;
     bool last_written_valid_[5] = {};
+    uint8_t last_written_param_[5] = {};
     uint16_t last_written_mv_[5] = {};
     struct OpStatusPair {
         linksniff::WriteController::Status w;

@@ -117,19 +117,20 @@ static void pair_at(Harness& h, int pack, uint32_t t) {
     send(h.c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
 }
 
-// Clean A222 block interior with a chosen battery number and 0x4C value,
-// derived from the captured standalone frame and re-checksummed with the
-// shared firmware function - labeled synthetic in every scenario that
-// uses it, for shapes the real captures do not already cover.
-static std::string clean_block_inner(uint8_t battery, const char* balance_hex4) {
+// Clean A222 block interior with a chosen battery number and a patched
+// entry value, derived from the captured standalone frame and
+// re-checksummed with the shared firmware function - labeled synthetic
+// in every scenario that uses it, for shapes the real captures do not
+// already cover.
+static std::string clean_block_inner(uint8_t battery, uint8_t param, const char* value_hex4) {
     std::string inner(REF_BLOCK_STANDALONE_INNER);
     const size_t info0 = 12;                  // after VER/ADR/CID1/CID2/LENID
     char b[3];
     snprintf(b, sizeof b, "%02X", (unsigned)battery);
     inner[info0 + 0] = b[0];
     inner[info0 + 1] = b[1];
-    const size_t p4c = info0 + 4 * 0x4C + 4;  // 0x4C entry: INFO char 4*idx+4 = 308
-    for (int i = 0; i < 4; i++) inner[p4c + i] = balance_hex4[i];
+    const size_t p4c = info0 + 4 * param + 4;  // entry: INFO char 4*idx+4
+    for (int i = 0; i < 4; i++) inner[p4c + i] = value_hex4[i];
     std::string body = inner.substr(0, inner.size() - 4);
     return body + rs485_calc_chksum(body);
 }
@@ -140,9 +141,9 @@ static void send_block(BmsLinkCore& c, const std::string& inner, uint32_t t_ms) 
 
 // arm after a complete pair at pair_t, fire on that pair's idle window
 // (request at +30, fire tick at +170 = 155 ms of silence)
-static void fire_read(Harness& h, uint8_t pack, bool has_expect, uint16_t expect,
-                      uint32_t pair_t) {
-    check(h.r.request(pack, has_expect, expect, pair_t + 30), "read arm accepted");
+static void fire_read(Harness& h, uint8_t pack, uint8_t param, bool has_expect,
+                      uint16_t expect, uint32_t pair_t) {
+    check(h.r.request(pack, param, has_expect, expect, pair_t + 30), "read arm accepted");
     h.r.tick(pair_t + 170);
     check(h.r.status() == ReadController::Status::WaitBlock,
           "read fired into the idle window, collecting");
@@ -161,12 +162,12 @@ static void test_builder_byte_exact() {
 
 static void test_deny_shapes() {
     Harness h;
-    h.r.request(0x00, false, 0, 1000);
+    h.r.request(0x00, 0x4C, false, 0, 1000);
     check(h.r.status() == ReadController::Status::Denied, "pack 00 (self-address) denied");
     check_line_has(h.r.status_line(), "01-04", "deny reason names the observed addresses");
-    h.r.request(0x05, false, 0, 1000);
+    h.r.request(0x05, 0x4C, false, 0, 1000);
     check(h.r.status() == ReadController::Status::Denied, "pack 05 denied");
-    h.r.request(0xFF, false, 0, 1000);
+    h.r.request(0xFF, 0x4C, false, 0, 1000);
     check(h.r.status() == ReadController::Status::Denied, "pack FF (broadcast) denied");
     check(h.bus.tx_log.empty(), "nothing transmitted on deny");
 }
@@ -175,7 +176,7 @@ static void test_baseline_read_ok() {
     Harness h;
     uint32_t anomalies_before = h.c.anomalies_total();
     pair_at(h, 1, 1000);
-    fire_read(h, 1, false, 0, 1000);
+    fire_read(h, 1, 0x4C, false, 0, 1000);
     uint32_t pairs_before = h.c.pairs_total();
     check(h.bus.tx_log.size() == 1, "one read frame per press");
     check_str(h.bus.tx_log[0], std::string("~8000D547E00201FD1C") + "\r",
@@ -184,10 +185,10 @@ static void test_baseline_read_ok() {
     // master's next poll lands inside our window (the bus keeps running)
     pair_at(h, 2, 1300);
 
-    send_block(h.c, clean_block_inner(0x01, "0D5C"), 1400);
+    send_block(h.c, clean_block_inner(0x01, 0x4C, "0D5C"), 1400);
     h.r.tick(1420);
     check(h.r.status() == ReadController::Status::ReadOk, "clean block grades ReadOk");
-    check(h.r.value_mv() == 0x0D5C, "0x4C extracted: 3420 mV");
+    check(h.r.value_raw() == 0x0D5C, "0x4C extracted: 3420 mV");
     check_line_has(h.r.status_line(), "baseline read", "no recorded write -> baseline wording");
     check_line_has(h.r.status_line(), "3420 mV", "line carries the value");
 
@@ -207,19 +208,19 @@ static void test_write_verify_pass_then_fail() {
     Harness h;
     uint32_t t = 1000;
     pair_at(h, 1, t);
-    fire_read(h, 1, true, 0x0D66, t);
-    send_block(h.c, clean_block_inner(0x01, "0D66"), t + 300);
+    fire_read(h, 1, 0x4C, true, 0x0D66, t);
+    send_block(h.c, clean_block_inner(0x01, 0x4C, "0D66"), t + 300);
     h.r.tick(t + 320);
     check(h.r.status() == ReadController::Status::ReadOk, "matching value = ReadOk (verify PASS)");
     check_line_has(h.r.status_line(), "read-back PASS", "verify wording");
     check_line_has(h.r.status_line(), "matches the last written value", "PASS states the match");
-    check(h.r.value_mv() == 0x0D66, "verified value is the written 3430 mV");
+    check(h.r.value_raw() == 0x0D66, "verified value is the written 3430 mV");
 
     // fresh pair ~5 s later: read cooldown (4 s) and clean-pair gate pass
     uint32_t t2 = t + 5000;
     pair_at(h, 1, t2);
-    fire_read(h, 1, true, 0x0D66, t2);
-    send_block(h.c, clean_block_inner(0x01, "0D5C"), t2 + 300);
+    fire_read(h, 1, 0x4C, true, 0x0D66, t2);
+    send_block(h.c, clean_block_inner(0x01, 0x4C, "0D5C"), t2 + 300);
     h.r.tick(t2 + 320);
     check(h.r.status() == ReadController::Status::Mismatch, "stale value grades Mismatch");
     check_line_has(h.r.status_line(), "read-back FAIL", "verify-fail wording");
@@ -230,8 +231,8 @@ static void test_wrong_pack() {
     Harness h;
     uint32_t t = 1000;
     pair_at(h, 1, t);
-    fire_read(h, 1, false, 0, t);
-    send_block(h.c, clean_block_inner(0x03, "0D5C"), t + 300);
+    fire_read(h, 1, 0x4C, false, 0, t);
+    send_block(h.c, clean_block_inner(0x03, 0x4C, "0D5C"), t + 300);
     h.r.tick(t + 320);
     check(h.r.status() == ReadController::Status::WrongPack, "battery mismatch grades WrongPack");
     check_line_has(h.r.status_line(), "answered by pack 03", "the line names the answering pack");
@@ -242,7 +243,7 @@ static void test_real_collision_frame_fails_closed() {
     Harness h;
     uint32_t t = 1000;
     pair_at(h, 1, t);
-    fire_read(h, 1, true, 0x0D66, t);
+    fire_read(h, 1, 0x4C, true, 0x0D66, t);
     // the REAL damaged remnant: 0D66 intact at INFO char 308, checksum invalid
     send(h.c, std::string(DAMAGED_FRAME), t + 300);
     h.r.tick(t + 320);
@@ -250,7 +251,7 @@ static void test_real_collision_frame_fails_closed() {
     check_line_has(h.r.status_line(), "checksum invalid", "verdict names the broken checksum");
     check_line_has(h.r.status_line(), "reconstruction proof is not ported",
                    "the divergence from the Mac tool is stated in-band");
-    check(h.r.value_mv() == 0, "no value from a damaged frame");
+    check(h.r.value_raw() == 0, "no value from a damaged frame");
     check(h.c.checksum_errors() == 0, "damaged read artifact added no checksum error");
     check(h.c.anomalies_total() == 0, "damaged read artifact added no anomaly");
 }
@@ -259,7 +260,7 @@ static void test_no_block_window() {
     Harness h;
     uint32_t t = 1000;
     pair_at(h, 1, t);
-    fire_read(h, 1, false, 0, t);
+    fire_read(h, 1, 0x4C, false, 0, t);
     h.r.tick(t + 1670);   // window edge: exactly 1500 ms
     check(h.r.status() == ReadController::Status::WaitBlock, "window edge still collecting");
     h.r.tick(t + 1730);  // past the window
@@ -272,7 +273,7 @@ static void test_telemetry_through_window_plus_consume() {
     Harness h;
     uint32_t t = 1000;
     pair_at(h, 2, t);
-    fire_read(h, 2, false, 0, t);
+    fire_read(h, 2, 0x4C, false, 0, t);
     uint32_t pairs_before = h.c.pairs_total();
     // master telemetry inside the collection window: NOT consumed (126 chars)
     pair_at(h, 3, t + 300);
@@ -280,10 +281,10 @@ static void test_telemetry_through_window_plus_consume() {
     check(h.r.status() == ReadController::Status::WaitBlock, "no false verdict from telemetry");
     check(h.c.pairs_total() == pairs_before + 2, "both mid-window pairs paired normally");
     // our pack-02 block still consumed on arrival
-    send_block(h.c, clean_block_inner(0x02, "0D5C"), t + 1000);
+    send_block(h.c, clean_block_inner(0x02, 0x4C, "0D5C"), t + 1000);
     h.r.tick(t + 1020);
     check(h.r.status() == ReadController::Status::ReadOk, "telemetry did not steal the block");
-    check(h.r.value_mv() == 0x0D5C, "pack-02 value extracted");
+    check(h.r.value_raw() == 0x0D5C, "pack-02 value extracted");
     check(h.c.pairs_total() == pairs_before + 2, "consumed block added no pairing");
 }
 
@@ -293,7 +294,7 @@ static void test_block_outside_window_not_consumed() {
     pair_at(h, 1, t);
     // no read armed: an A222-sized RTN-00 frame is ordinary (if unusual)
     // bus traffic and must take the normal classification path
-    send_block(h.c, clean_block_inner(0x01, "0D5C"), t + 300);
+    send_block(h.c, clean_block_inner(0x01, 0x4C, "0D5C"), t + 300);
     auto ev = h.c.drain_events();
     check(has_event(ev, EventKind::AnomalyUnpaired),
           "unarmed: block classed unpaired response, not consumed");
@@ -305,8 +306,8 @@ static void test_second_press_ignored() {
     Harness h;
     uint32_t t = 1000;
     pair_at(h, 1, t);
-    fire_read(h, 1, false, 0, t);
-    check(!h.r.request(1, false, 0, t + 400), "press during WaitBlock is rejected");
+    fire_read(h, 1, 0x4C, false, 0, t);
+    check(!h.r.request(1, 0x4C, false, 0, t + 400), "press during WaitBlock is rejected");
     check_line_has(h.r.status_line(), "ignored: previous read still in flight", "ignore wording");
     check(h.bus.tx_log.size() == 1, "still exactly one frame");
 }
@@ -325,7 +326,7 @@ static void test_write_cooldown_shared() {
     // read armed right after; slots keep the bus alive while the write's
     // 4 s TX latch runs. r.tick must hold, and the latch must clear
     // through w.tick so the read fires only after the shared cooldown.
-    h.r.request(0x01, true, 3430, t + 700);
+    h.r.request(0x01, 0x4C, true, 3430, t + 700);
     bool fired = false;
     uint32_t fired_at = 0;
     uint32_t st = t + 624;
@@ -349,7 +350,7 @@ static void test_write_cooldown_shared() {
 
 static void test_expiry_no_cadence() {
     Harness h;
-    h.r.request(0x01, false, 0, 1000);
+    h.r.request(0x01, 0x4C, false, 0, 1000);
     for (uint32_t t = 1000; t < 7200; t += 100)
         h.r.tick(t);
     check(h.r.status() == ReadController::Status::Expired, "no safe window -> expired");
@@ -357,12 +358,43 @@ static void test_expiry_no_cadence() {
     check(h.bus.tx_log.empty(), "nothing ever fired without cadence");
 }
 
+static void test_generic_param_read_and_band_denies() {
+    Harness h;
+    h.r.request(0x01, 0x06, false, 0, 1000);
+    check(h.r.status() == ReadController::Status::Denied, "0x06 is a 4-byte entry - denied");
+    check_line_has(h.r.status_line(), "0x07-0x7C", "deny names the readable band");
+    h.r.request(0x01, 0x7D, false, 0, 1000);
+    check(h.r.status() == ReadController::Status::Denied, "0x7D bit-param - denied");
+    h.r.request(0x01, 0x00, false, 0, 1000);
+    check(h.r.status() == ReadController::Status::Denied, "0x00 - below the band, denied");
+    check(h.bus.tx_log.empty(), "nothing transmitted on band denies");
+
+    uint32_t t = 1000;
+    pair_at(h, 1, t);
+    fire_read(h, 1, 0x48, false, 0, t);  // Sleep Delay Time (minutes)
+    send_block(h.c, clean_block_inner(0x01, 0x48, "05A0"), t + 300);
+    h.r.tick(t + 320);
+    check(h.r.status() == ReadController::Status::ReadOk, "generic 0x48 read grades ReadOk");
+    check(h.r.value_raw() == 0x05A0, "raw 1440 extracted (the documented 24 h sleep delay)");
+    check_line_has(h.r.status_line(), "1440 raw", "non-balance params publish raw");
+    check_line_has(h.r.status_line(), "0x48", "the verdict names the param");
+
+    // 0x4C through the same generic path keeps the balance wording
+    uint32_t t2 = t + 5000;
+    pair_at(h, 1, t2);
+    fire_read(h, 1, 0x4C, false, 0, t2);
+    send_block(h.c, clean_block_inner(0x01, 0x4C, "0D5C"), t2 + 300);
+    h.r.tick(t2 + 320);
+    check(h.r.status() == ReadController::Status::ReadOk, "0x4C through the same path");
+    check_line_has(h.r.status_line(), "3420 mV", "balance param keeps mV wording");
+}
+
 static void test_enable_gates() {
     Harness h;
     uint32_t t = 1000;
     pair_at(h, 1, t);
     h.bus.enable = false;
-    h.r.request(0x01, false, 0, t + 30);
+    h.r.request(0x01, 0x4C, false, 0, t + 30);
     h.r.tick(t + 170);
     check(h.r.status() == ReadController::Status::Aborted, "enable off aborts the armed read");
     check_line_has(h.r.status_line(), "enable switched off", "abort names the gate");
@@ -371,7 +403,7 @@ static void test_enable_gates() {
     // enable restored for a fresh press, then dropped mid-collection
     pair_at(h, 1, t + 624);
     h.bus.enable = true;
-    h.r.request(0x01, false, 0, t + 654);
+    h.r.request(0x01, 0x4C, false, 0, t + 654);
     h.r.tick(t + 794);
     check(h.r.status() == ReadController::Status::WaitBlock, "fired with gate open");
     h.bus.enable = false;
@@ -399,6 +431,7 @@ int main() {
     test_second_press_ignored();
     test_write_cooldown_shared();
     test_expiry_no_cadence();
+    test_generic_param_read_and_band_denies();
     test_enable_gates();
     if (failures) {
         printf("%d read-oracle failures\n", failures);

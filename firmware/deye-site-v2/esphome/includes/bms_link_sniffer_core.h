@@ -79,7 +79,18 @@ static constexpr int      kBlockMinInfoChars = 200;   // only the A222 block qua
 // byte offset 154, exactly where both captured reads agree).
 static constexpr size_t   kBlockBatteryChars = 2;    // INFO chars 0..1
 static constexpr size_t   kBlockParamBaseChar = 4;    // 4*idx + this
-static constexpr uint8_t  kReadParam         = 0x4C;  // the one parameter surfaced
+// the balance param stays pinned: the per-pack sensors + the step-4
+// write-verify semantics key on it
+static constexpr uint8_t  kReadBalanceParam  = 0x4C;
+// the generic read surface covers exactly the u16 entry band the A222
+// block exposes (0x07..0x7C); 0x00..0x06 are 4-byte entries and 0x7D+
+// are bit-params/tail - neither is decoded, so neither is readable here
+static constexpr uint8_t  kReadParamFirst    = 0x07;
+static constexpr uint8_t  kReadParamLast     = 0x7C;
+
+inline bool read_param_valid(uint8_t param) {
+    return param >= kReadParamFirst && param <= kReadParamLast;
+}
 
 // ---- guarded write client (issue #59) ---------------------------------------
 // The allowlist is data with exactly one entry, mirroring
@@ -118,7 +129,7 @@ inline bool write_request_valid(uint8_t pack, uint8_t param, uint16_t value_mv,
     }
     const WriteAllowEntry* e = write_allowlist_find(param);
     if (!e) {
-        if (why) *why = "parameter not on the write allowlist (0x4C only)";
+        if (why) *why = "parameter not on the write allowlist";
         return false;
     }
     if (value_mv < e->min_mv || value_mv > e->max_mv) {
@@ -1029,7 +1040,7 @@ public:
                    EnableFn enable, TxFn tx, void* ctx)
         : core_(core), write_budget_(write_budget), enable_(enable), tx_(tx), ctx_(ctx) {}
 
-    bool request(uint8_t pack, bool has_expect, uint16_t expect_mv, uint32_t now) {
+    bool request(uint8_t pack, uint8_t param, bool has_expect, uint16_t expect, uint32_t now) {
         if (status_ == Status::Armed || status_ == Status::WaitBlock) {
             line_ = "ignored: previous read still in flight";
             return false;
@@ -1038,13 +1049,18 @@ public:
             deny("pack must be 01-04 (observed Link addresses)");
             return false;
         }
+        if (!read_param_valid(param)) {
+            deny("parameter 0x" + hex2(param) + " outside the readable u16 band 0x07-0x7C");
+            return false;
+        }
         pack_ = pack;
+        param_ = param;
         has_expect_ = has_expect;
-        expect_mv_ = expect_mv;
+        expect_raw_ = expect;
         armed_at_ms_ = now;
         status_ = Status::Armed;
-        line_ = "armed: pack " + hex2(pack) + " parameter block read; one frame on the next"
-                " window, expires in 6 s";
+        line_ = "armed: pack " + hex2(pack) + " param 0x" + hex2(param) +
+                " block read; one frame on the next window, expires in 6 s";
         return true;
     }
 
@@ -1103,32 +1119,39 @@ public:
                     hex2(pack_) + " - nothing published; press Read again";
             return short_line + " wrongpack(" + hex2(battery) + ")";
         }
-        uint16_t mv = 0;
-        if (!block_param_u16(info, kReadParam, mv)) {
+        uint16_t got = 0;
+        std::string ptag = "0x" + hex2(param_);
+        if (!block_param_u16(info, param_, got)) {
             status_ = Status::Damaged;
-            line_ = "damaged: 0x4C entry unreadable (short INFO or non-hex chars);"
+            line_ = "damaged: " + ptag + " entry unreadable (short INFO or non-hex chars);"
                     " press Read again";
             return short_line + " damaged(param)";
         }
-        value_mv_ = mv;
-        short_line += " ok " + std::to_string(mv) + "mV";
-        if (has_expect_ && mv != expect_mv_) {
+        value_raw_ = got;
+        // 0x4C is mV by definition; every other param publishes raw — the
+        // select label carries the vendor XML's name/scale/unit for it
+        std::string val = (param_ == kReadBalanceParam)
+            ? std::to_string(got) + " mV"
+            : std::to_string(got) + " raw";
+        short_line += " ok " + val;
+        if (has_expect_ && got != expect_raw_) {
             status_ = Status::Mismatch;
-            line_ = "read-back FAIL: 0x4C = " + std::to_string(mv) + " mV but the last write"
-                    " sent " + std::to_string(expect_mv_) + " mV - stale or not applied;"
+            line_ = "read-back FAIL: " + ptag + " = " + val + " but the last write sent " +
+                    std::to_string(expect_raw_) + " - stale or not applied;"
                     " press Read again or re-send the write";
             return short_line + " mismatch";
         }
         status_ = Status::ReadOk;
         line_ = has_expect_
-            ? "read-back PASS: 0x4C = " + std::to_string(mv) + " mV, matches the last written value"
-            : "read ok: 0x4C = " + std::to_string(mv) + " mV (no write recorded for pack " +
+            ? "read-back PASS: " + ptag + " = " + val + ", matches the last written value"
+            : "read ok: " + ptag + " = " + val + " (no write recorded for pack " +
               hex2(pack_) + " - baseline read)";
         return short_line;
     }
 
     uint8_t last_pack() const { return pack_; }
-    uint16_t value_mv() const { return value_mv_; }
+    uint8_t last_param() const { return param_; }
+    uint16_t value_raw() const { return value_raw_; }
     Status status() const { return status_; }
     const std::string& status_line() const { return line_; }
     uint32_t tx_count() const { return tx_count_; }
@@ -1202,9 +1225,10 @@ private:
     void* ctx_;
 
     uint8_t  pack_ = 0;
+    uint8_t  param_ = 0;
     bool     has_expect_ = false;
-    uint16_t expect_mv_ = 0;
-    uint16_t value_mv_ = 0;
+    uint16_t expect_raw_ = 0;
+    uint16_t value_raw_ = 0;
     Status   status_ = Status::Idle;
     bool     need_clean_slot_ = false;
     bool     cooldown_active_ = false;

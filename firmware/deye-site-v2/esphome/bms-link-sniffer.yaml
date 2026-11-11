@@ -57,6 +57,7 @@ esphome:
           id(link_sniffer) = (void*) new BmsLinkSniffer(id(link_uart));
           ((BmsLinkSniffer*)id(link_sniffer))->bind_entities(id(link_last_anomaly), id(link_anomaly_dump), id(link_write_status), id(link_write_enable));
           ((BmsLinkSniffer*)id(link_sniffer))->bind_read_entities(id(link_read_status), id(pack1_balance_mv), id(pack2_balance_mv), id(pack3_balance_mv), id(pack4_balance_mv));
+          ((BmsLinkSniffer*)id(link_sniffer))->bind_debug_entities(id(link_debug_value));
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -458,6 +459,15 @@ binary_sensor:
     icon: "mdi:cloud-check"
     lambda: 'return id(mqtt_client).is_connected();'
 
+  - platform: template
+    name: "Debug Parameter Value"
+    id: link_debug_value
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    # push-only: raw u16 from the last trusted non-balance block read;
+    # name/scale/unit live in the Debug Read Parameter select label
+    update_interval: never
+
 text_sensor:
   - platform: template
     name: "Link Log Tail"
@@ -511,6 +521,23 @@ number:
     state_topic: null
     command_topic: null
 
+  - platform: template
+    name: "Debug Write Value"
+    id: link_debug_write_value
+    icon: "mdi:pencil-box-outline"
+    entity_category: config
+    min_value: 0
+    max_value: 65535
+    step: 1
+    initial_value: 0
+    # raw entry in the parameter's native units - the write gates and the
+    # select option carry the per-param meaning; restore off: every debug
+    # write re-enters its value deliberately
+    optimistic: true
+    restore_value: false
+    state_topic: null
+    command_topic: null
+
 select:
   # "None" boots unselected and never restores - a target must be chosen
   # for every session (review round 2: no silent Pack-01 fallback); the
@@ -528,6 +555,156 @@ select:
       - "Pack 04"
     optimistic: true
     initial_option: "None"
+    restore_value: false
+    state_topic: null
+    command_topic: null
+
+  - platform: template
+    name: "Debug Read Parameter"
+    id: link_debug_read_param
+    icon: "mdi:eye-settings-outline"
+    entity_category: diagnostic
+    options:
+      - "0x07 Cell Under Voltage Protect (x0.001 V)"
+      - "0x08 Cell Voltage Difference Alarm (x0.001 V)"
+      - "0x09 Cell Voltage Difference Alarm Release (x0.001 V)"
+      - "0x0A Pack Over Voltage Alarm (x0.01 V)"
+      - "0x0B Pack Over Voltage Alarm Release (x0.01 V)"
+      - "0x0C Pack Under Voltage Alarm Release (x0.01 V)"
+      - "0x0D Pack Under Voltage Alarm (x0.01 V)"
+      - "0x0E Pack Over Voltage Protect (x0.01 V)"
+      - "0x0F Pack Over Voltage Protect Release (x0.01 V)"
+      - "0x10 Pack Under Voltage Protect Release (x0.01 V)"
+      - "0x11 Pack Under Voltage Protect (x0.01 V)"
+      - "0x12 Number Of Cells (s)"
+      - "0x13 Charge Over Temp Alarm (x0.1 C)"
+      - "0x14 Charge Over Temp Alarm Release (x0.1 C)"
+      - "0x15 Charge Under Temp Alarm Release (x0.1 C)"
+      - "0x16 Charge Under Temp Alarm (x0.1 C)"
+      - "0x17 Charge Over Temp Protect (x0.1 C)"
+      - "0x18 Charge Over Temp Protect Release (x0.1 C)"
+      - "0x19 Charge Under Temp Protect Release (x0.1 C)"
+      - "0x1A Charge Under Temp Protect (x0.1 C)"
+      - "0x1B Discharge Over Temp Alarm (x0.1 C)"
+      - "0x1C Discharge Over Temp Alarm Release (x0.1 C)"
+      - "0x1D Discharge Under Temp Alarm Release (x0.1 C)"
+      - "0x1E Discharge Under Temp Alarm (x0.1 C)"
+      - "0x1F Discharge Over Temp Protect (x0.1 C)"
+      - "0x20 Discharge Over Temp Protect Release (x0.1 C)"
+      - "0x21 Discharge Under Temp Protect Release (x0.1 C)"
+      - "0x22 Discharge Under Temp Protect (x0.1 C)"
+      - "0x23 Heat Open Temp (x0.1 C)"
+      - "0x24 Heat Close Temp (x0.1 C)"
+      - "0x25 Environment Over Temp Alarm (x0.1 C)"
+      - "0x26 Environment Over Temperature Alarm Release (x0.1 C)"
+      - "0x27 Environment Under Temp Alarm (x0.1 C)"
+      - "0x28 Environment Under Temperature Alarm Release (x0.1 C)"
+      - "0x29 Environment Over Temp Protect (x0.1 C)"
+      - "0x2A Environment Over Temp Protect Release (x0.1 C)"
+      - "0x2B Environment Under Temp Protect Release (x0.1 C)"
+      - "0x2C Environment Under Temp Protect (x0.1 C)"
+      - "0x2D MOSFET Over Temp Protect (x0.1 C)"
+      - "0x2E MOSFET Over Temp Protect Release (x0.1 C)"
+      - "0x2F Over Charge Current Alarm (A)"
+      - "0x30 Over Charge Current Alarm Release (A)"
+      - "0x31 Over Discharge Current Alarm Release (A)"
+      - "0x32 Over Discharge Current Alarm (A)"
+      - "0x33 Over Charge Current Protect (A)"
+      - "0x34 Over Charge Current Protect Delay Time (S)"
+      - "0x35 Secondary Over Charge Current Protect (A)"
+      - "0x36 Secondary Over Charge Current Protect Delay Time (mS)"
+      - "0x37 Over Discharge Current Protect (A)"
+      - "0x38 Over Discharge Current Protect Delay Time (S)"
+      - "0x39 Secondary Over Discharge Current Protect (A)"
+      - "0x3A Secondary Over Discharge Current Protect Delay Time (mS)"
+      - "0x3B Short Circuit Protect (A)"
+      - "0x3C Short Circuit Protect Delay Time (uS)"
+      - "0x3D Over Current Protect Release Delay Time (S)"
+      - "0x3E Number Of Over Current Locking (times)"
+      - "0x3F Current Limit Function Setting (A)"
+      - "0x40 Charge Current Limit Time (minutes)"
+      - "0x41 Current Limit Value (A)"
+      - "0x42 Short Circuit Locking Times (times)"
+      - "0x43 Pre-charge Time (S)"
+      - "0x44 Nominal Capacity (x0.01 Ah)"
+      - "0x45 Residual Capacity (x0.01 Ah)"
+      - "0x46 SOC Alarm (%)"
+      - "0x47 Recharge SOC (%)"
+      - "0x48 Sleep Delay Time (minutes)"
+      - "0x49 Balance Max Temp (x0.1 C)"
+      - "0x4A Balance Min Temp (x0.1 C)"
+      - "0x4B Static Balance Time (hours)"
+      - "0x4C Start Balance Voltage (x0.001 V)"
+      - "0x4D Start Balance Voltage Difference (x0.001 V)"
+      - "0x4E Stop Balance Voltage Difference (x0.001 V)"
+      - "0x4F Short Circuit Protect Release Delay Time (x0.1 S)"
+      - "0x50 Wake-up Delay Time (minutes)"
+      - "0x51 Wake-up Times (times)"
+      - "0x52 PCS-CAN protocol serial number"
+      - "0x53 Communication Anti-theft Delay Time (min)"
+      - "0x54 SOC Alarm Release Value (%)"
+      - "0x55 Under Voltage Protect Sleep Delay Time (minutes)"
+      - "0x56 Over Charge Current Protect Release Delay Time (S)"
+      - "0x57 MOSFET Over Temp Alarm (x0.1 C)"
+      - "0x58 Power high temperature alarm recovery (x0.1 C)"
+      - "0x59 PCS charging cut-off voltage (x0.001 V)"
+      - "0x5A PCS discharge cut-off voltage (x0.001 V)"
+      - "0x5B PCS maximum charging current limit value (x0.1 A)"
+      - "0x5C PCS maximum discharge current limit value (x0.1 A)"
+      - "0x5D Charging detection interval (S)"
+      - "0x5E Charging detection frequency (Times)"
+      - "0x5F Charging detection working hours (S)"
+      - "0x60 Effective discharge time (S)"
+      - "0x61 Low SOC (%)"
+      - "0x62 SOC high (%)"
+      - "0x63 PCS-485 protocol serial number"
+      - "0x64 PCS charging low temperature level 1 alarm (x0.1 C)"
+      - "0x65 PCS charging low temperature level 1 alarm recovery (x0.1 C)"
+      - "0x66 PCS charging high temperature level 1 alarm (x0.1 C)"
+      - "0x67 PCS charging high temperature level 1 alarm recovery (x0.1 C)"
+      - "0x68 PCS discharge low temperature level 1 alarm (x0.1 C)"
+      - "0x69 PCS discharge low temperature level 2 alarm (x0.1 C)"
+      - "0x6A PCS discharge low temperature level 2 alarm recovery (x0.1 C)"
+      - "0x6B PCS discharge high temperature level 1 alarm (x0.1 C)"
+      - "0x6C PCS discharge high temperature level 1 alarm recovery (x0.1 C)"
+      - "0x6D PCS cell high voltage level 1 alarm (x0.001 V)"
+      - "0x6E PCS Cell High Voltage Level 1 Alarm Recovery (x0.001 V)"
+      - "0x6F PCS cell high voltage level 2 alarm (x0.001 V)"
+      - "0x70 PCS Cell High Voltage Level 2 Alarm Recovery (x0.001 V)"
+      - "0x71 PCS charging level 1 proportion (%)"
+      - "0x72 PCS Charging Level 2 Ratio (%)"
+      - "0x73 PCS charging level 3 proportion (%)"
+      - "0x74 PCS discharge level 1 proportion (%)"
+      - "0x75 PCS discharge level 2 proportion (%)"
+      - "0x76 PCS discharge level 3 proportion (%)"
+      - "0x77 Battery design capacity (x0.01 Ah)"
+      - "0x78 PCS power consumption current (x0.001 A)"
+      - "0x79 PCS discharge reverse release current (x0.001 A)"
+      - "0x7A PCS charging reverse release current (x0.001 A)"
+      - "0x7B PCS discharge release delay (S)"
+      - "0x7C PCS charging release delay (S)"
+    optimistic: true
+    initial_option: "0x07 Cell Under Voltage Protect (x0.001 V)"
+    # option order == ascending param index over the dense 0x07..0x7C band;
+    # gen_param_menus.py refuses to emit anything else - the Read Debug
+    # Parameter button maps active_index -> param as 0x07 + index
+    restore_value: false
+    state_topic: null
+    command_topic: null
+
+  - platform: template
+    name: "Debug Write Parameter"
+    id: link_debug_write_param
+    icon: "mdi:tune"
+    entity_category: config
+    options:
+      - "None"
+      - "0x4C Start Balance Voltage (3400-3500 mV)"
+    optimistic: true
+    initial_option: "None"
+    # one option per allowlist entry, in allowlist order (reviews add
+    # pairs: one kWriteAllowlist line here gets option + mapping line in
+    # the Send Debug Parameter Write button)
     restore_value: false
     state_topic: null
     command_topic: null
@@ -580,6 +757,47 @@ button:
           if (id(link_target_pack).active_index().has_value())
             pack = (int)*id(link_target_pack).active_index();
           ((BmsLinkSniffer*)id(link_sniffer))->arm_read((uint8_t)pack);
+
+  # the generic half of the read client: any u16 parameter (0x07-0x7C)
+  # from the vendor XML menu, one D547 block read per press, graded
+  # identically to the balance flow; the raw value lands on Debug
+  # Parameter Value and the verdict on Link Read Status
+  - platform: template
+    name: "Read Debug Parameter"
+    icon: "mdi:eye-outline"
+    entity_category: diagnostic
+    state_topic: null
+    command_topic: null
+    on_press:
+      - lambda: |-
+          if (!id(link_sniffer)) return;
+          int pack = 0;
+          if (id(link_target_pack).active_index().has_value())
+            pack = (int)*id(link_target_pack).active_index();
+          auto ai = id(link_debug_read_param).active_index();
+          if (!ai.has_value()) return;
+          uint8_t param = (uint8_t)(0x07 + (int)*ai);
+          ((BmsLinkSniffer*)id(link_sniffer))->arm_debug_read((uint8_t)pack, param);
+
+  - platform: template
+    name: "Send Debug Parameter Write"
+    icon: "mdi:pencil-lock-outline"
+    entity_category: config
+    state_topic: null
+    command_topic: null
+    on_press:
+      - lambda: |-
+          if (!id(link_sniffer)) return;
+          int pack = 0;
+          if (id(link_target_pack).active_index().has_value())
+            pack = (int)*id(link_target_pack).active_index();
+          int sel = 0;
+          if (id(link_debug_write_param).active_index().has_value())
+            sel = (int)*id(link_debug_write_param).active_index();
+          uint8_t param = 0;
+          if (sel == 1) param = 0x4C;
+          uint16_t raw = (uint16_t)id(link_debug_write_value).state;
+          ((BmsLinkSniffer*)id(link_sniffer))->arm_debug_write((uint8_t)pack, param, raw);
 
   - platform: template
     name: "Dump Anomaly Ring"
