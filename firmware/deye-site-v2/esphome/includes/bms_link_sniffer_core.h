@@ -41,6 +41,7 @@
 namespace linksniff {
 
 class WriteController;
+class ReadController;
 
 // ---- constants ------------------------------------------------------------
 static constexpr int      kNumPacks          = 4;     // Link slaves 01..04
@@ -54,6 +55,31 @@ static constexpr size_t   kRingSlots        = 32;
 // the month-3 lockup's capture)
 static constexpr uint32_t kRingReleaseDelayMs = 5000;
 static constexpr uint32_t kStatsWindowMs    = 60000;
+
+// ---- guarded block-read client (dongle PoC productionized) -----------------
+// The D547 parameter-block read (docs/analysis/bms073-tools/rs485_verify_
+// write.py): the pack answers a ~8000D547E002<pack> read with the full
+// A222 block — 546 INFO chars, ~590 ms on the wire at 9600 — which
+// overruns the ~436 ms idle window and collides with the master's next
+// poll. Collision economics from the 2026-10-31 in-stack read-back: one
+// garbled master slot, immediate recovery - accepted per press, never
+// routine (a retry is a new deliberate press; reads are idempotent, so
+// retry-by-press replaces the Mac tool's reference-based reconstruction
+// proof: in firmware the trust rule is strictly whole-frame-checksum-
+// valid + battery-number match, everything else is fail-closed.
+static constexpr uint32_t kBlockWindowMs     = 1500;  // the tool's 1.5 s collect window
+static constexpr int      kBlockMinInfoChars = 200;   // only the A222 block qualifies:
+                                                    // B07E=126, 9052=164, C022=68 all below;
+                                                    // 546 above - pinned, not guessed
+// Parameter-block INFO layout (PROTOCOL_REFERENCE.md, fully decoded and
+// fixture-pinned): [battery number: 1 byte][array: 271 bytes]; array =
+// u16 idx 0x00-0x06 (14 B) + ONE stray byte at array offset 14 (observed
+// 0x76, meaning unknown, required for alignment) + u16 idx 0x07-0x7C.
+// int-parameter entry INFO char offset = 4*idx + 4 (checked: 0x4C -> 308,
+// byte offset 154, exactly where both captured reads agree).
+static constexpr size_t   kBlockBatteryChars = 2;    // INFO chars 0..1
+static constexpr size_t   kBlockParamBaseChar = 4;    // 4*idx + this
+static constexpr uint8_t  kReadParam         = 0x4C;  // the one parameter surfaced
 
 // ---- guarded write client (issue #59) ---------------------------------------
 // The allowlist is data with exactly one entry, mirroring
@@ -152,6 +178,46 @@ static constexpr uint32_t kTxDueCooldownMs = 4000;
 // The captured bare ack (RTN 00, empty INFO), interior without SOI/EOI.
 static const char kRawBareAck[] = "8000D5000000FD9F";
 
+// CID2 0x47 int-parameter block-read frame:
+//   ~ VER(80) ADR(00) CID1(D5) CID2(47) LENID(E002) [pack] CHK CR
+// Byte-exact against bms073.build(cid2=0x47, info=f"{pack:02X}") — the
+// captured request for pack 01 is ~8000D547E00201FD1C (pinned in the
+// read oracle against the Python builder's output).
+inline std::string build_read_frame(uint8_t pack) {
+    int len = 2;  // INFO = the pack address, 2 ASCII-hex chars
+    int digit_sum = (len / 256) + ((len / 16) % 16) + (len % 16);
+    int lchk = (~digit_sum + 1) & 0xF;
+    char body[20];
+    snprintf(body, sizeof body, "8000D547%X%03X%02X", lchk, len, (unsigned)pack);
+    std::string result = "~";
+    result += body;
+    result += rs485_calc_chksum(body);
+    result += "\r";
+    return result;
+}
+
+// Battery number from a block INFO (chars 0..1). Also the pack identity
+// check: a trusted read must name the pack we asked (RTN-00 responses
+// carry no requester echo — the reference-data identify is all we get).
+inline bool block_battery(const std::string& info, uint8_t& battery) {
+    unsigned long v;
+    if (!parse_hex(info.substr(0, kBlockBatteryChars), v)) return false;
+    battery = (uint8_t)v;
+    return true;
+}
+
+// u16 int-parameter entry from a block INFO by index (0x07-0x7C band;
+// the 0x00-0x06 band is 4-byte and not surfaced). Returns false when the
+// INFO is short (collision-truncated) or the entry chars are not hex.
+inline bool block_param_u16(const std::string& info, uint8_t idx, uint16_t& value) {
+    size_t off = kBlockParamBaseChar + (size_t)idx * 4;
+    if (info.size() < off + 4) return false;
+    unsigned long v;
+    if (!parse_hex(info.substr(off, 4), v)) return false;
+    value = (uint16_t)v;
+    return true;
+}
+
 // ---- frame-level helpers ---------------------------------------------------
 
 // LENID validation: 4 hex chars = LCHK nibble + 12-bit length (the number of
@@ -192,6 +258,7 @@ enum class EventKind {
     PackRecover,
     RingReleased,     // incident window re-opened after recovery + delay (wrapper publishes)
     AckForWrite,      // bare ack consumed by a pending injection wait (not an anomaly)
+    BlockForRead,     // D547 block (or its damaged remnant) consumed by a pending read (not an anomaly)
 };
 
 struct LinkEvent {
@@ -427,6 +494,14 @@ private:
         std::string lenid = raw.substr(8, 4);
         int len = lenid4_len(lenid);
         if (len < 0) return malformed(t_ms, raw, "lenid hex");
+        // Our own D547 block read's answer (or its collision-damaged
+        // remnant) routes to the read controller before any pairing,
+        // size or checksum verdict: the reader grades the frame itself
+        // and the bus record keeps it as a read artifact, not a pack or
+        // master fault.
+        if (len >= kBlockMinInfoChars && read_waiter_ &&
+            on_read_candidate_(t_ms, raw, len))
+            return;
         size_t expect = (size_t)(12 + len + 4);
         if (raw.size() != expect) return malformed_lenid(t_ms, raw, "len mismatch");
         if (!lenid4_valid(lenid)) return malformed_lenid(t_ms, raw, "lchk");
@@ -528,6 +603,9 @@ private:
 
     // Defined after WriteController (ack-waiter consult)
     void on_bare_ack(uint32_t t_ms);
+    // Defined after ReadController (batch candidate consult) — true when
+    // the frame was consumed as our own pending block read's answer
+    bool on_read_candidate_(uint32_t t_ms, const std::string& raw, int len);
 
     // ---- helpers -------------------------------------------------------------
     void close_open_slot_unanswered() {
@@ -600,6 +678,7 @@ private:
     // ---- ack-waiter hookup (set only by the guarded write client) ---------
 public:
     void set_ack_waiter(WriteController* w) { ack_waiter_ = w; }
+    void set_read_waiter(ReadController* r) { read_waiter_ = r; }
     uint32_t dropped_events() const { return dropped_events_; }
     uint32_t last_frame_end_ms() const { return last_frame_end_ms_; }
     uint32_t last_rx_ms() const { return last_rx_t_ms_; }
@@ -654,6 +733,7 @@ private:
     std::vector<LinkEvent> events_;
 
     WriteController* ack_waiter_ = nullptr;
+    ReadController* read_waiter_ = nullptr;
 };
 
 // ---------------------------------------------------------------------------
@@ -774,6 +854,10 @@ public:
     const std::string& status_line() const { return line_; }
     uint32_t tx_count() const { return tx_count_; }
     uint32_t collision_count() const { return collision_count_; }
+    // shared TX budget: the write's 4 s post-TX latch, consulted by the
+    // read controller so two of our frames can never land closer than
+    // one cooldown apart
+    bool cooling_down() const { return cooldown_active_; }
 
 private:
     struct Pending { uint8_t pack; uint8_t param; uint16_t value_mv; };
@@ -905,6 +989,240 @@ inline void BmsLinkCore::on_bare_ack(uint32_t t_ms) {
     push_event(EventKind::AnomalyAck, t_ms, 0, "bare ack with no write pending");
     anomalies_++;
     ring_now(t_ms, kRawBareAck);
+}
+
+// ---------------------------------------------------------------------------
+// Guarded block-read client — the USB-dongle PoC's rs485_verify_write.py
+// productionized onto this device (the dongle is retired). One press = ONE
+// D547 read frame, injected through the same fire gates as the write client
+// (enable switch re-checked at every transition, fresh cadence, clean pair
+// since any of our TX, 150..250 ms confirmed silence, shared 4 s cooldown).
+// The pack's ~590 ms block answer overruns the idle window and collides
+// with the master's next poll by design physics - each press accepts one
+// possibly-garbled master slot. Grading diverges from the Mac tool
+// deliberately: the reference-based collision reconstruction is NOT ported
+// (its reference block is one standalone capture - battery-specific
+// data does not belong in firmware); reads are idempotent, so a
+// collision-damaged verdict simply invites a new deliberate press, and
+// the strict trust rule is: whole-frame checksum valid AND battery
+// number = the requested pack. Nothing else publishes a value.
+//   ReadOk      trusted: checksum valid, pack matches, value extracted;
+//               the line states whether it matches the last written value
+//   Mismatch    trusted read differs from the write we last sent - the
+//               step-4 write-verify FAIL case (stale or not applied)
+//   WrongPack   checksum valid but battery number != requested pack
+//   Damaged     envelope or checksum broken by the collision - value NOT
+//               trustworthy regardless of what survived; press again
+//   NoBlock     window closed with no block-sized answer
+// ---------------------------------------------------------------------------
+class ReadController {
+public:
+    enum class Status {
+        Idle, Denied, Armed, WaitBlock,
+        ReadOk, Mismatch, WrongPack, Damaged, NoBlock, Aborted, Expired
+    };
+
+    using EnableFn = bool (*)(void*);
+    using TxFn = bool (*)(const std::string&, void*);
+
+    ReadController(BmsLinkCore& core, const WriteController& write_budget,
+                   EnableFn enable, TxFn tx, void* ctx)
+        : core_(core), write_budget_(write_budget), enable_(enable), tx_(tx), ctx_(ctx) {}
+
+    bool request(uint8_t pack, bool has_expect, uint16_t expect_mv, uint32_t now) {
+        if (status_ == Status::Armed || status_ == Status::WaitBlock) {
+            line_ = "ignored: previous read still in flight";
+            return false;
+        }
+        if (pack < kLinkPackFirst || pack > kLinkPackLast) {
+            deny("pack must be 01-04 (observed Link addresses)");
+            return false;
+        }
+        pack_ = pack;
+        has_expect_ = has_expect;
+        expect_mv_ = expect_mv;
+        armed_at_ms_ = now;
+        status_ = Status::Armed;
+        line_ = "armed: pack " + hex2(pack) + " parameter block read; one frame on the next"
+                " window, expires in 6 s";
+        return true;
+    }
+
+    void tick(uint32_t t_ms) {
+        // same long-uptime hygiene as the write client: latches expire
+        // here on the 10 ms cadence, never by stale timestamp compares
+        if (cooldown_active_ && (int32_t)(t_ms - last_tx_ms_) >= (int32_t)kTxDueCooldownMs)
+            cooldown_active_ = false;
+        if (need_clean_slot_ && core_.pairs_total() > clean_pair_baseline_)
+            need_clean_slot_ = false;
+        switch (status_) {
+            case Status::Armed:     tick_armed(t_ms); break;
+            case Status::WaitBlock: tick_wait_block(t_ms); break;
+            default: break;  // terminal: nothing fires without a fresh press
+        }
+    }
+
+    // core consults this for every block-sized RTN-00 frame: true while a
+    // fired read is inside its collection window
+    bool block_window_active(uint32_t now) const {
+        return status_ == Status::WaitBlock &&
+               (int32_t)(now - tx_started_ms_) <= (int32_t)kBlockWindowMs;
+    }
+
+    // The core routes our block here before pairing/classification. The
+    // returned short line is the ring/event record; the long status_ line
+    // is the operator's evidence. Grading is fail-closed everywhere.
+    std::string on_block(const std::string& raw, int len) {
+        size_t expect = (size_t)(12 + len + 4);
+        std::string short_line = "D547 " + hex2(pack_) + " " + std::to_string(raw.size()) + "ch";
+        if (raw.size() != expect) {
+            status_ = Status::Damaged;
+            line_ = "collision-damaged: frame length altered (" + std::to_string(raw.size()) +
+                    " chars, envelope says " + std::to_string(expect) +
+                    "); value not trustworthy - press Read again for a new single read";
+            return short_line + " damaged(len)";
+        }
+        std::string full = "~" + raw + "\r";
+        if (!rs485_verify_checksum(full)) {
+            status_ = Status::Damaged;
+            line_ = "collision-damaged: whole-frame checksum invalid (the Mac tool's"
+                    " reconstruction proof is not ported - a stored value only ever"
+                    " publishes from a checksum-valid frame); press Read again";
+            return short_line + " damaged(chk)";
+        }
+        std::string info = raw.substr(12, (size_t)len);
+        uint8_t battery = 0;
+        if (!block_battery(info, battery)) {
+            status_ = Status::Damaged;
+            line_ = "damaged: battery number chars unreadable; press Read again";
+            return short_line + " damaged(batt)";
+        }
+        if (battery != pack_) {
+            status_ = Status::WrongPack;
+            line_ = "block answered by pack " + hex2(battery) + ", not the requested " +
+                    hex2(pack_) + " - nothing published; press Read again";
+            return short_line + " wrongpack(" + hex2(battery) + ")";
+        }
+        uint16_t mv = 0;
+        if (!block_param_u16(info, kReadParam, mv)) {
+            status_ = Status::Damaged;
+            line_ = "damaged: 0x4C entry unreadable (short INFO or non-hex chars);"
+                    " press Read again";
+            return short_line + " damaged(param)";
+        }
+        value_mv_ = mv;
+        short_line += " ok " + std::to_string(mv) + "mV";
+        if (has_expect_ && mv != expect_mv_) {
+            status_ = Status::Mismatch;
+            line_ = "read-back FAIL: 0x4C = " + std::to_string(mv) + " mV but the last write"
+                    " sent " + std::to_string(expect_mv_) + " mV - stale or not applied;"
+                    " press Read again or re-send the write";
+            return short_line + " mismatch";
+        }
+        status_ = Status::ReadOk;
+        line_ = has_expect_
+            ? "read-back PASS: 0x4C = " + std::to_string(mv) + " mV, matches the last written value"
+            : "read ok: 0x4C = " + std::to_string(mv) + " mV (no write recorded for pack " +
+              hex2(pack_) + " - baseline read)";
+        return short_line;
+    }
+
+    uint8_t last_pack() const { return pack_; }
+    uint16_t value_mv() const { return value_mv_; }
+    Status status() const { return status_; }
+    const std::string& status_line() const { return line_; }
+    uint32_t tx_count() const { return tx_count_; }
+
+private:
+    void deny(const std::string& why) {
+        status_ = Status::Denied;
+        line_ = "denied: " + why;
+    }
+
+    void tick_armed(uint32_t t_ms) {
+        if (!enable_(ctx_)) {
+            status_ = Status::Aborted;
+            line_ = "aborted: enable switched off";
+            return;
+        }
+        if ((int32_t)(t_ms - armed_at_ms_) > (int32_t)kArmExpiryMs) {
+            status_ = Status::Expired;
+            line_ = "expired: no safe window within " + std::to_string(kArmExpiryMs / 1000) +
+                    " s (watchdog, cadence, clean-slot or silence waits); press Read again";
+            return;
+        }
+        if (core_.watchdog_tripped()) return;           // bus in unknown state: hold
+        if (!core_.bus_established(t_ms)) return;       // no fresh poll cadence: hold
+        if (need_clean_slot_) return;                    // no clean pair since our last TX
+        if (cooldown_active_) return;                    // our own 4 s latch
+        if (write_budget_.cooling_down()) return;        // the write client's 4 s latch
+        uint32_t since = core_.since_last_rx(t_ms);
+        if (since < kGapConfirmMs || since > kGapMaxMs) return;  // mid-idle, not at the edge
+
+        std::string frame = build_read_frame(pack_);
+        tx_started_ms_ = t_ms;
+        bool ok = tx_(frame, ctx_);
+        last_tx_ms_ = t_ms;
+        cooldown_active_ = true;
+        tx_count_++;  // flush failures included as TX attempts, same rule as writes
+        need_clean_slot_ = true;
+        clean_pair_baseline_ = core_.pairs_total();
+        if (!ok) {
+            status_ = Status::Aborted;
+            line_ = "aborted: uart flush failed - bytes may be on the wire; press Read again";
+            return;
+        }
+        status_ = Status::WaitBlock;
+        line_ = "sent, collecting the parameter block (1.5 s window)";
+    }
+
+    void tick_wait_block(uint32_t t_ms) {
+        if (block_window_active(t_ms)) return;
+        if (!enable_(ctx_)) {
+            status_ = Status::Aborted;
+            line_ = "frame was sent, but collection stopped early (enable switched off);"
+                    " nothing verified - press Read again";
+            return;
+        }
+        status_ = Status::NoBlock;
+        line_ = "no parameter block in the 1.5 s window - pack silent or the collision"
+                " shredded the response; press Read again for a new single read";
+    }
+
+    static std::string hex2(uint8_t v) {
+        char b[3];
+        snprintf(b, sizeof b, "%02X", (unsigned)v);
+        return b;
+    }
+
+    BmsLinkCore& core_;
+    const WriteController& write_budget_;
+    EnableFn enable_;
+    TxFn tx_;
+    void* ctx_;
+
+    uint8_t  pack_ = 0;
+    bool     has_expect_ = false;
+    uint16_t expect_mv_ = 0;
+    uint16_t value_mv_ = 0;
+    Status   status_ = Status::Idle;
+    bool     need_clean_slot_ = false;
+    bool     cooldown_active_ = false;
+    uint32_t clean_pair_baseline_ = 0;
+    uint32_t armed_at_ms_ = 0;
+    uint32_t last_tx_ms_ = 0;
+    uint32_t tx_started_ms_ = 0;
+    uint32_t tx_count_ = 0;
+    std::string line_ = "idle";
+};
+
+inline bool BmsLinkCore::on_read_candidate_(uint32_t t_ms, const std::string& raw, int len) {
+    if (!read_waiter_->block_window_active(t_ms)) return false;
+    if (raw.substr(6, 2) != "00") return false;  // only a RTN-00 block is our answer
+    std::string short_line = read_waiter_->on_block(raw, len);
+    push_event(EventKind::BlockForRead, t_ms, read_waiter_->last_pack(), short_line);
+    ring_now(t_ms, short_line);  // ring budget truncates the 562-char frame; the verdict stays
+    return true;
 }
 
 }  // namespace linksniff

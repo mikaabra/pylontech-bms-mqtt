@@ -26,8 +26,10 @@ class BmsLinkSniffer {
 public:
     explicit BmsLinkSniffer(esphome::uart::UARTComponent* uart)
         : uart_(uart),
-          write_(core_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this) {
+          write_(core_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this),
+          read_(core_, write_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this) {
         core_.set_ack_waiter(&write_);
+        core_.set_read_waiter(&read_);
     }
 
     void bind_entities(esphome::text_sensor::TextSensor* last_anomaly,
@@ -38,6 +40,18 @@ public:
         anomaly_dump_ = anomaly_dump;
         write_status_ = write_status;
         write_enable_ = write_enable;
+    }
+
+    void bind_read_entities(esphome::text_sensor::TextSensor* read_status,
+                            esphome::sensor::Sensor* balance_mv_pack1,
+                            esphome::sensor::Sensor* balance_mv_pack2,
+                            esphome::sensor::Sensor* balance_mv_pack3,
+                            esphome::sensor::Sensor* balance_mv_pack4) {
+        read_status_ = read_status;
+        balance_mv_[1] = balance_mv_pack1;
+        balance_mv_[2] = balance_mv_pack2;
+        balance_mv_[3] = balance_mv_pack3;
+        balance_mv_[4] = balance_mv_pack4;
     }
 
     // one-shot trigger from the Send Balance Voltage Write button. Pack 0
@@ -54,8 +68,44 @@ public:
             write_status_->publish_state("refused: select a target pack first");
             return;
         }
+        auto rs = read_.status();
+        if (rs == linksniff::ReadController::Status::Armed ||
+            rs == linksniff::ReadController::Status::WaitBlock) {
+            write_status_->publish_state(
+                "refused: a read is in flight - wait for its verdict before writing");
+            return;
+        }
         write_.request(pack, 0x4C, value_mv, esphome::millis());
         write_status_->publish_state(write_.status_line());
+        // the read-back client grades against the value this write sent
+        last_written_valid_[pack] = true;
+        last_written_mv_[pack] = value_mv;
+    }
+
+    // one-shot trigger from the Read Balance Voltage button. The read is
+    // the step-4 acceptance proof producer: after a write, ReadOk with a
+    // matching value is the write-verify; without a recorded write the
+    // same press is a baseline read of the stored 0x4C.
+    void arm_read(uint8_t pack) {
+        if (!read_status_) return;
+        if (!write_enable_ || !write_enable_->state) {
+            read_status_->publish_state(
+                "refused: Link Operate Enable is off (turn it on deliberately)");
+            return;
+        }
+        if (pack == 0) {
+            read_status_->publish_state("refused: select a target pack first");
+            return;
+        }
+        auto ws = write_.status();
+        if (ws == linksniff::WriteController::Status::Armed ||
+            ws == linksniff::WriteController::Status::WaitAck) {
+            read_status_->publish_state("refused: a write is in flight - wait for its verdict");
+            return;
+        }
+        read_.request(pack, last_written_valid_[pack], last_written_mv_[pack],
+                      esphome::millis());
+        read_status_->publish_state(read_.status_line());
     }
 
     // 10 ms interval tick from yaml
@@ -70,18 +120,35 @@ public:
         if (n) core_.feed(buf, n, now);
         core_.tick(now);
         write_.tick(now);
+        read_.tick(now);
         for (const auto& e : core_.drain_events()) publish_event(e);
         if (write_status_ && write_.status_line() != last_write_line_) {
             last_write_line_ = write_.status_line();
             write_status_->publish_state(last_write_line_);
         }
+        // trusted read verdicts publish the per-pack 0x4C value; every
+        // untrusted grade leaves sensors untouched (fail-closed)
+        if (read_status_ && read_.status_line() != last_read_line_) {
+            last_read_line_ = read_.status_line();
+            read_status_->publish_state(last_read_line_);
+        }
+        auto rstat = read_.status();
+        auto prev_pair = op_status_prev_;
+        if (rstat != prev_pair.r) {
+            if ((rstat == linksniff::ReadController::Status::ReadOk ||
+                 rstat == linksniff::ReadController::Status::Mismatch) &&
+                balance_mv_[read_.last_pack()])
+                balance_mv_[read_.last_pack()]->publish_state((float)read_.value_mv());
+        }
         // review round 2: the enable gate auto-closes after every
-        // operation completes (ack, no-ack, collision, abort, expiry) -
-        // confirmation per press, matching the Mac tool's typed WRITE
-        auto prev = write_status_prev_;
-        write_status_prev_ = write_.status();
-        if (write_enable_ && write_enable_->state && prev != write_.status() &&
-            write_status_ && write_terminal(write_.status())) {
+        // operation completes (ack, no-ack, collision, abort, expiry -
+        // and the read client's terminal grades) - confirmation per
+        // press, matching the Mac tool's typed posture
+        bool any_op_terminal = write_terminal(write_.status()) || read_terminal(rstat);
+        op_status_prev_ = {write_.status(), rstat};
+        if (write_enable_ && write_enable_->state && op_in_flight(prev_pair) &&
+            any_op_terminal &&
+            write_status_) {
             write_enable_->turn_off();
             enable_on_ms_ = 0;
             write_status_->publish_state(last_write_line_ + " [enable auto-off]");
@@ -92,17 +159,21 @@ public:
         bool en = write_enable_ && write_enable_->state;
         if (en && !enable_prev_) enable_on_ms_ = now;
         enable_prev_ = en;
+        bool write_in_flight = write_.status() == linksniff::WriteController::Status::Armed ||
+                               write_.status() == linksniff::WriteController::Status::WaitAck;
+        bool read_in_flight = rstat == linksniff::ReadController::Status::Armed ||
+                              rstat == linksniff::ReadController::Status::WaitBlock;
         if (en && enable_on_ms_ && now - enable_on_ms_ > kEnableTimeoutMs &&
-            write_status_ && write_.status() != linksniff::WriteController::Status::Armed &&
-            write_.status() != linksniff::WriteController::Status::WaitAck) {
+            write_status_ && !write_in_flight && !read_in_flight) {
             write_enable_->turn_off();
             enable_on_ms_ = 0;
-            write_status_->publish_state("enable timed out after 5 min of idleness - turn it on deliberately for the next write");
+            write_status_->publish_state("enable timed out after 5 min of idleness - turn it on deliberately for the next operation");
         }
     }
 
     float writes_sent() const { return (float)write_.tx_count(); }
     float write_collisions() const { return (float)write_.collision_count(); }
+    float reads_sent() const { return (float)read_.tx_count(); }
 
     // Dump button: publish the ring and release a freeze. The core also
     // releases automatically once every trigger has cleared (publish_event
@@ -169,6 +240,11 @@ private:
                 // ack; it must not appear on the Last Anomaly feed
                 anomaly_like = false;
                 break;
+            case linksniff::EventKind::BlockForRead:
+                // healthy expected event: Link Read Status already carries
+                // the graded verdict and the ring holds the compact record
+                anomaly_like = false;
+                break;
         }
         if (!anomaly_like) return;
         char line[160];
@@ -200,12 +276,23 @@ private:
     esphome::uart::UARTComponent* uart_;
     linksniff::BmsLinkCore core_;
     linksniff::WriteController write_;
+    linksniff::ReadController read_;
     esphome::text_sensor::TextSensor* last_anomaly_ = nullptr;
     esphome::text_sensor::TextSensor* anomaly_dump_ = nullptr;
     esphome::text_sensor::TextSensor* write_status_ = nullptr;
+    esphome::text_sensor::TextSensor* read_status_ = nullptr;
     esphome::switch_::Switch* write_enable_ = nullptr;
+    esphome::sensor::Sensor* balance_mv_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
     std::string last_write_line_;
-    linksniff::WriteController::Status write_status_prev_ = linksniff::WriteController::Status::Idle;
+    std::string last_read_line_;
+    bool last_written_valid_[5] = {};
+    uint16_t last_written_mv_[5] = {};
+    struct OpStatusPair {
+        linksniff::WriteController::Status w;
+        linksniff::ReadController::Status r;
+    };
+    OpStatusPair op_status_prev_{
+        linksniff::WriteController::Status::Idle, linksniff::ReadController::Status::Idle};
     bool enable_prev_ = false;
     uint32_t enable_on_ms_ = 0;
     static constexpr uint32_t kEnableTimeoutMs = 300000;
@@ -214,6 +301,17 @@ private:
         using S = linksniff::WriteController::Status;
         return s == S::Acked || s == S::NoAck || s == S::Collision ||
                s == S::Aborted || s == S::Expired || s == S::Denied;
+    }
+    static bool read_terminal(linksniff::ReadController::Status s) {
+        using R = linksniff::ReadController::Status;
+        return s == R::ReadOk || s == R::Mismatch || s == R::WrongPack ||
+               s == R::Damaged || s == R::NoBlock || s == R::Aborted ||
+               s == R::Expired || s == R::Denied;
+    }
+    static bool op_in_flight(const OpStatusPair& p) {
+        using W = linksniff::WriteController::Status;
+        using R = linksniff::ReadController::Status;
+        return p.w == W::Armed || p.w == W::WaitAck || p.r == R::Armed || p.r == R::WaitBlock;
     }
 
     static bool enable_cb_(void* ctx) {

@@ -56,6 +56,7 @@ esphome:
       - lambda: |-
           id(link_sniffer) = (void*) new BmsLinkSniffer(id(link_uart));
           ((BmsLinkSniffer*)id(link_sniffer))->bind_entities(id(link_last_anomaly), id(link_anomaly_dump), id(link_write_status), id(link_write_enable));
+          ((BmsLinkSniffer*)id(link_sniffer))->bind_read_entities(id(link_read_status), id(pack1_balance_mv), id(pack2_balance_mv), id(pack3_balance_mv), id(pack4_balance_mv));
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -152,15 +153,16 @@ uart:
 
 switch:
   - platform: template
-    name: "Link Write Enable"
+    name: "Link Operate Enable"
     id: link_write_enable
     icon: "mdi:shield-key"
     entity_category: config
     optimistic: true
     restore_mode: ALWAYS_OFF
+    # local two-step confirm for BOTH tx clients (write + block read):
     # auto-off after every completed operation AND after 5 min of
-    # idleness (wrapper), so each write needs deliberate re-enabling -
-    # the per-write confirmation analog
+    # idleness (wrapper), so each write or read needs deliberate
+    # re-enabling - the per-operation confirmation analog
     state_topic: null
     command_topic: null
 
@@ -355,6 +357,52 @@ sensor:
       return ((BmsLinkSniffer*)id(link_sniffer))->write_collisions();
 
   - platform: template
+    name: "Link Reads Sent"
+    id: link_reads_sent
+    entity_category: diagnostic
+    update_interval: 60s
+    accuracy_decimals: 0
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->reads_sent();
+
+  # stored 0x4C per pack, published ONLY from checksum-valid,
+  # battery-matched block reads (the strict trust rule) - unknown until
+  # that pack's first trusted read
+  - platform: template
+    name: "Pack 1 Balance Start Voltage mV"
+    id: pack1_balance_mv
+    entity_category: diagnostic
+    unit_of_measurement: "mV"
+    accuracy_decimals: 0
+    # push-only: the wrapper publishes on a trusted read verdict
+    update_interval: never
+
+  - platform: template
+    name: "Pack 2 Balance Start Voltage mV"
+    id: pack2_balance_mv
+    entity_category: diagnostic
+    unit_of_measurement: "mV"
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "Pack 3 Balance Start Voltage mV"
+    id: pack3_balance_mv
+    entity_category: diagnostic
+    unit_of_measurement: "mV"
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    name: "Pack 4 Balance Start Voltage mV"
+    id: pack4_balance_mv
+    entity_category: diagnostic
+    unit_of_measurement: "mV"
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
     name: "Free Heap"
     id: sensor_free_heap
     unit_of_measurement: "bytes"
@@ -425,6 +473,13 @@ text_sensor:
     update_interval: never
 
   - platform: template
+    name: "Link Read Status"
+    id: link_read_status
+    entity_category: diagnostic
+    # push-only: the wrapper publishes the graded block-read verdict
+    update_interval: never
+
+  - platform: template
     name: "Link Last Anomaly"
     id: link_last_anomaly
     entity_category: diagnostic
@@ -458,9 +513,10 @@ number:
 
 select:
   # "None" boots unselected and never restores - a target must be chosen
-  # for every session (review round 2: no silent Pack-01 fallback)
+  # for every session (review round 2: no silent Pack-01 fallback); the
+  # single selection drives both the write and the block-read press
   - platform: template
-    name: "Write Target Pack"
+    name: "Target Pack"
     id: link_target_pack
     icon: "mdi:battery"
     entity_category: config
@@ -504,6 +560,26 @@ button:
             pack = (int)*id(link_target_pack).active_index();
           uint16_t mv = (uint16_t)id(link_balance_mv).state;
           ((BmsLinkSniffer*)id(link_sniffer))->arm_write((uint8_t)pack, mv);
+
+  # the dongle PoC's rs485_verify_write.py on-device: one D547 parameter-
+  # block read per press (same Target Pack selection, same Link Operate
+  # Enable confirm), graded by the core and reported on Link Read Status;
+  # per-pack 0x4C values publish only from checksum-valid, pack-matched
+  # blocks. Also the step-4 acceptance proof after a write: ReadOk with
+  # the written value = write verified; the ack alone never is.
+  - platform: template
+    name: "Read Balance Voltage Block"
+    icon: "mdi:eye-check-outline"
+    entity_category: diagnostic
+    state_topic: null
+    command_topic: null
+    on_press:
+      - lambda: |-
+          if (!id(link_sniffer)) return;
+          int pack = 0;
+          if (id(link_target_pack).active_index().has_value())
+            pack = (int)*id(link_target_pack).active_index();
+          ((BmsLinkSniffer*)id(link_sniffer))->arm_read((uint8_t)pack);
 
   - platform: template
     name: "Dump Anomaly Ring"
