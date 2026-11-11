@@ -577,6 +577,57 @@ static void test_late_answer_while_watchdog_tripped() {
     check(has_event(ev, EventKind::RingReleased), "released once the watchdog cleared");
 }
 
+static void test_publish_text_is_ascii() {
+    BmsLinkCore c;
+    // raw noise bytes riding a partial frame (captured live 2026-11-11:
+    // garbled ring entries carried \xFC\x98... and killed subscribed
+    // native-API consumers). The sanitized dump and every event detail
+    // must contain only printable ASCII.
+    send(c, "~80\xFC\x98" "M\"\xD5", 1000);
+    c.tick(1100);
+    auto ev = c.drain_events();
+    check(has_event(ev, EventKind::AnomalyGarbled), "noise partial flags garbled");
+    for (const auto& e : ev) {
+        bool clean = true;
+        for (char ch : e.detail)
+            if ((unsigned char)ch < 0x20 || (unsigned char)ch > 0x7E) clean = false;
+        check(clean, "event detail is printable ASCII");
+    }
+    // dump small enough to avoid the elision marker: strictly printable
+    std::string dump = c.dump_bounded();
+    bool all_ascii = true;
+    for (char ch : dump)
+        if ((unsigned char)ch < 0x20 || (unsigned char)ch > 0x7E) all_ascii = false;
+    check(all_ascii, "ring dump is printable ASCII");
+    check(dump.find("~80") != std::string::npos, "ASCII frame text kept verbatim");
+    check(dump.find("\\xFC") != std::string::npos, "noise byte escaped as \\xFC");
+    check(dump.find("\\x98") != std::string::npos, "noise byte escaped as \\x98");
+}
+
+static void test_gap_report() {
+    BmsLinkCore c;
+    // 4 regular 624 ms slots then one 1000 ms rotation-boundary slot.
+    // Only requests 2..5 record a gap (the first request has no prior
+    // frame end): gaps 609,609,609 (624-15) and 985 (1000-15).
+    uint32_t t = 1000;
+    for (int i = 0; i < 5; i++) {
+        send(c, poll_req(1 + (i % 4), "42"), t);
+        send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
+        t += (i == 3) ? 1000 : 624;
+    }
+    std::string rep = c.gap_report();
+    check(rep.substr(0, 3) == "n=4", "gap report count");
+    check(rep.find("min=609") != std::string::npos, "gap report min");
+    check(rep.find("max=985") != std::string::npos, "gap report max (long boundary)");
+    check(rep.find("avg=703") != std::string::npos, "gap report avg");
+    check(rep.find("gaps=609,609,609,985") != std::string::npos,
+          "gap report sequence oldest->newest");
+    send(c, poll_req(2, "42"), t);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
+    std::string rep6 = c.gap_report();
+    check(rep6.substr(0, 3) == "n=5", "gap report count grows");
+}
+
 int main() {
     test_lenid4();
     test_real_frames_parse_clean();
@@ -598,6 +649,8 @@ int main() {
     test_watchdog_clear_with_mute_holds();
     test_late_answer_while_watchdog_tripped();
     test_retrip_cancels_release();
+    test_publish_text_is_ascii();
+    test_gap_report();
 
     if (failures == 0) {
         printf("test_bms_link_sniffer_core: ALL PASS\n");

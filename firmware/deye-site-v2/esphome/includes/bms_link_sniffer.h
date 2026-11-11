@@ -271,6 +271,7 @@ public:
 
     // ---- getters for template-sensor lambdas ----
     float rate_per_s() { return core_.take_rate_per_s(esphome::millis()); }
+    std::string gap_report() const { return core_.gap_report(); }
     float frames_total() const { return (float)core_.frames_total(); }
     float checksum_errors() const { return (float)core_.checksum_errors(); }
     float anomalies_total() const { return (float)core_.anomalies_total(); }
