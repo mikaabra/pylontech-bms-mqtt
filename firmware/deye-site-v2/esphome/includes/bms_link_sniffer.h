@@ -26,8 +26,8 @@ class BmsLinkSniffer {
 public:
     explicit BmsLinkSniffer(esphome::uart::UARTComponent* uart)
         : uart_(uart),
-          write_(core_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this),
-          read_(core_, write_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this) {
+          write_(core_, gate_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this),
+          read_(core_, gate_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this) {
         core_.set_ack_waiter(&write_);
         core_.set_read_waiter(&read_);
     }
@@ -79,12 +79,16 @@ public:
                 "refused: a read is in flight - wait for its verdict before writing");
             return;
         }
-        write_.request(pack, 0x4C, value_mv, esphome::millis());
+        bool accepted = write_.request(pack, 0x4C, value_mv, esphome::millis());
         write_status_->publish_state(write_.status_line());
-        // the read-back client grades against the value this write sent
-        last_written_valid_[pack] = true;
-        last_written_param_[pack] = 0x4C;
-        last_written_mv_[pack] = value_mv;
+        // record only an ACCEPTED request (review fix): a refused or
+        // ignored press carries no written value, and a read-back must
+        // never grade against a value the bus never received
+        if (accepted) {
+            last_written_valid_[pack] = true;
+            last_written_param_[pack] = 0x4C;
+            last_written_mv_[pack] = value_mv;
+        }
     }
 
     // generic debug write (the allowlist still gates the param; each new
@@ -112,10 +116,12 @@ public:
                 "refused: a read is in flight - wait for its verdict before writing");
             return;
         }
-        write_.request(pack, param, raw_value, esphome::millis());
+        bool accepted = write_.request(pack, param, raw_value, esphome::millis());
         write_status_->publish_state(write_.status_line());
-        // only an ACCEPTED request records (denies carry no written value)
-        if (write_.status() == linksniff::WriteController::Status::Armed) {
+        // only an ACCEPTED request records (the return value, not the
+        // Armed status: an ignored in-flight press keeps the OLD op armed
+        // while this press's value never reached the wire)
+        if (accepted) {
             last_written_valid_[pack] = true;
             last_written_param_[pack] = param;
             last_written_mv_[pack] = raw_value;
@@ -221,14 +227,15 @@ public:
                 }
             }
         }
-        // review round 2: the enable gate auto-closes after every
-        // operation completes (ack, no-ack, collision, abort, expiry -
-        // and the read client's terminal grades) - confirmation per
-        // press, matching the Mac tool's typed posture
-        bool any_op_terminal = write_terminal(write_.status()) || read_terminal(rstat);
+        // review round 2: the enable gate auto-closes after every operation
+        // completes. Review-vote fix: only when the client that WAS in
+        // flight is the one that just reached its terminal state - a
+        // finished write stays Acked until the next write, and that stale
+        // Acked used to kill the read armed right after the write verdict
+        bool op_done = linksniff::op_just_finished(prev_pair.w, prev_pair.r,
+                                                   write_.status(), rstat);
         op_status_prev_ = {write_.status(), rstat};
-        if (write_enable_ && write_enable_->state && op_in_flight(prev_pair) &&
-            any_op_terminal &&
+        if (write_enable_ && write_enable_->state && op_done &&
             write_status_) {
             write_enable_->turn_off();
             enable_on_ms_ = 0;
@@ -240,10 +247,8 @@ public:
         bool en = write_enable_ && write_enable_->state;
         if (en && !enable_prev_) enable_on_ms_ = now;
         enable_prev_ = en;
-        bool write_in_flight = write_.status() == linksniff::WriteController::Status::Armed ||
-                               write_.status() == linksniff::WriteController::Status::WaitAck;
-        bool read_in_flight = rstat == linksniff::ReadController::Status::Armed ||
-                              rstat == linksniff::ReadController::Status::WaitBlock;
+        bool write_in_flight = linksniff::write_status_in_flight(write_.status());
+        bool read_in_flight = linksniff::read_status_in_flight(rstat);
         if (en && enable_on_ms_ && now - enable_on_ms_ > kEnableTimeoutMs &&
             write_status_ && !write_in_flight && !read_in_flight) {
             write_enable_->turn_off();
@@ -356,6 +361,7 @@ private:
 
     esphome::uart::UARTComponent* uart_;
     linksniff::BmsLinkCore core_;
+    linksniff::SharedTxGate gate_;
     linksniff::WriteController write_;
     linksniff::ReadController read_;
     esphome::text_sensor::TextSensor* last_anomaly_ = nullptr;
@@ -379,23 +385,6 @@ private:
     bool enable_prev_ = false;
     uint32_t enable_on_ms_ = 0;
     static constexpr uint32_t kEnableTimeoutMs = 300000;
-
-    static bool write_terminal(linksniff::WriteController::Status s) {
-        using S = linksniff::WriteController::Status;
-        return s == S::Acked || s == S::NoAck || s == S::Collision ||
-               s == S::Aborted || s == S::Expired || s == S::Denied;
-    }
-    static bool read_terminal(linksniff::ReadController::Status s) {
-        using R = linksniff::ReadController::Status;
-        return s == R::ReadOk || s == R::Mismatch || s == R::WrongPack ||
-               s == R::Damaged || s == R::NoBlock || s == R::Aborted ||
-               s == R::Expired || s == R::Denied;
-    }
-    static bool op_in_flight(const OpStatusPair& p) {
-        using W = linksniff::WriteController::Status;
-        using R = linksniff::ReadController::Status;
-        return p.w == W::Armed || p.w == W::WaitAck || p.r == R::Armed || p.r == R::WaitBlock;
-    }
 
     static bool enable_cb_(void* ctx) {
         BmsLinkSniffer* self = (BmsLinkSniffer*)ctx;

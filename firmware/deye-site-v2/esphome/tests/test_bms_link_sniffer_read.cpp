@@ -88,12 +88,13 @@ struct FakeBus {
 struct Harness {
     BmsLinkCore c;
     FakeBus bus;
+    linksniff::SharedTxGate gate;
     WriteController w;
     ReadController r;
 
     Harness()
-        : w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus),
-          r(c, w, FakeBus::enable_cb, FakeBus::tx_cb, &bus) {
+        : w(c, gate, FakeBus::enable_cb, FakeBus::tx_cb, &bus),
+          r(c, gate, FakeBus::enable_cb, FakeBus::tx_cb, &bus) {
         c.set_ack_waiter(&w);
         c.set_read_waiter(&r);
     }
@@ -389,6 +390,92 @@ static void test_generic_param_read_and_band_denies() {
     check_line_has(h.r.status_line(), "3420 mV", "balance param keeps mV wording");
 }
 
+// The review blocker, made permanent: the enable auto-off decision is
+// linksniff::op_just_finished over the wrapper's prev/cur status pair.
+// Drive BOTH real controllers through the exact sequence that used to die
+// (write verdict -> re-enable -> read) and its mirror, asserting the
+// wrapper's own decision at every tick.
+static void test_second_operation_not_killed() {
+    Harness h;
+    linksniff::WriteController::Status prev_w = h.w.status();
+    linksniff::ReadController::Status prev_r = h.r.status();
+    auto tick_both = [&](uint32_t t) {
+        h.w.tick(t);
+        h.r.tick(t);
+        bool off = linksniff::op_just_finished(prev_w, prev_r, h.w.status(), h.r.status());
+        prev_w = h.w.status();
+        prev_r = h.r.status();
+        return off;  // true = the wrapper turns the enable off here
+    };
+
+    uint32_t t = 1000;
+    pair_at(h, 1, t);
+    check(h.w.request(0x01, 0x4C, 3430, t + 30), "write armed");
+    check(!tick_both(t + 170), "in-flight write is not itself an auto-off");
+    check(h.w.status() == WriteController::Status::WaitAck, "write fired");
+    send(h.c, std::string(REAL_ACK) + "\r", t + 200);
+    check(tick_both(t + 210), "write completion auto-offs the enable (correct)");
+    check(h.w.status() == WriteController::Status::Acked, "write acked");
+
+    // operator re-enables and presses Read - the old "any terminal" rule
+    // killed the read on its first tick via the stale Acked
+    uint32_t t2 = t + 8000;
+    pair_at(h, 1, t2);
+    check(h.r.request(0x01, 0x4C, true, 3430, t2 + 30), "read armed after the write verdict");
+    check(!tick_both(t2 + 31), "stale Acked must NOT auto-off the in-flight read");
+    check(h.r.status() == ReadController::Status::Armed, "read survives the phantom tick");
+    check(!tick_both(t2 + 170), "no phantom auto-off while the read fires");
+    check(h.r.status() == ReadController::Status::WaitBlock, "read fired - not aborted");
+    send_block(h.c, clean_block_inner(0x01, 0x4C, "0D66"), t2 + 300);
+    check(tick_both(t2 + 320), "read verdict auto-offs the enable (correct)");
+    check(h.r.status() == ReadController::Status::ReadOk, "read-back PASS after a write - the step-4 sequence");
+
+    // mirror: a write armed right after the read verdict survives too
+    uint32_t t3 = t2 + 8000;
+    pair_at(h, 1, t3);
+    check(h.w.request(0x01, 0x4C, 3430, t3 + 30), "write armed after the read verdict");
+    check(!tick_both(t3 + 170), "second operation is a write: no phantom auto-off");
+    check(h.w.status() == WriteController::Status::WaitAck, "write fired - not aborted");
+    send(h.c, std::string(REAL_ACK) + "\r", t3 + 300);
+    check(tick_both(t3 + 310), "second write's verdict auto-offs the enable (correct)");
+    check(h.w.status() == WriteController::Status::Acked, "second write acked");
+
+    // the read-back graded against the recorded write value end to end
+    check(h.r.value_raw() == 0x0D66, "the read verified the written value");
+}
+
+// Review should-fix: the 4 s cooldown is ONE shared gate. A write armed
+// within 4 s of a read's TX must hold until the gate clears (the old code
+// consulted the write's own latch only).
+static void test_cooldown_bidirectional() {
+    Harness h;
+    uint32_t t = 1000;
+    pair_at(h, 1, t);
+    fire_read(h, 1, 0x4C, false, 0, t);  // the read's TX lands at t+170
+    check(h.bus.tx_log.size() == 1, "read frame out");
+
+    check(h.w.request(0x01, 0x4C, 3430, t + 700), "write armed during the read's cooldown");
+    bool fired = false;
+    uint32_t fired_at = 0;
+    uint32_t st = t + 624;
+    for (int i = 0; i < 10 && !fired; i++, st += 624) {
+        pair_at(h, 1, st);
+        h.w.tick(st + 170);
+        h.r.tick(st + 170);
+        if (h.w.status() == WriteController::Status::WaitAck) {
+            fired = true;
+            fired_at = st + 170;
+        } else {
+            check(h.w.status() == WriteController::Status::Armed, "write holds, not expired/aborted");
+        }
+    }
+    check(fired, "write fires once the SHARED cooldown clears");
+    check(fired_at - (t + 170) >= 4000, "it waited out the read's full 4 s latch");
+    check(h.bus.tx_log.size() == 2, "read frame + write frame, nothing between");
+    check_str(h.bus.tx_log[1], std::string(REAL_WRITE_INSTACK) + "\r",
+              "the second frame is the write");
+}
+
 static void test_enable_gates() {
     Harness h;
     uint32_t t = 1000;
@@ -432,6 +519,8 @@ int main() {
     test_write_cooldown_shared();
     test_expiry_no_cadence();
     test_generic_param_read_and_band_denies();
+    test_second_operation_not_killed();
+    test_cooldown_bidirectional();
     test_enable_gates();
     if (failures) {
         printf("%d read-oracle failures\n", failures);

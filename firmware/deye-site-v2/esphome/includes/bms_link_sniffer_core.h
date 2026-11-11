@@ -186,6 +186,21 @@ static constexpr int32_t  kCadenceFreshMs  = 1500;
 static constexpr uint32_t kArmExpiryMs    = 6000;
 static constexpr uint32_t kTxDueCooldownMs = 4000;
 
+// One shared TX gate for BOTH tx clients (review: the cooldown used to be
+// one-directional - the read waited on the write's latch but not vice
+// versa, and the clean-pair baseline moved only on the writer's own TX).
+// Every frame of ours, from either client, prices into the same 4 s
+// cooldown latch AND sets the same clean-pair baseline: nothing of ours
+// fires until one clean master exchange has been observed after our most
+// recent frame. Latch hygiene (expiry sweeping) runs in both controllers'
+// ticks; clearing is idempotent.
+struct SharedTxGate {
+    bool     cooldown_active = false;
+    uint32_t last_tx_ms = 0;
+    bool     need_clean_slot = false;
+    uint32_t clean_pair_baseline = 0;
+};
+
 // The captured bare ack (RTN 00, empty INFO), interior without SOI/EOI.
 static const char kRawBareAck[] = "8000D5000000FD9F";
 
@@ -763,7 +778,7 @@ private:
 //     triggers another transmit.
 //   - presses while an operation is in flight are IGNORED, never reset
 //   - every TX of ours demands one observed clean request/response pair
-//     before the next fire, across operations (sticky need_clean_slot_)
+//     before the next fire, across operations (sticky shared clean-slot latch)
 //   - kTxDueCooldownMs rate-limits consecutive frames across presses
 //   - fire needs BOTH a fresh poll cadence (kCadenceFreshMs) and a
 //     150..250 ms window after the last RX; the 150 ms verdict deadline
@@ -782,13 +797,13 @@ public:
     using EnableFn = bool (*)(void*);
     using TxFn = bool (*)(const std::string&, void*);
 
-    WriteController(BmsLinkCore& core, EnableFn enable, TxFn tx, void* ctx)
-        : core_(core), enable_(enable), tx_(tx), ctx_(ctx) {}
+    WriteController(BmsLinkCore& core, SharedTxGate& gate, EnableFn enable, TxFn tx, void* ctx)
+        : core_(core), gate_(gate), enable_(enable), tx_(tx), ctx_(ctx) {}
 
     // explicit one-shot trigger (the Send button). A press while an
     // operation is in flight is IGNORED - it never resets the pending
-    // one-shot's ack window. need_clean_slot_ is deliberately sticky: any
-    // TX of ours (this press or a previous one) demands one clean
+    // one-shot's ack window. the shared clean-slot latch is deliberately sticky: any
+    // TX of ours from either client (this press or a previous one) demands one clean
     // request/response pair before anything may fire next.
     bool request(uint8_t pack, uint8_t param, uint16_t value_mv, uint32_t now) {
         if (status_ == Status::Armed || status_ == Status::WaitAck) {
@@ -820,17 +835,18 @@ public:
         // cleared here the moment it expires and the state machines below
         // only ever test latches (or see intervals the 10 ms cadence keeps
         // short):
-        //   - the write cooldown latch clears at kTxDueCooldownMs
+        //   - the shared TX-gate cooldown latch clears at kTxDueCooldownMs
         //   - the late-ack listen window closes once it passes
-        //   - a completed pair AFTER our TX clears the clean-slot wait -
-        //     the baseline is core's pair COUNT, not a clock: a bus silent
-        //     for weeks moves no count, so it cannot wrap by construction
-        if (cooldown_active_ && (int32_t)(t_ms - last_tx_ms_) >= (int32_t)kTxDueCooldownMs)
-            cooldown_active_ = false;
+        //   - a completed pair AFTER any of our frames clears the clean-slot
+        //     wait - the baseline is core's pair COUNT, not a clock: a bus
+        //     silent for weeks moves no count, so it cannot wrap by construction
+        if (gate_.cooldown_active &&
+            (int32_t)(t_ms - gate_.last_tx_ms) >= (int32_t)kTxDueCooldownMs)
+            gate_.cooldown_active = false;
         if (late_ack_until_ms_ != 0 && (int32_t)(late_ack_until_ms_ - t_ms) <= 0)
             late_ack_until_ms_ = 0;
-        if (need_clean_slot_ && core_.pairs_total() > clean_pair_baseline_)
-            need_clean_slot_ = false;
+        if (gate_.need_clean_slot && core_.pairs_total() > gate_.clean_pair_baseline)
+            gate_.need_clean_slot = false;
         switch (status_) {
             case Status::Armed:    tick_armed(t_ms); break;
             case Status::WaitAck:  tick_wait_ack(t_ms); break;
@@ -865,10 +881,6 @@ public:
     const std::string& status_line() const { return line_; }
     uint32_t tx_count() const { return tx_count_; }
     uint32_t collision_count() const { return collision_count_; }
-    // shared TX budget: the write's 4 s post-TX latch, consulted by the
-    // read controller so two of our frames can never land closer than
-    // one cooldown apart
-    bool cooling_down() const { return cooldown_active_; }
 
 private:
     struct Pending { uint8_t pack; uint8_t param; uint16_t value_mv; };
@@ -884,14 +896,14 @@ private:
     // clears the latch as soon as the count moves, so the armed gate never
     // does 25-day-old clock arithmetic.
     void require_clean_() {
-        need_clean_slot_ = true;
-        clean_pair_baseline_ = core_.pairs_total();
+        gate_.need_clean_slot = true;
+        gate_.clean_pair_baseline = core_.pairs_total();
     }
     // every TX-ending outcome also opens the late-ack listen window,
     // bounded by the cooldown after our frame (tick() closes the latch)
     void end_tx_op_() {
         require_clean_();
-        late_ack_until_ms_ = last_tx_ms_ + kTxDueCooldownMs;
+        late_ack_until_ms_ = gate_.last_tx_ms + kTxDueCooldownMs;
     }
     bool ack_listen_active_(uint32_t now) const {
         return late_ack_until_ms_ != 0 &&
@@ -916,12 +928,12 @@ private:
         }
         if (core_.watchdog_tripped()) return;           // bus in unknown state: hold
         if (!core_.bus_established(t_ms)) return;       // no fresh poll cadence: hold
-        if (need_clean_slot_) return;                   // no clean pair observed since our TX (latch: tick clears)
+        if (gate_.need_clean_slot) return;              // no clean pair since our last frame, either client (latch: tick clears)
         // cooldown across operations (rounds 4-5): a LATCH set at every
-        // TX attempt (flush failures included - bytes may be on the wire
-        // either way) and cleared by tick() 4 s later, so this gate never
-        // compares a weeks-idle timestamp
-        if (cooldown_active_) return;
+        // TX attempt, either client (flush failures included - bytes may
+        // be on the wire either way) and cleared by tick() 4 s later, so
+        // this gate never compares a weeks-idle timestamp
+        if (gate_.cooldown_active) return;
         uint32_t since = core_.since_last_rx(t_ms);
         if (since < kGapConfirmMs || since > kGapMaxMs) return;  // land mid-idle, not at the next poll's edge
 
@@ -929,8 +941,8 @@ private:
         tx_started_ms_ = t_ms;
         bool ok = tx_(frame, ctx_);
         has_tx_ = true;
-        last_tx_ms_ = t_ms;
-        cooldown_active_ = true;  // round 5: latch, tick() clears it 4 s later
+        gate_.last_tx_ms = t_ms;
+        gate_.cooldown_active = true;  // round 5: latch, tick() clears it 4 s later
         tx_count_++;  // every TX attempt counts, flush failures included:
                       // bytes may be on the wire (round 3: never undercount)
         if (!ok) {
@@ -968,6 +980,7 @@ private:
     }
 
     BmsLinkCore& core_;
+    SharedTxGate& gate_;
     EnableFn enable_;
     TxFn tx_;
     void* ctx_;
@@ -975,11 +988,7 @@ private:
     Pending pending_{0, 0, 0};
     Status status_ = Status::Idle;
     bool has_tx_ = false;
-    bool need_clean_slot_ = false;
-    bool cooldown_active_ = false;       // round 5: latch, cleared by tick() at 4 s
-    uint32_t clean_pair_baseline_ = 0;  // round 5: pair-count baseline for the clean-slot wait
     uint32_t armed_at_ms_ = 0;
-    uint32_t last_tx_ms_ = 0;
     uint32_t tx_started_ms_ = 0;
     uint32_t late_ack_until_ms_ = 0;
     uint32_t tx_count_ = 0;
@@ -1036,9 +1045,9 @@ public:
     using EnableFn = bool (*)(void*);
     using TxFn = bool (*)(const std::string&, void*);
 
-    ReadController(BmsLinkCore& core, const WriteController& write_budget,
+    ReadController(BmsLinkCore& core, SharedTxGate& gate,
                    EnableFn enable, TxFn tx, void* ctx)
-        : core_(core), write_budget_(write_budget), enable_(enable), tx_(tx), ctx_(ctx) {}
+        : core_(core), gate_(gate), enable_(enable), tx_(tx), ctx_(ctx) {}
 
     bool request(uint8_t pack, uint8_t param, bool has_expect, uint16_t expect, uint32_t now) {
         if (status_ == Status::Armed || status_ == Status::WaitBlock) {
@@ -1067,10 +1076,11 @@ public:
     void tick(uint32_t t_ms) {
         // same long-uptime hygiene as the write client: latches expire
         // here on the 10 ms cadence, never by stale timestamp compares
-        if (cooldown_active_ && (int32_t)(t_ms - last_tx_ms_) >= (int32_t)kTxDueCooldownMs)
-            cooldown_active_ = false;
-        if (need_clean_slot_ && core_.pairs_total() > clean_pair_baseline_)
-            need_clean_slot_ = false;
+        if (gate_.cooldown_active &&
+            (int32_t)(t_ms - gate_.last_tx_ms) >= (int32_t)kTxDueCooldownMs)
+            gate_.cooldown_active = false;
+        if (gate_.need_clean_slot && core_.pairs_total() > gate_.clean_pair_baseline)
+            gate_.need_clean_slot = false;
         switch (status_) {
             case Status::Armed:     tick_armed(t_ms); break;
             case Status::WaitBlock: tick_wait_block(t_ms); break;
@@ -1176,20 +1186,19 @@ private:
         }
         if (core_.watchdog_tripped()) return;           // bus in unknown state: hold
         if (!core_.bus_established(t_ms)) return;       // no fresh poll cadence: hold
-        if (need_clean_slot_) return;                    // no clean pair since our last TX
-        if (cooldown_active_) return;                    // our own 4 s latch
-        if (write_budget_.cooling_down()) return;        // the write client's 4 s latch
+        if (gate_.need_clean_slot) return;               // no clean pair since our last frame, either client
+        if (gate_.cooldown_active) return;               // the shared 4 s latch
         uint32_t since = core_.since_last_rx(t_ms);
         if (since < kGapConfirmMs || since > kGapMaxMs) return;  // mid-idle, not at the edge
 
         std::string frame = build_read_frame(pack_);
         tx_started_ms_ = t_ms;
         bool ok = tx_(frame, ctx_);
-        last_tx_ms_ = t_ms;
-        cooldown_active_ = true;
+        gate_.last_tx_ms = t_ms;
+        gate_.cooldown_active = true;
         tx_count_++;  // flush failures included as TX attempts, same rule as writes
-        need_clean_slot_ = true;
-        clean_pair_baseline_ = core_.pairs_total();
+        gate_.need_clean_slot = true;
+        gate_.clean_pair_baseline = core_.pairs_total();
         if (!ok) {
             status_ = Status::Aborted;
             line_ = "aborted: uart flush failed - bytes may be on the wire; press Read again";
@@ -1219,7 +1228,7 @@ private:
     }
 
     BmsLinkCore& core_;
-    const WriteController& write_budget_;
+    SharedTxGate& gate_;
     EnableFn enable_;
     TxFn tx_;
     void* ctx_;
@@ -1230,15 +1239,41 @@ private:
     uint16_t expect_raw_ = 0;
     uint16_t value_raw_ = 0;
     Status   status_ = Status::Idle;
-    bool     need_clean_slot_ = false;
-    bool     cooldown_active_ = false;
-    uint32_t clean_pair_baseline_ = 0;
     uint32_t armed_at_ms_ = 0;
-    uint32_t last_tx_ms_ = 0;
     uint32_t tx_started_ms_ = 0;
     uint32_t tx_count_ = 0;
     std::string line_ = "idle";
 };
+
+// ---------------------------------------------------------------------------
+// Enable auto-off decision (review-vote fix): a finished write stays Acked
+// until the next write, so "any client terminal" fired a PHANTOM auto-off on
+// the second operation - a read armed right after a write verdict was
+// killed on its next tick by the stale Acked. The gate turns off only
+// when the client that WAS in flight on the previous tick is the one that
+// just reached a terminal state.
+inline bool write_status_in_flight(WriteController::Status s) {
+    return s == WriteController::Status::Armed || s == WriteController::Status::WaitAck;
+}
+inline bool read_status_in_flight(ReadController::Status s) {
+    return s == ReadController::Status::Armed || s == ReadController::Status::WaitBlock;
+}
+inline bool write_status_terminal(WriteController::Status s) {
+    using S = WriteController::Status;
+    return s == S::Acked || s == S::NoAck || s == S::Collision ||
+           s == S::Aborted || s == S::Expired || s == S::Denied;
+}
+inline bool read_status_terminal(ReadController::Status s) {
+    using R = ReadController::Status;
+    return s == R::ReadOk || s == R::Mismatch || s == R::WrongPack ||
+           s == R::Damaged || s == R::NoBlock || s == R::Aborted ||
+           s == R::Expired || s == R::Denied;
+}
+inline bool op_just_finished(WriteController::Status prev_w, ReadController::Status prev_r,
+                             WriteController::Status cur_w, ReadController::Status cur_r) {
+    return (write_status_in_flight(prev_w) && write_status_terminal(cur_w)) ||
+           (read_status_in_flight(prev_r) && read_status_terminal(cur_r));
+}
 
 inline bool BmsLinkCore::on_read_candidate_(uint32_t t_ms, const std::string& raw, int len) {
     if (!read_waiter_->block_window_active(t_ms)) return false;
