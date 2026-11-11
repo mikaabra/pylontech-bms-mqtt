@@ -646,6 +646,40 @@ static void test_answer_delay_bound() {
           "past-bound answer is not routed as ours");
 }
 
+// ---- 14. the live 17:18 lesson, made permanent -------------------------------
+// Pack 04 answered a real probe in 169 ms with a NON-9052-shaped RTN-00
+// frame; a shape gate rejected the pack's genuine answer. Acceptance is
+// the reviewer's structural trio only (first frame, no open request,
+// short delay) - a differently-shaped answer must be accepted, and the
+// rejected-answer telemetry cases (policy) must still hold: rule two
+// (no open request) is what excludes telemetry, not the shape.
+
+static void test_probe_answer_nonstandard_shape_accepted() {
+    Harness h;
+    uint32_t pair_end = establish_cadence(h, 1200000);
+    check(h.t.request_sys_off(4, pair_end + 30), "arm accepted");
+    h.t.tick(pair_end + 170);
+    check(h.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
+    // a B07E-shaped response answers our probe at the live-measured +169 ms
+    send(h.c, std::string(REAL_42_RESPONSE) + "\r", pair_end + 170 + 169);
+    check(h.t.status() == TeleOpController::Status::WaitWindow,
+          "non-9052 shaped answer accepted (structure, not shape)");
+    check_line_has(h.t.status_line(), "probe answered (id", "answered line");
+    auto ev = h.c.drain_events();
+    bool shaped = false;
+    for (const auto& e : ev)
+        if (e.kind == EventKind::ProbeAnswer && e.detail.find("LENID B07E") != std::string::npos)
+            shaped = true;
+    check(shaped, "the accepted answer's shape recorded on the ledger");
+    // the sequence completes: clean pair, write fires, ack, Done
+    pair_at(h, 4, pair_end + 170 + 169 + 200);
+    h.t.tick(pair_end + 170 + 169 + 200 + 15 + 155);
+    check(h.t.status() == TeleOpController::Status::WaitAck, "write fired after shape-blind answer");
+    check(h.bus.tx_log.size() == 2, "probe + write out");
+    bare_ack_at(h.c, pair_end + 170 + 169 + 200 + 170 + 120);
+    check(h.t.status() == TeleOpController::Status::Done, "SYS_OFF done on the non-9052 answer");
+}
+
 int main() {
     test_frames_byte_exact();
     test_sys_off_end_to_end();
@@ -662,6 +696,7 @@ int main() {
     test_probe_answer_not_consumed_when_no_window();
     test_half_pair_warning();
     test_answer_delay_bound();
+    test_probe_answer_nonstandard_shape_accepted();
     if (failures == 0)
         printf("telecontrol oracle: all scenarios passed\n");
     else
