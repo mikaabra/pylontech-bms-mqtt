@@ -518,13 +518,52 @@ The XML `teleControl_Group` defines a **2-byte control block** (`teleCtrlByteNum
 | 4 | **SYS_OFF** | Simple | Shut the pack down |
 | 5 | **Recovery** | Simple | Bring it back |
 
-Remote reset is therefore designed into the BMS. **The exact CID2 carrying this write on the BMS073 variant has not yet been observed.** Family evidence for its shape and semantics:
+Remote reset is therefore designed into the BMS. **The teleControl write is now captured — see the next section (2026-11-11 vendor-tool Link-bus session).** Pre-capture family evidence, retained as corroboration:
 
 - V-KING/TAICO spec: CID2 `E2` = "MOS / current-limit control", write, INFO = pack + 2-byte mask — matches the 2-byte control-block shape
 - Pylontech V3.5 (official family doc): CID2 `0x95` = per-battery turnoff; RTN codes `01`=VER error, `02`=CHKSUM error, `03`=LCHKSUM error, `04`=CID2 invalid, `06`=invalid INFO data
 - PACE BMSes (same ecosystem, per esphome-pace-bms documentation): **a shutdown command sent while the pack is actively charging or discharging causes the BMS to reinitialize and immediately wake back up — effectively a remote reboot.** A shutdown sent to an idle pack puts it into genuine sleep, with documented wake paths: charge activation, **communication activation** (frames on the bus), or manual reset — matching the `Recovery` bit and the "Communication Wake Up" parameter (bit_para, ByteIndex 5 bit 7)
 
-**Targets for the eventual automation:** capture the vendor tool's power-off/power-on buttons (same USBPcap method as the parameter-write capture) to pin the exact frames; run one deliberate in-stack reboot experiment on a pack *that is charging/discharging at the moment of reset*. Also: **a passive listener on the Link bus should capture the next real incident first** (see the reset-plan status below) — only automate a reset if that capture shows the pack still responding on the bus and a reset actually fixing it.
+**Status after the 2026-11-11 session:** the power-off/teleControl frames are **captured** (next section); the **recovery/re-on framing is not** — the observed wake was a LMCHG disable→enable pair, and the XML's Recovery bit (5) suggests a gate-05 write (conjecture, unobserved). Remaining targets: pin the recovery frame (derive-then-verify or next tool session), then one deliberate in-stack reboot experiment on a pack chosen for its variant-dependent behavior (old-gen = observed to reboot back; new-gen = observed to sit dark until woken). Also: **a passive listener on the Link bus should capture the next real incident first** (see the reset-plan status below) — only automate a reset if that capture shows the pack still responding on the bus and a reset actually fixing it.
+
+### teleControl captured on the wire (2026-11-11 vendor-tool Link-bus session)
+
+Provenance: the vendor tool over a USB-RS485 dongle attached at the far end of the Link bus; every frame below was logged by the passive ESP32 sniffer (PR #69 record comments 6795822885 / 6796297191 / 6796332174 hold the full frame dumps and button-by-button teardown; this section is the distilled protocol reference).
+
+**The teleControl write is CID2 `45`, INFO = `A0 06 [variant] [gate] [set]`:**
+
+`80 00 D5 45 A0 06 [variant] [gate] [set] [cksm]` — e.g. `80 00 D5 45 A0 06 04 04 10 FC 56` = enable SYS_OFF on a new-generation pack.
+
+- **gate byte** — matches this XML's `teleControl_Group` bit numbers exactly: `00` DISCHG, `01` CHG, `02` LMCHG, `04` SYS_OFF. Gate `05` (Recovery bit) never observed.
+- **variant byte** — `01` for the older generation (addresses 0–2), `04` for the newer (addresses 3–4; the two generations were bought 18 months apart).
+- **set byte** — `10` = enable the gate, `01` = disable it.
+
+Captured per-button frames (variant byte shown for new-generation targets; use `01` for old-generation):
+
+| command | disable (12 bytes) | enable (11 bytes) |
+|---|---|---|
+| DISCHG_CTRL (gate 00) | `80 00 D5 45 A0 06 04 00 01 FF C4` | `80 00 D5 45 A0 06 04 00 10 FC 5A` |
+| CHG_CTRL (gate 01) | `80 00 D5 45 A0 06 04 01 01 FF C3` | `80 00 D5 45 A0 06 04 01 10 FC 59` |
+| LMCHG_CTRL (gate 02) | `80 00 D5 45 A0 06 04 02 01 FF C2` | `80 00 D5 45 A0 06 04 02 10 FC 58` |
+| SYS_OFF (gate 04) | **never observed** — predicted, conjecture: `80 00 D5 45 A0 06 04 04 01 FF C0` | `80 00 D5 45 A0 06 04 04 10 FC 56` |
+
+Observed old-generation SYS_OFF enable: `80 00 D5 45 A0 06 01 04 10 FC 59`.
+
+Checksum classes (verified mechanically against every captured frame): 11-byte enable frames byte-sum **938 (0x3AA)**; 12-byte disable frames byte-sum **1032 (0x408)** with cksm `FF C(4−gate)`; 9-byte probes byte-sum **1033 (0x409)**.
+
+**Addressing.** The write frame carries no target. A presence probe selects it: `80 00 D5 C9 E0 02 [addr] FD (0x0C−addr)`; the pack answers `80 00 D5 00 90 52 00 [id] …`; the next write lands on the probed pack. Probes are suppressed while the tool's target is cached. Probes to empty addresses (e.g. `05`) fall silent — the tool reports "out of range". Acceptance ack: `80 00 D5 00 00 00 FD 9F`, +192–218 ms after the write (the same ack asymmetry the in-stack write client observes).
+
+**Behavior observed (five batteries, addresses 0–4):**
+
+- SYS_OFF enable on a healthy **old-generation** pack = fast reboot: back answering polls within a minute, no pack-mute event.
+- SYS_OFF enable on a healthy **new-generation** pack (address 4) = sits powered down (no LEDs) **while its comms module keeps answering polls normally** — the bus cannot reveal power-stage loss, and the master (address 00) kept reporting 5-of-5 available to the inverter throughout. The pack was woken by a **LMCHG disable→enable pair**.
+- Gate toggles execute battery-side regardless of the tool's success display: the tool's success/failure tracks **its own read-back**, not the battery — a "failed" press frequently landed and executed (one reported success = four acked writes on the wire). Tool-side failures come in three wire flavors: no transmission at all, a wrecked exchange (collision with master poll traffic), or a clean landing whose ack the tool's far-end receiver dropped — the last being the same position-correlated damage the sniffer's own end-tap shows on far-pack block reads.
+
+**Tool facts:** literal address selector 00–15; batteries at addresses 0–4 (master = 00); `bqadmin` login stays local, never on the wire (consistent with the parameter-write capture above).
+
+**Design constraints for automating reset (carried to the gated-op round):** allowlist restart operations to addresses 01–04, never 00 (the master's reboot takes the Link bus and inverter comms down); restart-only semantics (auto-return) — no bare SYS_OFF without a captured recovery path, because a powered-off pack is invisible to the inverter via the master's invariant "all available" report; verdict on read-back, never the ack. All three constraints follow directly from the observations above.
+
+**New unknowns from this session:** `80 00 D5 51 00 00 FD 99` (8 bytes, byte-sum 828 = 0x33C — a fourth cksm class; source and meaning unknown); one ingress-classified "(watchdog)" gap marker during heavy tool traffic; pack 01's continued block-read silence vs pack 02's first-ever clean read while the far-end dongle was attached (termination geometry — see PR #69 comment 6794588212 and the deployment-row pending note).
 
 ### The pack's own timers and standby bits — decoded from this hardware (unverified-names caveat)
 
