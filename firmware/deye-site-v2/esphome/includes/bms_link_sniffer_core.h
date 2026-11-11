@@ -211,6 +211,29 @@ struct SharedTxGate {
     uint32_t clean_pair_baseline = 0;
 };
 
+// Ring entries and event details cross publish boundaries that require
+// valid UTF-8: native-API protobuf rejects bad sequences (found on-device
+// 2026-11-11 when garbled UART noise — bytes >= 0x80 — rode text-sensor
+// updates and killed every subscribed consumer). The Link dialect's frames
+// are ASCII-hex text, so printable bytes stay verbatim; anything else
+// escapes as \xNN.
+inline std::string sanitize_publish_text(const std::string& s) {
+    static const char* kHexDigits = "0123456789ABCDEF";
+    std::string out;
+    out.reserve(s.size() + 8);
+    for (char ch : s) {
+        unsigned char b = (unsigned char)ch;
+        if (b >= 0x20 && b <= 0x7E) {
+            out += ch;
+        } else {
+            out += "\\x";
+            out += kHexDigits[b >> 4];
+            out += kHexDigits[b & 0xF];
+        }
+    }
+    return out;
+}
+
 // The captured bare ack (RTN 00, empty INFO), interior without SOI/EOI.
 static const char kRawBareAck[] = "8000D5000000FD9F";
 
@@ -435,6 +458,30 @@ public:
             sum += gap_ring_[i].gap_ms; cnt++;
         }
         return cnt ? (uint32_t)(sum / cnt) : 0;
+    }
+
+    std::string gap_report() const {
+        std::string seq;
+        uint64_t sum = 0; uint32_t cnt = 0, mn = 0, mx = 0;
+        // ring order: growth phase is already oldest->newest; once full,
+        // gap_head_ marks the next overwrite slot, i.e. the oldest entry
+        size_t n = gap_ring_.size();
+        for (size_t k = 0; k < n; k++) {
+            const GapSample& s = gap_ring_[(n < 32) ? k : (gap_head_ + k) % 32];
+            sum += s.gap_ms; cnt++;
+            if (mn == 0 || s.gap_ms < mn) mn = s.gap_ms;
+            if (s.gap_ms > mx) mx = s.gap_ms;
+            if (!seq.empty()) seq += ",";
+            seq += std::to_string(s.gap_ms);
+        }
+        std::string out = "n=" + std::to_string(cnt);
+        if (cnt) {
+            out += " min=" + std::to_string(mn)
+                 + " avg=" + std::to_string((uint32_t)(sum / cnt))
+                 + " max=" + std::to_string(mx)
+                 + " gaps=" + seq;
+        }
+        return out;
     }
 
     // frames/s over the window since the previous call (rate sensor)
@@ -698,10 +745,11 @@ private:
         }
         RingEntry e;
         e.t_ms = t_ms;
-        if (hex.size() > kRingHexBudget) {
-            e.hex = hex.substr(0, kRingHexBudget) + "…(+" + std::to_string(hex.size() - kRingHexBudget) + ")";
+        std::string text = sanitize_publish_text(hex);
+        if (text.size() > kRingHexBudget) {
+            e.hex = text.substr(0, kRingHexBudget) + "…(+" + std::to_string(text.size() - kRingHexBudget) + ")";
         } else {
-            e.hex = hex;
+            e.hex = text;
         }
         ring_[ring_head_] = e;
         ring_head_ = (ring_head_ + 1) % kRingSlots;
@@ -710,7 +758,7 @@ private:
 
     void push_event(EventKind k, uint32_t t, int pack, const std::string& detail) {
         if (events_.size() >= 64) { dropped_events_++; return; }  // wrapper drains every 10 ms
-        events_.push_back(LinkEvent{k, t, pack, detail});
+        events_.push_back(LinkEvent{k, t, pack, sanitize_publish_text(detail)});
     }
 
     // ---- ack-waiter hookup (set only by the guarded write client) ---------
