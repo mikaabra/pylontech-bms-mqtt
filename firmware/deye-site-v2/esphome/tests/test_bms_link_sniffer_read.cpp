@@ -551,21 +551,31 @@ static void test_aim_falls_back_when_no_longs() {
 
 static void test_aim_detects_early_long_gap() {
     Harness h;
-    // rotation drift: a long gap opens while the counter says not-due.
-    // Hold through the confirm band, then fire mid-flight once the gap
-    // out-lives every regular idle
+    // rotation drift: the long opening goes late. The detected-mid-gap
+    // fire could never satisfy the reviewer's runway equation
+    // (600 + turnaround + 585 > any observed long gap) - it was a
+    // guaranteed 1-3 ms tail race, so the detected path is gone: the
+    // read HOLDS through the old detect band (asserted at since=654),
+    // the late rotation lands as the next long, the counters march to
+    // due, and the fire happens at the capped predicted bound.
     pair_at(h, 1, 1000);
-    pair_at(h, 2, 2116);   // gap 1100 (long)
-    pair_at(h, 3, 2651);   // gap 520
+    pair_at(h, 2, 2116);   // gap 1101 (long) - counter resets
+    pair_at(h, 3, 2651);   // gap 520 - counter 1
     check(h.r.request(0x01, 0x4C, false, 0, 2700, true), "aimed read armed (drift)");
-    h.r.tick(2836);        // counter 1, since 170: in the confirm band but not due
-    check(h.r.status() == ReadController::Status::Armed, "holds before detection band");
-    h.r.tick(3110);        // since 444: confirm band passed, not detected yet
-    check(h.r.status() == ReadController::Status::Armed, "still holding below detect band");
-    h.r.tick(3320);        // since 654 >= kLongGapDetectMs: long gap detected mid-flight
+    h.r.tick(2836);        // since 170: confirm band, counter 1 - not due
+    check(h.r.status() == ReadController::Status::Armed, "holds below due, no fire");
+    h.r.tick(3110);        // since 444: confirm band passed, nothing due
+    check(h.r.status() == ReadController::Status::Armed, "still holding");
+    h.r.tick(3320);        // since 654: the OLD detect band - must NOT fire
+    check(h.r.status() == ReadController::Status::Armed,
+          "detected-mid-gap fire is gone (runway equation can never hold there)");
+    pair_at(h, 4, 3400);   // drift-made long (gap 734) - counter resets
+    pair_at(h, 1, 4040);  // regular 625 - counter 1
+    pair_at(h, 2, 4664);  // regular 624 - counter 2: due
+    h.r.tick(4794);        // since 115 into the opening: due + capped band
     check(h.r.status() == ReadController::Status::WaitBlock,
-          "fires mid-flight once the gap out-lives regular idle");
-    check_line_has(h.r.status_line(), "detected-long", "fire line names the detected window");
+          "fires through the due counter at the capped fire bound");
+    check_line_has(h.r.status_line(), "predicted-long", "fire line names the window class");
     check(h.bus.tx_log.size() == 1, "exactly one frame fired");
 }
 

@@ -183,15 +183,22 @@ inline std::string build_write_frame(uint8_t pack, uint8_t param, uint16_t value
 static constexpr uint32_t kGapConfirmMs    = 150;
 static constexpr uint32_t kGapMaxMs        = 250;
 
-// Long-gap aim, measured live 2026-11-11 (Link Gap Report): regular idle
-// runs 470-530 ms, one ~1100 ms gap opens every 3rd slot (the master's
-// rotation boundary). A block answer needs ~590 ms of wire at 9600 baud -
-// it fits ONLY inside a long gap, never a regular one.
+// Long-gap aim, measured live 2026-11-11 (Link Gap Report) + the
+// reviewer's runway equation: regular idle runs 470-530 ms, one ~1100 ms
+// rotation gap every 3rd slot. The A222 block answer needs ~585 ms of
+// wire + the pack's turnaround (probe-family answers measured 275-277 ms
+// live; 300 ms budgeted) => a fire at T ends its answer at
+// T + 300 + 590. The latest safe fire into a measured ~1100 ms long gap
+// is therefore ~210 ms; kAimLatestFireMs sits at 180 with jitter
+// headroom. The old detected-mid-gap band (600-1000 ms) can never
+// satisfy the equation (600 + 300 + 590 > any observed long gap) - a
+// detected-long fire was a guaranteed 1-3 ms tail race, so the detected
+// path is gone. Missed prediction costs one rotation of latency, not a
+// damaged frame.
 static constexpr uint32_t kLongGapMs         = 700;
 static constexpr uint32_t kLongGapEverySlots = 3;
-static constexpr uint32_t kLongGapDetectMs   = 600;
-static constexpr uint32_t kLongGapDetectMaxMs = 1000;  // stay inside the long gap
-static constexpr uint32_t kAimGapConfirmMs  = 115;  // above the 100 ms frame-pause ceiling
+static constexpr uint32_t kAimGapConfirmMs   = 115;  // above the 100 ms frame-pause ceiling
+static constexpr uint32_t kAimLatestFireMs   = 180;  // reviewer runway cap: fire + turnaround + wire <= gap
 static constexpr uint32_t kAckDeadlineMs   = 150;
 static constexpr int32_t  kCadenceFreshMs  = 1500;
 static constexpr uint32_t kArmExpiryMs    = 6000;
@@ -306,6 +313,22 @@ static const char kLmchgDisableNewGen[] = "~8000D545A006040201FFC2\r";
 // The probe answer's LENID (identity block, INFO = 00 [id] ...; captured
 // literal "80 00 D5 00 90 52 00 [id] ..."). Routing matches LENID exactly.
 static const char kProbeAnswerLenid[] = "9052";
+
+// Identity-answer content gate (reviewer-prescribed): after the leading
+// 00, the identity block carries a printable-ASCII ID (captured
+// 4A473235 = "JG25"); telemetry answers carry the battery number there
+// (0001... -> bytes 0x00 0x01, not printable). Generic - no
+// battery-specific data. A candidate that passes shape + structure but
+// fails this content test is a telemetry answer in disguise and is
+// rejected: the FET-control path never fires on it.
+inline bool probe_identity_content(const std::string& info) {
+    if (info.size() < 6) return false;
+    unsigned long v;
+    if (!parse_hex(info.substr(2, 4), v)) return false;
+    uint8_t b0 = (uint8_t)((v >> 8) & 0xFF);
+    uint8_t b1 = (uint8_t)(v & 0xFF);
+    return b0 >= 0x20 && b0 <= 0x7E && b1 >= 0x20 && b1 <= 0x7E;
+}
 
 // Tool-observed variant byte per Link address (PROTOCOL_REFERENCE
 // teleControl catalog: the tool sent 01 for packs at addresses 01-02
@@ -647,7 +670,7 @@ private:
         // and the bus record keeps it as a read artifact, not a pack or
         // master fault.
         if (len >= kBlockMinInfoChars && read_waiter_ &&
-            on_read_candidate_(t_ms, raw, len))
+            on_read_candidate_(t_ms, frame_start_t_ms_, raw, len))
             return;
         size_t expect = (size_t)(12 + len + 4);
         if (raw.size() != expect) return malformed_lenid(t_ms, raw, "len mismatch");
@@ -674,10 +697,16 @@ private:
             if (len == 0) return on_bare_ack(t_ms);
             // a 9052 frame is only OUR probe answer when the controller's
             // structural acceptance says so (first frame since our probe,
-            // no master request open, short turnaround); routine 0x44
-            // telemetry answers share the LENID and must fall through to
-            // normal pairing - the reviewer's blocker case
+            // no master request open, short turnaround) AND the content is
+            // an identity block (printable-ASCII ID, not a battery
+            // number); routine 0x44 telemetry answers share the LENID and
+            // must fall through to normal pairing - the reviewer's
+            // blocker case
             if (lenid == kProbeAnswerLenid && consume_probe_answer_(t_ms, info)) return;
+            // any window-opening response the acceptance did not consume
+            // is recorded, not argued about (the 17:18 lesson) - see
+            // record_probe_stray_ for the identification format
+            record_probe_stray_(t_ms, info, lenid);
             on_response(t_ms);
             return;
         }
@@ -763,7 +792,8 @@ private:
     void on_bare_ack(uint32_t t_ms);
     // Defined after ReadController (batch candidate consult) — true when
     // the frame was consumed as our own pending block read's answer
-    bool on_read_candidate_(uint32_t t_ms, const std::string& raw, int len);
+    bool on_read_candidate_(uint32_t t_ms, uint32_t answer_start_ms,
+                            const std::string& raw, int len);
 
     // ---- helpers -------------------------------------------------------------
     void close_open_slot_unanswered() {
@@ -900,6 +930,7 @@ private:
     // Defined after TeleOpController (incomplete-type boundary, same
     // pattern as on_bare_ack / on_read_candidate_)
     bool consume_probe_answer_(uint32_t t_ms, const std::string& info);
+    void record_probe_stray_(uint32_t t_ms, const std::string& info, const std::string& lenid);
     void notify_telecom_probe_(uint32_t t_ms);
     bool route_teleop_ack_(uint32_t t_ms);
 };
@@ -1244,10 +1275,18 @@ public:
 
     // The core routes our block here before pairing/classification. The
     // returned short line is the ring/event record; the long status_ line
-    // is the operator's evidence. Grading is fail-closed everywhere.
-    std::string on_block(const std::string& raw, int len) {
+    // is the operator's evidence. Grading is fail-closed everywhere. The
+    // answer's start delay (fire -> answer-first-byte) rides both lines:
+    // it is THE variable the block-answer timing theory depends on (the
+    // reviewer: log it - a few bytes instead of 562), so every grade,
+    // clean or damaged, carries the measurement.
+    std::string on_block(const std::string& raw, int len, uint32_t answer_start_ms) {
+        int start_delay = (int32_t)(answer_start_ms - tx_started_ms_);
+        if (start_delay < 0) start_delay = 0;
+        answer_start_delay_ms_ = start_delay;
+        std::string delay_tag = " start+" + std::to_string(start_delay) + "ms";
         size_t expect = (size_t)(12 + len + 4);
-        std::string short_line = "D547 " + hex2(pack_) + " " + std::to_string(raw.size()) + "ch";
+        std::string short_line = "D547 " + hex2(pack_) + " " + std::to_string(raw.size()) + "ch" + delay_tag;
         if (raw.size() != expect) {
             status_ = Status::Damaged;
             line_ = "collision-damaged: frame length altered (" + std::to_string(raw.size()) +
@@ -1338,18 +1377,16 @@ private:
         uint32_t since = core_.since_last_rx(t_ms);
         const char* aim_class = nullptr;
         if (aim_long_gap_) {
-            // long-gap aim: fire when the opening gap is the rotation's due
-            // long one (confirmed early - 115 ms is above the 100 ms frame-
-            // pause ceiling, so it stays provably post-exchange - to hand
-            // the ~590 ms answer maximal runway), or when a gap has already
-            // out-lived every regular idle (>= 600 ms: it IS long, detected
-            // mid-flight). The class label on 'sent' turns each attempt
-            // into measured evidence for tuning.
+            // long-gap aim: fire only when the rotation phase predicts the
+            // opening gap is the due long one AND the fire sits inside the
+            // runway cap (early enough that fire + turnaround + ~585 ms of
+            // answer still lands inside the measured ~1100 ms gap - the
+            // reviewer's equation; 250 ms overran even healthy packs, and
+            // mid-gap detection could never satisfy it at all).
             bool aim_at_predicted = core_.long_gap_due() &&
-                                    since >= kAimGapConfirmMs && since <= kGapMaxMs;
-            bool aim_at_detected = since >= kLongGapDetectMs && since <= kLongGapDetectMaxMs;
-            if (!aim_at_predicted && !aim_at_detected) return;
-            aim_class = aim_at_detected ? "detected-long" : "predicted-long";
+                                    since >= kAimGapConfirmMs && since <= kAimLatestFireMs;
+            if (!aim_at_predicted) return;
+            aim_class = "predicted-long";
         } else if (since < kGapConfirmMs || since > kGapMaxMs) {
             return;  // mid-idle, not at the edge
         }
@@ -1405,6 +1442,7 @@ private:
     uint16_t expect_raw_ = 0;
     uint16_t value_raw_ = 0;
     bool     aim_long_gap_ = false;
+    int      answer_start_delay_ms_ = -1;  // fire -> answer-first-byte, logged on every grade
     Status   status_ = Status::Idle;
     uint32_t armed_at_ms_ = 0;
     uint32_t tx_started_ms_ = 0;
@@ -1533,6 +1571,15 @@ public:
                frames_total_now == probe_frames_snapshot_ + 1 &&
                (int32_t)(now - probe_tx_ms_) <= (int32_t)kTeleAnswerQuickMs;
     }
+
+    // open-window query for the core's stray recorder, plus the probe TX
+    // timestamp for its delay field - every un-consumed response during a
+    // window gets identified in the ring instead of argued about
+    bool probe_window_open(uint32_t now) const {
+        return status_ == Status::WaitProbe &&
+               (int32_t)(now - probe_tx_ms_) <= (int32_t)kTeleAnswerWindowMs;
+    }
+    uint32_t probe_tx_ms() const { return probe_tx_ms_; }
 
     bool ack_expected(uint32_t now) const {
         if (status_ == Status::WaitAck) return true;
@@ -1933,10 +1980,11 @@ inline bool op_just_finished(WriteController::Status prev_w, ReadController::Sta
            (teleop_status_in_flight(prev_t) && teleop_status_terminal(cur_t));
 }
 
-inline bool BmsLinkCore::on_read_candidate_(uint32_t t_ms, const std::string& raw, int len) {
+inline bool BmsLinkCore::on_read_candidate_(uint32_t t_ms, uint32_t answer_start_ms,
+                                            const std::string& raw, int len) {
     if (!read_waiter_->block_window_active(t_ms)) return false;
     if (raw.substr(6, 2) != "00") return false;  // only a RTN-00 block is our answer
-    std::string short_line = read_waiter_->on_block(raw, len);
+    std::string short_line = read_waiter_->on_block(raw, len, answer_start_ms);
     push_event(EventKind::BlockForRead, t_ms, read_waiter_->last_pack(), short_line);
     ring_now(t_ms, short_line);  // ring budget truncates the 562-char frame; the verdict stays
     return true;
@@ -1956,6 +2004,15 @@ inline bool BmsLinkCore::consume_probe_answer_(uint32_t t_ms, const std::string&
         telecom_waiter_->on_probe_answer_rejected(t_ms);
         return false;
     }
+    if (!probe_identity_content(info)) {
+        // shape + structure passed but the content is a battery number,
+        // not an identity: a telemetry answer in disguise (reviewer route
+        // two - our probe garbles the master's request, its polled pack
+        // answers within ~15 ms, nothing is open, the frame count moved
+        // only by the pair) - reject, the write never fires on it
+        telecom_waiter_->on_probe_answer_rejected(t_ms);
+        return false;
+    }
     last_frame_end_ms_ = frame_end_t_ms_;
     telecom_waiter_->on_probe_answer(t_ms, info);
     std::string id = info.size() > 2 ? info.substr(2, 8) : std::string("?");
@@ -1963,6 +2020,18 @@ inline bool BmsLinkCore::consume_probe_answer_(uint32_t t_ms, const std::string&
                "9052 identity answer id " + id);
     ring_now(t_ms, "9052 id " + id);
     return true;
+}
+
+// Identified, not argued about (the 17:18 lesson): every response during
+// an open probe window that the acceptance did not consume lands in the
+// ring with its LENID, its delay and its first bytes - the next surprise
+// gets identified instead of inferred about.
+inline void BmsLinkCore::record_probe_stray_(uint32_t t_ms, const std::string& info,
+                                             const std::string& lenid) {
+    if (!telecom_waiter_ || !telecom_waiter_->probe_window_open(t_ms)) return;
+    ring_now(t_ms, "probe stray " + lenid + " +" +
+                       std::to_string(t_ms - telecom_waiter_->probe_tx_ms()) + "ms " +
+                       info.substr(0, 24));
 }
 
 inline void BmsLinkCore::notify_telecom_probe_(uint32_t t_ms) {
