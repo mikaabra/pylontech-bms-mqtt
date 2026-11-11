@@ -672,8 +672,12 @@ private:
         }
         if (cid2 == "00") {
             if (len == 0) return on_bare_ack(t_ms);
-            if (lenid == kProbeAnswerLenid && probe_answer_expected_(t_ms))
-                return on_probe_answer_(t_ms, info);
+            // a 9052 frame is only OUR probe answer when the controller's
+            // structural acceptance says so (first frame since our probe,
+            // no master request open, short turnaround); routine 0x44
+            // telemetry answers share the LENID and must fall through to
+            // normal pairing - the reviewer's blocker case
+            if (lenid == kProbeAnswerLenid && consume_probe_answer_(t_ms, info)) return;
             on_response(t_ms);
             return;
         }
@@ -895,8 +899,7 @@ private:
     TeleOpController* telecom_waiter_ = nullptr;
     // Defined after TeleOpController (incomplete-type boundary, same
     // pattern as on_bare_ack / on_read_candidate_)
-    void on_probe_answer_(uint32_t t_ms, const std::string& info);
-    bool probe_answer_expected_(uint32_t t_ms);
+    bool consume_probe_answer_(uint32_t t_ms, const std::string& info);
     void notify_telecom_probe_(uint32_t t_ms);
     bool route_teleop_ack_(uint32_t t_ms);
 };
@@ -1425,7 +1428,15 @@ private:
 // that landed these same sequences all session. Short frames (~12 ms of
 // wire) fire into regular idle windows - no long-gap aim needed.
 // ---------------------------------------------------------------------------
-static constexpr uint32_t kTeleAnswerWindowMs = 1500;   // probe answer collect
+static constexpr uint32_t kTeleAnswerWindowMs = 1500;  // probe answer collect window
+static constexpr uint32_t kTeleAnswerQuickMs  = 300;   // acceptance bound: on this bus
+                                                     // short-frame turnarounds run
+                                                     // <16 ms (telemetry) to ~230 ms
+                                                     // (late bare acks); 300 ms sits
+                                                     // above every captured probe->
+                                                     // answer latency while staying
+                                                     // inside the same idle window
+                                                     // the probe fired in
 static constexpr uint32_t kTeleOpDeadlineMs   = 15000;  // whole-sequence budget
 static constexpr uint32_t kTeleIntraGapMs     = 400;    // min spacing between our frames in one press
 
@@ -1503,9 +1514,18 @@ public:
         }
     }
 
-    bool probe_window_active(uint32_t now) const {
+    // Reviewer-prescribed structural acceptance (PR #82 blocker): a 9052
+    // frame counts as OUR probe answer only when it is structurally provable
+    // - the FIRST frame since our probe (frames_total moved by exactly one:
+    // our frames ride the UART, never the classifier), no master request
+    // open (the core checks that side - a routine 0x44 telemetry answer
+    // shares this LENID and pairs to its poll), and inside the short
+    // turnaround bound. Anything else falls through to the normal listener
+    // path: the chain stays fail-closed against a silent pack.
+    bool probe_accept(uint32_t now, uint32_t frames_total_now) const {
         return status_ == Status::WaitProbe &&
-               (int32_t)(now - probe_tx_ms_) <= (int32_t)kTeleAnswerWindowMs;
+               frames_total_now == probe_frames_snapshot_ + 1 &&
+               (int32_t)(now - probe_tx_ms_) <= (int32_t)kTeleAnswerQuickMs;
     }
 
     bool ack_expected(uint32_t now) const {
@@ -1566,6 +1586,7 @@ public:
         status_ = Status::Aborted;
         line_ = "aborted: another presence probe re-latched the teleControl target -"\
                 " sequence stopped before any unsent frame; press again";
+        append_pair_warning_();
         end_tx_op_();
     }
 
@@ -1593,8 +1614,22 @@ private:
         variant_ = variant;
         seq_idx_ = 0;
         wrote_any_ = false;
+        disable_sent_ = false;
+        enable_sent_ = false;
         armed_at_ms_ = now;
         status_ = Status::Armed;
+    }
+
+    // Reviewer should-fix: a wake pair that stops after the disable flew
+    // leaves the pack potentially LMCHG-disabled, and every terminal line
+    // from such a stop must say so - "press again" alone is dangerous
+    // ambiguity when half of the pair is battery-side already.
+    void append_pair_warning_() {
+        if (op_ == Op::WakePair && disable_sent_ && !enable_sent_) {
+            line_ += " - the LMCHG enable was NOT sent and this pack may be"
+                     " left with LMCHG disabled; press Wake Pair again or"
+                     " use the physical button";
+        }
     }
 
     const char* op_name_() const {
@@ -1617,6 +1652,7 @@ private:
             line_ = std::string("aborted: enable switched off mid-sequence - ") + who +
                     (wrote_any_ ? " (frames already sent stay sent; nothing more fires)"
                                 : " (the probe was sent, the write was not)");
+            append_pair_warning_();
             return false;
         }
         if ((int32_t)(t_ms - armed_at_ms_) > (int32_t)kTeleOpDeadlineMs) {
@@ -1624,6 +1660,7 @@ private:
             line_ = "expired: no safe window within " +
                     std::to_string(kTeleOpDeadlineMs / 1000) +
                     " s - nothing further fires; press again";
+            append_pair_warning_();
             return false;
         }
         if (core_.watchdog_tripped()) return false;
@@ -1648,10 +1685,15 @@ private:
             status_ = Status::Aborted;
             line_ = "aborted: uart flush failed sending " + what +
                     " - bytes may be on the wire; nothing further fires this press";
+            append_pair_warning_();
             end_tx_op_();
             return;
         }
         wrote_any_ = true;
+        if (op_ == Op::WakePair) {
+            if (seq_idx_ == 0) disable_sent_ = true;
+            else enable_sent_ = true;
+        }
         status_ = Status::WaitAck;
         line_ = what + " sent (" + std::to_string(frame.size()) +
                 " chars) - waiting for the single-frame ack (150 ms window;"\
@@ -1667,6 +1709,7 @@ private:
         if (since < kGapConfirmMs || since > kGapMaxMs) return;
         std::string frame = build_probe_frame(pack_);
         probe_tx_ms_ = t_ms;
+        probe_frames_snapshot_ = core_.frames_total();
         bool ok = tx_(frame, ctx_);
         gate_.last_tx_ms = t_ms;
         gate_.cooldown_active = true;
@@ -1685,12 +1728,30 @@ private:
     }
 
     void tick_wait_probe(uint32_t t_ms) {
-        if (!common_holds_(t_ms, "waiting for the probe answer")) return;
-        if (probe_window_active(t_ms)) return;
+        // the verdict path runs ungated (same rule as the ack deadline):
+        // bus holds never postpone a NoAnswer classification
+        if (!enable_(ctx_)) {
+            status_ = Status::Aborted;
+            line_ = "aborted: enable switched off - the probe was sent, the write" \
+                    " was not; nothing further fires";
+            append_pair_warning_();
+            return;
+        }
+        // any RX since our probe that was not accepted as the answer means
+        // the answer can no longer be the first frame: verdict NOW, never
+        // at the window's edge - routine telemetry arrives within seconds
+        // on this bus, and the write must not fly on the far side of it
+        if (core_.frames_total() != probe_frames_snapshot_) {
+            status_ = Status::NoAnswer;
+            line_ = "no probe answer first-off: bus traffic followed our probe" \
+                    " without the pack answering - the teleControl write was" \
+                    " NOT sent (fail-closed); press again";
+            return;
+        }
+        if ((int32_t)(t_ms - probe_tx_ms_) <= (int32_t)kTeleAnswerWindowMs) return;
         status_ = Status::NoAnswer;
-        line_ = "no probe answer in " + std::to_string(kTeleAnswerWindowMs / 1000) +
-                " s - the teleControl write was NOT sent (fail-closed: no answer,"\
-                " no write); press again";
+        line_ = "no probe answer in the 1.5 s window - the teleControl write" \
+                " was NOT sent (fail-closed: no answer, no write); press again";
     }
 
     void tick_wait_window(uint32_t t_ms) {
@@ -1740,9 +1801,12 @@ private:
         }
         status_ = traffic ? Status::Collision : Status::NoAck;
         line_ = std::string(verdict) + " on the LMCHG enable - disarmed, result unknown." \
-                " Listening for a late ack until the cooldown passes; the disable side" \
-                " of the pair already flew; press again if the pack stays dark";
+                " The disable side of the pair already flew and this enable is" \
+                " unconfirmed, so the pack may be left with LMCHG disabled;" \
+                " press Wake Pair again or use the physical button." \
+                " Listening for a late ack until the cooldown passes";
         end_tx_op_();
+        return;
     }
 
     void tick_settle(uint32_t t_ms) {
@@ -1770,9 +1834,12 @@ private:
     uint8_t variant_ = 0;
     int seq_idx_ = 0;              // 0 = the first write frame, 1 = the enable
     bool wrote_any_ = false;
+    bool disable_sent_ = false;    // the wake pair's disable left our UART
+    bool enable_sent_ = false;     // the wake pair's enable left our UART
     Status status_ = Status::Idle;
     uint32_t armed_at_ms_ = 0;
     uint32_t probe_tx_ms_ = 0;
+    uint32_t probe_frames_snapshot_ = 0;  // core frames_total at probe TX
     uint32_t tx_started_ms_ = 0;
     uint32_t settle_from_ms_ = 0;
     uint32_t late_ack_until_ms_ = 0;
@@ -1833,17 +1900,20 @@ inline bool BmsLinkCore::on_read_candidate_(uint32_t t_ms, const std::string& ra
     return true;
 }
 
-inline void BmsLinkCore::on_probe_answer_(uint32_t t_ms, const std::string& info) {
+// Structural acceptance lives with the controller's probe_accept(); this
+// side supplies the listener-state facts it cannot see. Returns false for
+// anything that must fall through to normal pairing - the frame then
+// pairs/responds like any other bus frame, listener unharmed.
+inline bool BmsLinkCore::consume_probe_answer_(uint32_t t_ms, const std::string& info) {
+    if (!telecom_waiter_ || open_req_.valid) return false;
+    if (!telecom_waiter_->probe_accept(t_ms, frames_total_)) return false;
     last_frame_end_ms_ = frame_end_t_ms_;
     telecom_waiter_->on_probe_answer(t_ms, info);
     std::string id = info.size() > 2 ? info.substr(2, 8) : std::string("?");
     push_event(EventKind::ProbeAnswer, t_ms, telecom_waiter_->last_pack(),
                "9052 identity answer id " + id);
     ring_now(t_ms, "9052 id " + id);
-}
-
-inline bool BmsLinkCore::probe_answer_expected_(uint32_t t_ms) {
-    return telecom_waiter_ && telecom_waiter_->probe_window_active(t_ms);
+    return true;
 }
 
 inline void BmsLinkCore::notify_telecom_probe_(uint32_t t_ms) {

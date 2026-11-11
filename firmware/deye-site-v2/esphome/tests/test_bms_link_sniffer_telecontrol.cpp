@@ -121,6 +121,16 @@ static void pair_at(Harness& h, int pack, uint32_t t) {
     send(h.c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
 }
 
+// the master's STATUS poll (CID2 44): the answer family whose LENID is
+// also 9052 - the reviewer's blocker case. REAL_44_RESPONSE is the real
+// captured frame, battery 0001, exactly the telemetry the rotations
+// carry throughout, and exactly what must never be eaten as a probe
+// answer.
+static void status_pair_at(Harness& h, int pack, uint32_t t) {
+    send(h.c, poll_req(pack, "44"), t);
+    send(h.c, std::string(REAL_44_RESPONSE) + "\r", t + 15);
+}
+
 static void bare_ack_at(BmsLinkCore& c, uint32_t t_ms) {
     send(c, std::string("~") + linksniff::kRawBareAck + "\r", t_ms);
 }
@@ -251,8 +261,14 @@ static void test_sys_off_end_to_end() {
 }
 
 // ---- 3. fail-closed: no probe answer, no write -------------------------------
+// Three sub-cases, all reviewer-prescribed: a pack that stays silent on a
+// quiet bus; a pack that stays silent while routine master telemetry (the
+// 0x44/9052 family!) flows inside the window - the PR #82 blocker repro;
+// and a pack whose REAL answer arrives after master traffic already
+// consumed the first-frame slot. In every variant the SYS_OFF write must
+// never fire.
 
-static void test_no_answer_no_write() {
+static void test_no_answer_silent_pack() {
     Harness h;
     uint32_t t0 = 200000;
     uint32_t pair_end = establish_cadence(h, t0);
@@ -260,13 +276,65 @@ static void test_no_answer_no_write() {
     check(h.t.request_sys_off(3, pair_end + 30), "arm accepted");
     h.t.tick(pair_end + 170);
     check(h.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
-    // silence: master polls continue but the target pack never answers
-    pair_at(h, 1, pair_end + 170 + 300);
-    // tick past the 1.5 s answer window
+    // a fully silent bus: the verdict lands at the window edge
     h.t.tick(pair_end + 170 + 1600);
     check(h.t.status() == TeleOpController::Status::NoAnswer, "no-answer verdict");
     check(h.bus.tx_log.size() == 1, "the write never fired without an answer");
     check_line_has(h.t.status_line(), "was NOT sent", "fail-closed line");
+}
+
+static void test_no_answer_master_telemetry_is_not_the_answer() {
+    Harness h;
+    uint32_t t0 = 250000;
+    uint32_t pair_end = establish_cadence(h, t0);
+
+    // the reviewer's reproduction: probe pack 03, pack 03 stays silent,
+    // the master polls pack 01 for STATUS inside the window
+    check(h.t.request_sys_off(3, pair_end + 30), "arm accepted");
+    h.t.tick(pair_end + 170);
+    check(h.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
+    uint32_t pairs_before = h.c.pairs_total();
+
+    status_pair_at(h, 1, pair_end + 400);  // +request, +9052 answer from pack 01
+    h.t.tick(pair_end + 600);
+    check(h.t.status() == TeleOpController::Status::NoAnswer,
+          "the telemetry answer did NOT count as the probe answer");
+    check(h.bus.tx_log.size() == 1, "SYS_OFF was NOT sent to the silent pack");
+    check_line_has(h.t.status_line(), "first-off", "interleave verdict line");
+    auto ev = h.c.drain_events();
+    check(!has_event(ev, EventKind::ProbeAnswer),
+          "no probe answer event for a telemetry frame");
+    // the master's slot paired normally: listener unharmed
+    check(!has_event(ev, EventKind::AnomalyUnpaired),
+          "the 0x44 answer paired with its poll, not stolen");
+    check(h.c.pairs_total() == pairs_before + 1, "pair bookkeeping advanced");
+}
+
+static void test_probe_answer_after_master_traffic_rejected() {
+    Harness h;
+    uint32_t t0 = 275000;
+    uint32_t pair_end = establish_cadence(h, t0);
+
+    // master traffic lands between our probe and the pack's real answer:
+    // the real answer is no longer the first frame - rejected, verdict
+    // NoAnswer, no write (fail-closed against reordering ambiguity)
+    check(h.t.request_sys_off(4, pair_end + 30), "arm accepted");
+    h.t.tick(pair_end + 170);
+    check(h.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
+    status_pair_at(h, 2, pair_end + 400);
+    h.t.tick(pair_end + 600);  // interleave verdict fires
+    check(h.t.status() == TeleOpController::Status::NoAnswer, "interleave verdict");
+    // the pack's real answer arriving NOW is a bystander on the listener's
+    // ledger - an unpaired response, never our trigger
+    send(h.c, probe_answer_frame("9004"), pair_end + 700);
+    check(h.t.status() == TeleOpController::Status::NoAnswer,
+          "late real answer does not resurrect the sequence");
+    check(h.bus.tx_log.size() == 1, "the write never fired");
+    auto ev = h.c.drain_events();
+    check(!has_event(ev, EventKind::ProbeAnswer),
+          "a post-traffic 9052 frame is not routed as our answer");
+    check(has_event(ev, EventKind::AnomalyUnpaired),
+          "the late answer stays on the listener ledger where it belongs");
 }
 
 // ---- 4. refusals ---------------------------------------------------------------
@@ -506,10 +574,45 @@ static void test_probe_answer_not_consumed_when_no_window() {
     check(h.t.status() == TeleOpController::Status::Idle, "controller untouched");
 }
 
+// ---- 12. a half-finished wake pair says so (reviewer should-fix) --------------
+// Any stop after the disable flew but before the enable must name the
+// hazard: the pack may be left LMCHG-disabled, with the recovery spelled
+// out. Driven via the foreign-probe abort; the other stop paths share
+// the same append.
+
+static void test_half_pair_warning() {
+    Harness h;
+    uint32_t t0 = 950000;
+    uint32_t pair_end = establish_cadence(h, t0);
+
+    check(h.t.request_wake_pair(4, pair_end + 30), "wake arm accepted");
+    h.t.tick(pair_end + 170);
+    check(h.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
+    send(h.c, probe_answer_frame("900A"), pair_end + 170 + 60);
+    pair_at(h, 4, pair_end + 170 + 300);
+    h.t.tick(pair_end + 640);
+    check(h.t.status() == TeleOpController::Status::WaitAck, "disable fired");
+    uint32_t disable_tx = pair_end + 640;
+    bare_ack_at(h.c, disable_tx + 100);
+    check(h.t.status() == TeleOpController::Status::Settle, "settling");
+
+    // another presence probe aborts the sequence mid-settle: the terminal
+    // line must carry the LMCHG-enabled-nowhere warning
+    std::string other_body = "8000D5C9E00201";
+    send(h.c, "~" + other_body + rs485_calc_chksum(other_body) + "\r", disable_tx + 200);
+    check(h.t.status() == TeleOpController::Status::Aborted, "aborted mid-pair");
+    check_line_has(h.t.status_line(), "LMCHG enable was NOT sent", "naming the lost frame");
+    check_line_has(h.t.status_line(), "left with LMCHG disabled", "naming the hazard");
+    check_line_has(h.t.status_line(), "physical button", "naming the recovery");
+    check(h.bus.tx_log.size() == 2, "probe + disable only - no enable was sent");
+}
+
 int main() {
     test_frames_byte_exact();
     test_sys_off_end_to_end();
-    test_no_answer_no_write();
+    test_no_answer_silent_pack();
+    test_no_answer_master_telemetry_is_not_the_answer();
+    test_probe_answer_after_master_traffic_rejected();
     test_refusals();
     test_wake_pair_end_to_end();
     test_wake_pair_disable_noack_continues();
@@ -518,6 +621,7 @@ int main() {
     test_shared_gate_after_done();
     test_autooff_predicate();
     test_probe_answer_not_consumed_when_no_window();
+    test_half_pair_warning();
     if (failures == 0)
         printf("telecontrol oracle: all scenarios passed\n");
     else
