@@ -607,6 +607,45 @@ static void test_half_pair_warning() {
     check(h.bus.tx_log.size() == 2, "probe + disable only - no enable was sent");
 }
 
+// ---- 13. the reviewer's acceptance bound, pinned -------------------------------
+// Wire-math (re-review): probe ~20 ms + turnaround ~200-230 ms + ~104 ms
+// answer at 9600 + batch rounding = a genuine answer lands ~+330-370 ms.
+// The bound is 400: an answer at +390 must be accepted (with its measured
+// delay on the verdict line); one past the bound at +420 must be rejected
+// and its delay recorded in the NoAnswer line - the first-live-press
+// calibration datum both ways.
+
+static void test_answer_delay_bound() {
+    Harness h1;
+    uint32_t pair_end1 = establish_cadence(h1, 1000000);
+    check(h1.t.request_sys_off(4, pair_end1 + 30), "arm accepted");
+    h1.t.tick(pair_end1 + 170);
+    check(h1.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
+    send(h1.c, probe_answer_frame("900B"), pair_end1 + 170 + 390);
+    check(h1.t.status() == TeleOpController::Status::WaitWindow,
+          "answer at +390 ms accepted (inside the 400 ms bound)");
+    check_line_has(h1.t.status_line(), "in 390 ms", "measured delay on the answered line");
+    h1.c.drain_events();
+
+    Harness h2;
+    uint32_t pair_end2 = establish_cadence(h2, 1100000);
+    check(h2.t.request_sys_off(4, pair_end2 + 30), "arm accepted");
+    h2.t.tick(pair_end2 + 170);
+    check(h2.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
+    send(h2.c, probe_answer_frame("900C"), pair_end2 + 170 + 420);
+    check(h2.t.status() == TeleOpController::Status::WaitProbe,
+          "answer at +420 ms not accepted (past the bound)");
+    h2.t.tick(pair_end2 + 170 + 600);
+    check(h2.t.status() == TeleOpController::Status::NoAnswer,
+          "verdict NoAnswer on the late answer");
+    check(h2.bus.tx_log.size() == 1, "the write never fired");
+    check_line_has(h2.t.status_line(), "a 9052 frame was seen 420 ms after the probe",
+                   "rejected-answer delay recorded for calibration");
+    auto ev = h2.c.drain_events();
+    check(!has_event(ev, EventKind::ProbeAnswer),
+          "past-bound answer is not routed as ours");
+}
+
 int main() {
     test_frames_byte_exact();
     test_sys_off_end_to_end();
@@ -622,6 +661,7 @@ int main() {
     test_autooff_predicate();
     test_probe_answer_not_consumed_when_no_window();
     test_half_pair_warning();
+    test_answer_delay_bound();
     if (failures == 0)
         printf("telecontrol oracle: all scenarios passed\n");
     else

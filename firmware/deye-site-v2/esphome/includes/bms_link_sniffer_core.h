@@ -1429,14 +1429,20 @@ private:
 // wire) fire into regular idle windows - no long-gap aim needed.
 // ---------------------------------------------------------------------------
 static constexpr uint32_t kTeleAnswerWindowMs = 1500;  // probe answer collect window
-static constexpr uint32_t kTeleAnswerQuickMs  = 300;   // acceptance bound: on this bus
-                                                     // short-frame turnarounds run
-                                                     // <16 ms (telemetry) to ~230 ms
-                                                     // (late bare acks); 300 ms sits
-                                                     // above every captured probe->
-                                                     // answer latency while staying
-                                                     // inside the same idle window
-                                                     // the probe fired in
+static constexpr uint32_t kTeleAnswerQuickMs  = 400;   // acceptance bound (reviewer
+                                                     // wire-math, re-review): probe
+                                                     // ~20 ms + pack turnaround
+                                                     // ~200-230 ms + ~100-char
+                                                     // answer ~104 ms at 9600 +
+                                                     // 10 ms batch rounding puts
+                                                     // a genuine answer's last
+                                                     // byte at ~+330-370 ms.
+                                                     // This bound is fail-closed
+                                                     // seasoning only - the
+                                                     // first-frame and
+                                                     // no-open-request rules
+                                                     // are what exclude
+                                                     // telemetry, not the clock
 static constexpr uint32_t kTeleOpDeadlineMs   = 15000;  // whole-sequence budget
 static constexpr uint32_t kTeleIntraGapMs     = 400;    // min spacing between our frames in one press
 
@@ -1538,11 +1544,25 @@ public:
 
     void on_probe_answer(uint32_t t_ms, const std::string& info) {
         if (status_ != Status::WaitProbe) return;
-        (void)t_ms;
         std::string id = info.size() > 2 ? info.substr(2, 8) : std::string("?");
-        line_ = "probe answered (id " + id + "...) - sending " + op_name_() +
+        // measured answer delay on the verdict line: the first live press
+        // records the only real calibration datum for this bound (no
+        // capture holds the actual probe->answer latency)
+        line_ = "probe answered (id " + id + "...) in " +
+                std::to_string(t_ms - probe_tx_ms_) + " ms - sending " + op_name_() +
                 " in the next quiet window (short frame, regular idle fits)";
         status_ = Status::WaitWindow;
+    }
+
+    // a 9052 frame arrived while we wait but failed structural acceptance
+    // (late past the bound, not the first frame, or a master request was
+    // open). Latch its delay so the NoAnswer verdict can record the real
+    // number - the first live press is the calibration run for the
+    // acceptance bound.
+    void on_probe_answer_rejected(uint32_t t_ms) {
+        if (status_ != Status::WaitProbe) return;
+        int32_t lat = (int32_t)(t_ms - probe_tx_ms_);
+        if (lat > 0) rejected_answer_ms_ = (uint32_t)lat;
     }
 
     void on_ack(uint32_t t_ms) {
@@ -1616,6 +1636,7 @@ private:
         wrote_any_ = false;
         disable_sent_ = false;
         enable_sent_ = false;
+        rejected_answer_ms_ = 0;
         armed_at_ms_ = now;
         status_ = Status::Armed;
     }
@@ -1629,6 +1650,19 @@ private:
             line_ += " - the LMCHG enable was NOT sent and this pack may be"
                      " left with LMCHG disabled; press Wake Pair again or"
                      " use the physical button";
+        }
+    }
+
+    // rejected-9052 report for the NoAnswer verdict: with the delay
+    // measured, so the first live press tells us whether the acceptance
+    // bound needs another turn (reviewer: no capture holds the real
+    // probe->answer latency - the press itself is the measurement)
+    void append_rejected_answer_() {
+        if (rejected_answer_ms_ != 0) {
+            line_ += " | a 9052 frame was seen " + std::to_string(rejected_answer_ms_) +
+                     " ms after the probe but rejected (structure: not first frame" \
+                     " / a master request was open / past the bound) - the real" \
+                     " answer delay datum for the acceptance bound, recorded";
         }
     }
 
@@ -1746,12 +1780,14 @@ private:
             line_ = "no probe answer first-off: bus traffic followed our probe" \
                     " without the pack answering - the teleControl write was" \
                     " NOT sent (fail-closed); press again";
+            append_rejected_answer_();
             return;
         }
         if ((int32_t)(t_ms - probe_tx_ms_) <= (int32_t)kTeleAnswerWindowMs) return;
         status_ = Status::NoAnswer;
         line_ = "no probe answer in the 1.5 s window - the teleControl write" \
                 " was NOT sent (fail-closed: no answer, no write); press again";
+        append_rejected_answer_();
     }
 
     void tick_wait_window(uint32_t t_ms) {
@@ -1840,6 +1876,7 @@ private:
     uint32_t armed_at_ms_ = 0;
     uint32_t probe_tx_ms_ = 0;
     uint32_t probe_frames_snapshot_ = 0;  // core frames_total at probe TX
+    uint32_t rejected_answer_ms_ = 0;     // last 9052 seen in-window but rejected
     uint32_t tx_started_ms_ = 0;
     uint32_t settle_from_ms_ = 0;
     uint32_t late_ack_until_ms_ = 0;
@@ -1905,8 +1942,15 @@ inline bool BmsLinkCore::on_read_candidate_(uint32_t t_ms, const std::string& ra
 // anything that must fall through to normal pairing - the frame then
 // pairs/responds like any other bus frame, listener unharmed.
 inline bool BmsLinkCore::consume_probe_answer_(uint32_t t_ms, const std::string& info) {
-    if (!telecom_waiter_ || open_req_.valid) return false;
-    if (!telecom_waiter_->probe_accept(t_ms, frames_total_)) return false;
+    if (!telecom_waiter_) return false;
+    if (open_req_.valid) {
+        telecom_waiter_->on_probe_answer_rejected(t_ms);
+        return false;
+    }
+    if (!telecom_waiter_->probe_accept(t_ms, frames_total_)) {
+        telecom_waiter_->on_probe_answer_rejected(t_ms);
+        return false;
+    }
     last_frame_end_ms_ = frame_end_t_ms_;
     telecom_waiter_->on_probe_answer(t_ms, info);
     std::string id = info.size() > 2 ? info.substr(2, 8) : std::string("?");
