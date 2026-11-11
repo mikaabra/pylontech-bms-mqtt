@@ -154,7 +154,7 @@ public:
         bool expect_valid =
             last_written_valid_[pack] && last_written_param_[pack] == linksniff::kReadBalanceParam;
         read_.request(pack, linksniff::kReadBalanceParam, expect_valid,
-                      last_written_mv_[pack], esphome::millis());
+                      last_written_mv_[pack], esphome::millis(), true);
         read_status_->publish_state(read_.status_line());
     }
 
@@ -186,7 +186,7 @@ public:
         bool expect_valid =
             last_written_valid_[pack] && last_written_param_[pack] == param;
         read_.request(pack, param, expect_valid, last_written_mv_[pack],
-                      esphome::millis());
+                      esphome::millis(), true);
         read_status_->publish_state(read_.status_line());
     }
 

@@ -505,6 +505,65 @@ static void test_enable_gates() {
     check_line_has(h.r.status_line(), "nothing verified", "and the fail-closed wording");
 }
 
+// ---- long-gap aim (live cadence measured 2026-11-11: regular idle
+// 470-530 ms, one ~1100 ms rotation gap every 3rd slot; a block answer
+// needs ~590 ms of wire at 9600, so it only completes inside a long gap)
+
+static void test_aim_fires_in_predicted_long_gap() {
+    Harness h;
+    // gaps: 1100, 520, 520, 1100 - rotation aligned
+    pair_at(h, 1, 1000);
+    pair_at(h, 2, 2116);   // gap 1100 (long)
+    pair_at(h, 3, 2651);   // gap 520
+    check(h.r.request(0x01, 0x4C, false, 0, 2700, true), "aimed read armed");
+    check_line_has(h.r.status_line(), "long-gap-aligned", "armed line marks the aim");
+    h.r.tick(2836);        // opening gap: counter 1, not due - must hold
+    check(h.r.status() == ReadController::Status::Armed,
+          "aimed read holds through a not-due regular gap");
+    pair_at(h, 4, 3186);   // gap 520 -> counter reaches due
+    h.r.tick(3371);        // confirm-band tick inside the due gap
+    check(h.r.status() == ReadController::Status::WaitBlock,
+          "aimed read fires in the predicted-long gap");
+    check(h.bus.tx_log.size() == 1, "exactly one frame fired");
+}
+
+static void test_aim_falls_back_when_no_longs() {
+    Harness h;
+    // all-regular cadence (no long gaps at all): the counter climbs past
+    // due, so the read must still fire - no starvation, just one gap
+    // later than legacy behavior
+    pair_at(h, 1, 1000);
+    pair_at(h, 2, 1535);   // gap 520
+    check(h.r.request(0x02, 0x4C, false, 0, 1600, true), "aimed read armed (no-long cadence)");
+    h.r.tick(1720);        // opening gap: counter 1 - hold (legacy would fire here)
+    check(h.r.status() == ReadController::Status::Armed,
+          "aimed read holds before the counter reaches due");
+    pair_at(h, 3, 2070);   // counter reaches due from here on
+    h.r.tick(2255);
+    check(h.r.status() == ReadController::Status::WaitBlock,
+          "aimed read fires once due even without real longs");
+    check(h.bus.tx_log.size() == 1, "exactly one frame fired");
+}
+
+static void test_aim_detects_early_long_gap() {
+    Harness h;
+    // rotation drift: a long gap opens while the counter says not-due.
+    // Hold through the confirm band, then fire mid-flight once the gap
+    // out-lives every regular idle
+    pair_at(h, 1, 1000);
+    pair_at(h, 2, 2116);   // gap 1100 (long)
+    pair_at(h, 3, 2651);   // gap 520
+    check(h.r.request(0x01, 0x4C, false, 0, 2700, true), "aimed read armed (drift)");
+    h.r.tick(2836);        // counter 1, since 170: in the confirm band but not due
+    check(h.r.status() == ReadController::Status::Armed, "holds before detection band");
+    h.r.tick(3110);        // since 444: confirm band passed, not detected yet
+    check(h.r.status() == ReadController::Status::Armed, "still holding below detect band");
+    h.r.tick(3320);        // since 654 >= kLongGapDetectMs: long gap detected mid-flight
+    check(h.r.status() == ReadController::Status::WaitBlock,
+          "fires mid-flight once the gap out-lives regular idle");
+    check(h.bus.tx_log.size() == 1, "exactly one frame fired");
+}
+
 int main() {
     test_builder_byte_exact();
     test_deny_shapes();
@@ -522,6 +581,9 @@ int main() {
     test_second_operation_not_killed();
     test_cooldown_bidirectional();
     test_enable_gates();
+    test_aim_fires_in_predicted_long_gap();
+    test_aim_falls_back_when_no_longs();
+    test_aim_detects_early_long_gap();
     if (failures) {
         printf("%d read-oracle failures\n", failures);
         return 1;

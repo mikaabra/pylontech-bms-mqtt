@@ -181,6 +181,15 @@ inline std::string build_write_frame(uint8_t pack, uint8_t param, uint16_t value
 //   behavior; kCadenceFreshMs requires a live poll window.
 static constexpr uint32_t kGapConfirmMs    = 150;
 static constexpr uint32_t kGapMaxMs        = 250;
+
+// Long-gap aim, measured live 2026-11-11 (Link Gap Report): regular idle
+// runs 470-530 ms, one ~1100 ms gap opens every 3rd slot (the master's
+// rotation boundary). A block answer needs ~590 ms of wire at 9600 baud -
+// it fits ONLY inside a long gap, never a regular one.
+static constexpr uint32_t kLongGapMs         = 700;
+static constexpr uint32_t kLongGapEverySlots = 3;
+static constexpr uint32_t kLongGapDetectMs   = 600;
+static constexpr uint32_t kLongGapDetectMaxMs = 1000;  // stay inside the long gap
 static constexpr uint32_t kAckDeadlineMs   = 150;
 static constexpr int32_t  kCadenceFreshMs  = 1500;
 static constexpr uint32_t kArmExpiryMs    = 6000;
@@ -409,6 +418,7 @@ public:
     const PackStats& pack(int p) const { return packs_[p]; }  // p in 0..4
 
     // idle-gap stats over the last kStatsWindowMs of request starts
+    bool long_gap_due() const { return slots_since_long_gap_ >= kLongGapEverySlots - 1; }
     uint32_t idle_gap_min_ms(uint32_t now) const {
         uint32_t best = 0;
         for (size_t i = 0; i < gap_ring_.size(); i++) {
@@ -677,6 +687,7 @@ private:
             gap_ring_[gap_head_] = s;            // steady state: ring overwrite
         }
         gap_head_ = (gap_head_ + 1) % 32;
+        slots_since_long_gap_ = (s.gap_ms >= kLongGapMs) ? 0 : slots_since_long_gap_ + 1;
     }
 
     void ring_now(uint32_t t_ms, const std::string& hex) {
@@ -755,6 +766,7 @@ private:
     uint32_t    ring_dropped_ = 0;
     std::vector<GapSample> gap_ring_;
     size_t      gap_head_ = 0;
+    uint32_t    slots_since_long_gap_ = 0;
 
     std::vector<LinkEvent> events_;
 
@@ -1049,7 +1061,8 @@ public:
                    EnableFn enable, TxFn tx, void* ctx)
         : core_(core), gate_(gate), enable_(enable), tx_(tx), ctx_(ctx) {}
 
-    bool request(uint8_t pack, uint8_t param, bool has_expect, uint16_t expect, uint32_t now) {
+    bool request(uint8_t pack, uint8_t param, bool has_expect, uint16_t expect, uint32_t now,
+                 bool aim_long_gap = false) {
         if (status_ == Status::Armed || status_ == Status::WaitBlock) {
             line_ = "ignored: previous read still in flight";
             return false;
@@ -1066,10 +1079,12 @@ public:
         param_ = param;
         has_expect_ = has_expect;
         expect_raw_ = expect;
+        aim_long_gap_ = aim_long_gap;
         armed_at_ms_ = now;
         status_ = Status::Armed;
         line_ = "armed: pack " + hex2(pack) + " param 0x" + hex2(param) +
-                " block read; one frame on the next window, expires in 6 s";
+                " block read; one frame on the next " +
+                (aim_long_gap ? "(long-gap-aligned) " : "") + "window, expires in 6 s";
         return true;
     }
 
@@ -1189,7 +1204,18 @@ private:
         if (gate_.need_clean_slot) return;               // no clean pair since our last frame, either client
         if (gate_.cooldown_active) return;               // the shared 4 s latch
         uint32_t since = core_.since_last_rx(t_ms);
-        if (since < kGapConfirmMs || since > kGapMaxMs) return;  // mid-idle, not at the edge
+        if (aim_long_gap_) {
+            // long-gap aim: fire when the opening gap is the rotation's due
+            // long one (confirmed mid-band, maximal runway for the ~590 ms
+            // block answer), or when a gap has already out-lived every
+            // regular idle (>= 600 ms: it IS long, detected mid-flight)
+            bool aim_at_predicted = core_.long_gap_due() &&
+                                    since >= kGapConfirmMs && since <= kGapMaxMs;
+            bool aim_at_detected = since >= kLongGapDetectMs && since <= kLongGapDetectMaxMs;
+            if (!aim_at_predicted && !aim_at_detected) return;
+        } else if (since < kGapConfirmMs || since > kGapMaxMs) {
+            return;  // mid-idle, not at the edge
+        }
 
         std::string frame = build_read_frame(pack_);
         tx_started_ms_ = t_ms;
@@ -1238,6 +1264,7 @@ private:
     bool     has_expect_ = false;
     uint16_t expect_raw_ = 0;
     uint16_t value_raw_ = 0;
+    bool     aim_long_gap_ = false;
     Status   status_ = Status::Idle;
     uint32_t armed_at_ms_ = 0;
     uint32_t tx_started_ms_ = 0;
