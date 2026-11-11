@@ -27,9 +27,11 @@ public:
     explicit BmsLinkSniffer(esphome::uart::UARTComponent* uart)
         : uart_(uart),
           write_(core_, gate_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this),
-          read_(core_, gate_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this) {
+          read_(core_, gate_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this),
+          teleop_(core_, gate_, &BmsLinkSniffer::enable_cb_, &BmsLinkSniffer::tx_cb_, this) {
         core_.set_ack_waiter(&write_);
         core_.set_read_waiter(&read_);
+        core_.set_telecom_waiter(&teleop_);
     }
 
     void bind_entities(esphome::text_sensor::TextSensor* last_anomaly,
@@ -58,6 +60,10 @@ public:
         debug_value_ = debug_value;
     }
 
+    void bind_teleop_entities(esphome::text_sensor::TextSensor* teleop_status) {
+        teleop_status_ = teleop_status;
+    }
+
     // one-shot trigger from the Send Balance Voltage Write button. Pack 0
     // is the select's "None" (no restore, deliberate re-selection per
     // review round 2) - refuse rather than fall back to a default target.
@@ -77,6 +83,11 @@ public:
             rs == linksniff::ReadController::Status::WaitBlock) {
             write_status_->publish_state(
                 "refused: a read is in flight - wait for its verdict before writing");
+            return;
+        }
+        if (teleop_in_flight_()) {
+            write_status_->publish_state(
+                "refused: a teleControl sequence is in flight - wait for its verdict");
             return;
         }
         bool accepted = write_.request(pack, 0x4C, value_mv, esphome::millis());
@@ -116,6 +127,11 @@ public:
                 "refused: a read is in flight - wait for its verdict before writing");
             return;
         }
+        if (teleop_in_flight_()) {
+            write_status_->publish_state(
+                "refused: a teleControl sequence is in flight - wait for its verdict");
+            return;
+        }
         bool accepted = write_.request(pack, param, raw_value, esphome::millis());
         write_status_->publish_state(write_.status_line());
         // only an ACCEPTED request records (the return value, not the
@@ -147,6 +163,11 @@ public:
         if (ws == linksniff::WriteController::Status::Armed ||
             ws == linksniff::WriteController::Status::WaitAck) {
             read_status_->publish_state("refused: a write is in flight - wait for its verdict");
+            return;
+        }
+        if (teleop_in_flight_()) {
+            read_status_->publish_state(
+                "refused: a teleControl sequence is in flight - wait for its verdict");
             return;
         }
         // the balance read only claims write-verify when the last accepted
@@ -183,11 +204,64 @@ public:
             read_status_->publish_state("refused: a write is in flight - wait for its verdict");
             return;
         }
+        if (teleop_in_flight_()) {
+            read_status_->publish_state(
+                "refused: a teleControl sequence is in flight - wait for its verdict");
+            return;
+        }
         bool expect_valid =
             last_written_valid_[pack] && last_written_param_[pack] == param;
         read_.request(pack, param, expect_valid, last_written_mv_[pack],
                       esphome::millis(), true);
         read_status_->publish_state(read_.status_line());
+    }
+
+    // one-shot trigger from the SYS_OFF button. One press = probe, then the
+    // D545 SYS_OFF write - the controller refuses to fire the write unless
+    // the probed pack answered. Packs 01-04 only (00 is the master battery:
+    // rebooting it takes the Link bus and inverter comms down).
+    void arm_sys_off(uint8_t pack) {
+        if (!teleop_status_) return;
+        if (!write_enable_ || !write_enable_->state) {
+            teleop_status_->publish_state(
+                "refused: Link Operate Enable is off (turn it on deliberately)");
+            return;
+        }
+        if (pack == 0) {
+            teleop_status_->publish_state("refused: select a target pack first");
+            return;
+        }
+        if (!tx_plane_clear_()) {
+            teleop_status_->publish_state(
+                "refused: a write or read is in flight - wait for its verdict");
+            return;
+        }
+        teleop_.request_sys_off(pack, esphome::millis());
+        teleop_status_->publish_state(teleop_.status_line());
+    }
+
+    // one-shot trigger from the LMCHG wake-pair button (the captured
+    // recovery sequence: probe, LMCHG disable, LMCHG enable). New-gen
+    // packs only - the controller refuses old-gen targets (no captured
+    // old-gen disable; the physical button is that recovery path).
+    void arm_wake_pair(uint8_t pack) {
+        if (!teleop_status_) return;
+        if (!write_enable_ || !write_enable_->state) {
+            teleop_status_->publish_state(
+                "refused: Link Operate Enable is off (turn it on deliberately)");
+            return;
+        }
+        if (pack == 0) {
+            teleop_status_->publish_state("refused: select a target pack first");
+            return;
+        }
+        if (!tx_plane_clear_()) {
+            teleop_status_->publish_state(
+                "refused: a write or read is in flight - wait for its verdict");
+            return;
+        }
+        teleop_.request_wake_pair(pack, esphome::millis());
+        teleop_status_->publish_state(teleop_.status_line());
     }
 
     // 10 ms interval tick from yaml
@@ -203,6 +277,7 @@ public:
         core_.tick(now);
         write_.tick(now);
         read_.tick(now);
+        teleop_.tick(now);
         for (const auto& e : core_.drain_events()) publish_event(e);
         if (write_status_ && write_.status_line() != last_write_line_) {
             last_write_line_ = write_.status_line();
@@ -213,6 +288,10 @@ public:
         if (read_status_ && read_.status_line() != last_read_line_) {
             last_read_line_ = read_.status_line();
             read_status_->publish_state(last_read_line_);
+        }
+        if (teleop_status_ && teleop_.status_line() != last_teleop_line_) {
+            last_teleop_line_ = teleop_.status_line();
+            teleop_status_->publish_state(last_teleop_line_);
         }
         auto rstat = read_.status();
         auto prev_pair = op_status_prev_;
@@ -232,14 +311,17 @@ public:
         // flight is the one that just reached its terminal state - a
         // finished write stays Acked until the next write, and that stale
         // Acked used to kill the read armed right after the write verdict
-        bool op_done = linksniff::op_just_finished(prev_pair.w, prev_pair.r,
-                                                   write_.status(), rstat);
-        op_status_prev_ = {write_.status(), rstat};
-        if (write_enable_ && write_enable_->state && op_done &&
-            write_status_) {
+        bool op_done = linksniff::op_just_finished(prev_pair.w, prev_pair.r, prev_pair.t,
+                                                   write_.status(), rstat, teleop_.status());
+        op_status_prev_ = {write_.status(), rstat, teleop_.status()};
+        if (write_enable_ && write_enable_->state && op_done && write_status_) {
             write_enable_->turn_off();
             enable_on_ms_ = 0;
             write_status_->publish_state(last_write_line_ + " [enable auto-off]");
+        }
+        if (teleop_status_ && op_done && teleop_.status_line() != last_teleop_line_) {
+            last_teleop_line_ = teleop_.status_line();
+            teleop_status_->publish_state(last_teleop_line_ + " [enable auto-off]");
         }
         // review round 3: enable left on with no press and no operation
         // in flight must not stay armed forever - 5 minutes of idleness
@@ -249,8 +331,9 @@ public:
         enable_prev_ = en;
         bool write_in_flight = linksniff::write_status_in_flight(write_.status());
         bool read_in_flight = linksniff::read_status_in_flight(rstat);
+        bool teleop_in_flight = teleop_in_flight_();
         if (en && enable_on_ms_ && now - enable_on_ms_ > kEnableTimeoutMs &&
-            write_status_ && !write_in_flight && !read_in_flight) {
+            write_status_ && !write_in_flight && !read_in_flight && !teleop_in_flight) {
             write_enable_->turn_off();
             enable_on_ms_ = 0;
             write_status_->publish_state("enable timed out after 5 min of idleness - turn it on deliberately for the next operation");
@@ -260,6 +343,7 @@ public:
     float writes_sent() const { return (float)write_.tx_count(); }
     float write_collisions() const { return (float)write_.collision_count(); }
     float reads_sent() const { return (float)read_.tx_count(); }
+    float teleops_sent() const { return (float)teleop_.tx_count(); }
 
     // Dump button: publish the ring and release a freeze. The core also
     // releases automatically once every trigger has cleared (publish_event
@@ -332,6 +416,16 @@ private:
                 // the graded verdict and the ring holds the compact record
                 anomaly_like = false;
                 break;
+            case linksniff::EventKind::AckForTeleOp:
+                // healthy expected event: Link TeleOp Status reports the
+                // ack within its sequence verdict
+                anomaly_like = false;
+                break;
+            case linksniff::EventKind::ProbeAnswer:
+                // healthy expected event: Link TeleOp Status carries the
+                // probe verdict; the ring holds the id record
+                anomaly_like = false;
+                break;
         }
         if (!anomaly_like) return;
         char line[160];
@@ -365,27 +459,46 @@ private:
     linksniff::SharedTxGate gate_;
     linksniff::WriteController write_;
     linksniff::ReadController read_;
+    linksniff::TeleOpController teleop_;
     esphome::text_sensor::TextSensor* last_anomaly_ = nullptr;
     esphome::text_sensor::TextSensor* anomaly_dump_ = nullptr;
     esphome::text_sensor::TextSensor* write_status_ = nullptr;
     esphome::text_sensor::TextSensor* read_status_ = nullptr;
+    esphome::text_sensor::TextSensor* teleop_status_ = nullptr;
     esphome::switch_::Switch* write_enable_ = nullptr;
     esphome::sensor::Sensor* balance_mv_[5] = {nullptr, nullptr, nullptr, nullptr, nullptr};
     esphome::sensor::Sensor* debug_value_ = nullptr;
     std::string last_write_line_;
     std::string last_read_line_;
+    std::string last_teleop_line_;
     bool last_written_valid_[5] = {};
     uint8_t last_written_param_[5] = {};
     uint16_t last_written_mv_[5] = {};
     struct OpStatusPair {
         linksniff::WriteController::Status w;
         linksniff::ReadController::Status r;
+        linksniff::TeleOpController::Status t;
     };
     OpStatusPair op_status_prev_{
-        linksniff::WriteController::Status::Idle, linksniff::ReadController::Status::Idle};
+        linksniff::WriteController::Status::Idle,
+        linksniff::ReadController::Status::Idle,
+        linksniff::TeleOpController::Status::Idle};
     bool enable_prev_ = false;
     uint32_t enable_on_ms_ = 0;
     static constexpr uint32_t kEnableTimeoutMs = 300000;
+
+    bool tx_plane_clear_() const {
+        auto ws = write_.status();
+        if (ws == linksniff::WriteController::Status::Armed ||
+            ws == linksniff::WriteController::Status::WaitAck) return false;
+        auto rs = read_.status();
+        if (rs == linksniff::ReadController::Status::Armed ||
+            rs == linksniff::ReadController::Status::WaitBlock) return false;
+        return true;
+    }
+    bool teleop_in_flight_() const {
+        return linksniff::teleop_status_in_flight(teleop_.status());
+    }
 
     static bool enable_cb_(void* ctx) {
         BmsLinkSniffer* self = (BmsLinkSniffer*)ctx;
