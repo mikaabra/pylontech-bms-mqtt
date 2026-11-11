@@ -508,75 +508,66 @@ static void test_enable_gates() {
     check_line_has(h.r.status_line(), "nothing verified", "and the fail-closed wording");
 }
 
-// ---- long-gap aim (live cadence measured 2026-11-11: regular idle
-// 470-530 ms, one ~1100 ms rotation gap every 3rd slot; a block answer
-// needs ~590 ms of wire at 9600, so it only completes inside a long gap)
+// ---- pre-long corridor aim (2026-11-12 wire map, Pi+dongle two-ended
+// captures: rotation pairs at ~628 ms + ONE ~1080 ms long silence per
+// ~2511 ms; the 562-char block is ~1094 ms and fits NO quiet on this
+// bus - only the single quiet that closes right before a long opens
+// carries it collision-free, so the aim fires there and only there) ----
 
-static void test_aim_fires_in_predicted_long_gap() {
+static void test_aim_fires_in_pre_long_quiet() {
     Harness h;
-    // gaps: 1100, 520, 520, 1100 - rotation aligned
-    pair_at(h, 1, 1000);
-    pair_at(h, 2, 2116);   // gap 1100 (long)
-    pair_at(h, 3, 2651);   // gap 520
-    check(h.r.request(0x01, 0x4C, false, 0, 2700, true), "aimed read armed");
+    // lock the predictor: quiet [1015, 3080] is a long (gap 2065 >= 700)
+    pair_at(h, 1, 1000);          // ends 1015
+    pair_at(h, 2, 3080);          // ends 3095; long open recorded 1015
+    check(h.r.request(0x01, 0x4C, false, 0, 3100, true), "aimed read armed");
     check_line_has(h.r.status_line(), "long-gap-aligned", "armed line marks the aim");
-    h.r.tick(2836);        // opening gap: counter 1, not due - must hold
+    // P1 = 1015 + 2511 = 3526; the quiet opening at 3095 leads by 431 -
+    // a fire-band tick in a NON-corridor quiet must hold (the old
+    // predicted-long fallback is gone: no corridor, no fire)
+    h.r.tick(3275);               // since 180: band-passing, lead 431
     check(h.r.status() == ReadController::Status::Armed,
-          "aimed read holds through a not-due regular gap");
-    pair_at(h, 4, 3186);   // gap 520 -> counter reaches due
-    h.r.tick(3371);        // confirm-band tick inside the due gap
+          "band-passing tick in a non-corridor quiet holds");
+    // ordinary pairs while P1 goes stale (P slides 3526 -> 6037 once
+    // now passes 4226; the missed prediction costs latency, not a frame)
+    pair_at(h, 3, 3564);          // gap 469
+    pair_at(h, 4, 4048);          // gap 469
+    pair_at(h, 5, 4532);          // gap 469
+    pair_at(h, 6, 5016);          // gap 469
+    h.r.tick(5230);               // since 199 in the open quiet, lead 1006
+    check(h.r.status() == ReadController::Status::Armed,
+          "still holding through a stale-predicted non-corridor quiet");
+    // the corridor quiet: opens 5355 (pair 7 ends 5340+15), lead
+    // 6037 - 5355 = 682 in [630, 690]
+    pair_at(h, 7, 5340);          // gap 309, ends 5355
+    h.r.tick(5435);               // since 80: below the top-of-window band
+    check(h.r.status() == ReadController::Status::Armed,
+          "corridor quiet holds below the fire band");
+    h.r.tick(5535);               // since 180: top of the band, lead 682
     check(h.r.status() == ReadController::Status::WaitBlock,
-          "aimed read fires in the predicted-long gap");
-    check_line_has(h.r.status_line(), "predicted-long", "fire line names the window class");
+          "aimed read fires in the predicted pre-long corridor");
+    check_line_has(h.r.status_line(), "pre-long", "fire line names the window class");
     check(h.bus.tx_log.size() == 1, "exactly one frame fired");
 }
 
-static void test_aim_falls_back_when_no_longs() {
+static void test_aim_expires_without_long_observed() {
     Harness h;
-    // all-regular cadence (no long gaps at all): the counter climbs past
-    // due, so the read must still fire - no starvation, just one gap
-    // later than legacy behavior
-    pair_at(h, 1, 1000);
-    pair_at(h, 2, 1535);   // gap 520
-    check(h.r.request(0x02, 0x4C, false, 0, 1600, true), "aimed read armed (no-long cadence)");
-    h.r.tick(1720);        // opening gap: counter 1 - hold (legacy would fire here)
+    // all-regular cadence (no gap ever reaches 700): the predictor never
+    // locks, no quiet is ever a corridor, and the press expires - the
+    // no-starvation fallback is RETIRED (a fire outside the corridor is
+    // the wire-proven cut class; expiry + re-press is the safe path)
+    pair_at(h, 1, 1000);          // ends 1015
+    pair_at(h, 2, 1536);          // gap 521, ends 1551
+    pair_at(h, 3, 2072);          // gap 521, ends 2087
+    check(h.r.request(0x02, 0x4C, false, 0, 2200, true), "aimed read armed (no-long cadence)");
+    h.r.tick(2267);               // since 180: band-passing but never locked
     check(h.r.status() == ReadController::Status::Armed,
-          "aimed read holds before the counter reaches due");
-    pair_at(h, 3, 2070);   // counter reaches due from here on
-    h.r.tick(2255);
-    check(h.r.status() == ReadController::Status::WaitBlock,
-          "aimed read fires once due even without real longs");
-    check(h.bus.tx_log.size() == 1, "exactly one frame fired");
-}
-
-static void test_aim_detects_early_long_gap() {
-    Harness h;
-    // rotation drift: the long opening goes late. The detected-mid-gap
-    // fire could never satisfy the reviewer's runway equation
-    // (600 + turnaround + 585 > any observed long gap) - it was a
-    // guaranteed 1-3 ms tail race, so the detected path is gone: the
-    // read HOLDS through the old detect band (asserted at since=654),
-    // the late rotation lands as the next long, the counters march to
-    // due, and the fire happens at the capped predicted bound.
-    pair_at(h, 1, 1000);
-    pair_at(h, 2, 2116);   // gap 1101 (long) - counter resets
-    pair_at(h, 3, 2651);   // gap 520 - counter 1
-    check(h.r.request(0x01, 0x4C, false, 0, 2700, true), "aimed read armed (drift)");
-    h.r.tick(2836);        // since 170: confirm band, counter 1 - not due
-    check(h.r.status() == ReadController::Status::Armed, "holds below due, no fire");
-    h.r.tick(3110);        // since 444: confirm band passed, nothing due
-    check(h.r.status() == ReadController::Status::Armed, "still holding");
-    h.r.tick(3320);        // since 654: the OLD detect band - must NOT fire
-    check(h.r.status() == ReadController::Status::Armed,
-          "detected-mid-gap fire is gone (runway equation can never hold there)");
-    pair_at(h, 4, 3400);   // drift-made long (gap 734) - counter resets
-    pair_at(h, 1, 4040);  // regular 625 - counter 1
-    pair_at(h, 2, 4664);  // regular 624 - counter 2: due
-    h.r.tick(4794);        // since 115 into the opening: due + capped band
-    check(h.r.status() == ReadController::Status::WaitBlock,
-          "fires through the due counter at the capped fire bound");
-    check_line_has(h.r.status_line(), "predicted-long", "fire line names the window class");
-    check(h.bus.tx_log.size() == 1, "exactly one frame fired");
+          "unlocked predictor holds through a band-passing tick");
+    h.r.tick(8600);               // arm watchdog (strictly past the 6 s window)
+    check(h.r.status() == ReadController::Status::Expired,
+          "aimed read expires without an observed long");
+    check_line_has(h.r.status_line(), "no safe window within 6 s",
+                   "expiry names the wait");
+    check(h.bus.tx_log.empty(), "nothing ever fired without a corridor");
 }
 
 // The reviewer's ride-gap instrument (upgraded to the deciding datum by
@@ -626,9 +617,8 @@ int main() {
     test_second_operation_not_killed();
     test_cooldown_bidirectional();
     test_enable_gates();
-    test_aim_fires_in_predicted_long_gap();
-    test_aim_falls_back_when_no_longs();
-    test_aim_detects_early_long_gap();
+    test_aim_fires_in_pre_long_quiet();
+    test_aim_expires_without_long_observed();
     test_ride_gap_recorded_per_read();
     if (failures) {
         printf("%d read-oracle failures\n", failures);
