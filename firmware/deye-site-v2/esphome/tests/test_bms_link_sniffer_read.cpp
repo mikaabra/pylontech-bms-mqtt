@@ -579,6 +579,36 @@ static void test_aim_detects_early_long_gap() {
     check(h.bus.tx_log.size() == 1, "exactly one frame fired");
 }
 
+// The reviewer's ride-gap instrument (upgraded to the deciding datum by
+// the live 20:33/20:35 pack-02 flip: clean and clipped at identical
+// load, position and start delay, adjacent slots): the first master
+// request after a fired read completes the ridden gap's length - one
+// ring line per read, next to the start-delay record - so verdicts line
+// up with gap lengths directly. Latch consumed once per read.
+static void test_ride_gap_recorded_per_read() {
+    Harness h;
+    pair_at(h, 1, 1000);          // request 1000, response ends 1015
+    fire_read(h, 1, 0x4C, false, 0, 1000);  // fires at 1170: ride gap opens at 1015
+    check(h.r.status() == ReadController::Status::WaitBlock, "read fired");
+
+    send_block(h.c, clean_block_inner(0x01, 0x4C, "0D5C"), 1560);
+    h.r.tick(1580);
+    check(h.r.status() == ReadController::Status::ReadOk, "clean block grades ReadOk");
+
+    // the master's next request completes the datum: 2195 - 1015 = 1180
+    pair_at(h, 2, 2195);
+    std::string dump = h.c.dump_bounded();
+    check(dump.find("D547 01 ride gap 1180ms") != std::string::npos,
+          "ride gap length recorded beside the start-delay line");
+
+    // consumed once: the next pair must not add a second line
+    pair_at(h, 3, 2819);
+    dump = h.c.dump_bounded();
+    size_t n = 0, pos = 0;
+    while ((pos = dump.find("ride gap", pos)) != std::string::npos) { n++; pos += 8; }
+    check(n == 1, "one ride-gap line per read, latch consumed once");
+}
+
 int main() {
     test_builder_byte_exact();
     test_deny_shapes();
@@ -599,6 +629,7 @@ int main() {
     test_aim_fires_in_predicted_long_gap();
     test_aim_falls_back_when_no_longs();
     test_aim_detects_early_long_gap();
+    test_ride_gap_recorded_per_read();
     if (failures) {
         printf("%d read-oracle failures\n", failures);
         return 1;

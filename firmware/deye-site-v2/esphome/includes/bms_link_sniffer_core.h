@@ -738,6 +738,12 @@ private:
         }
         last_request_start_ms_ = t_ms;
         has_requests_ = true;
+        // a fired read's ride-gap datum completes on the FIRST master
+        // request after its fire: ring-recorded beside the start-delay
+        // line, so verdicts line up with gap lengths directly (the
+        // reviewer's instrument; the pack-02 clean->clip flip between
+        // adjacent slots at identical conditions showed it decides)
+        record_ride_gap_(t_ms);
         if (watchdog_tripped_) {
             watchdog_tripped_ = false;
             reopen_ring_after_incident_(t_ms);
@@ -931,6 +937,7 @@ private:
     // pattern as on_bare_ack / on_read_candidate_)
     bool consume_probe_answer_(uint32_t t_ms, const std::string& info);
     void record_probe_stray_(uint32_t t_ms, const std::string& info, const std::string& lenid);
+    void record_ride_gap_(uint32_t t_ms);
     void notify_telecom_probe_(uint32_t t_ms);
     bool route_teleop_ack_(uint32_t t_ms);
 };
@@ -1345,12 +1352,24 @@ public:
         return short_line;
     }
 
-    uint8_t last_pack() const { return pack_; }
-    uint8_t last_param() const { return param_; }
+    uint8_t  last_pack() const { return pack_; }
+    uint8_t  last_param() const { return param_; }
     uint16_t value_raw() const { return value_raw_; }
     Status status() const { return status_; }
     const std::string& status_line() const { return line_; }
     uint32_t tx_count() const { return tx_count_; }
+
+    // consumed by the core's on_request: the first master poll after a
+    // fired read completes the ride-gap datum (one ring line per read)
+    bool ride_gap_complete(uint32_t req_start_ms, std::string* out) {
+        if (!ride_gap_pending_) return false;
+        ride_gap_pending_ = false;
+        if (out) {
+            *out = "D547 " + hex2(pack_) + " ride gap " +
+                   std::to_string(req_start_ms - ride_gap_start_ms_) + "ms";
+        }
+        return true;
+    }
 
 private:
     void deny(const std::string& why) {
@@ -1393,6 +1412,13 @@ private:
 
         std::string frame = build_read_frame(pack_);
         tx_started_ms_ = t_ms;
+        // ride-gap latch (reviewer instrument, the pack-02 flip showed
+        // it is the datum that decides clipped vs clean): the gap this
+        // read fired into opens at fire-since; the NEXT master request
+        // completes the length. Consumed once, ring-recorded beside the
+        // start-delay line so verdicts line up with gap lengths directly
+        ride_gap_start_ms_ = t_ms - since;
+        ride_gap_pending_ = true;
         bool ok = tx_(frame, ctx_);
         gate_.last_tx_ms = t_ms;
         gate_.cooldown_active = true;
@@ -1443,6 +1469,8 @@ private:
     uint16_t value_raw_ = 0;
     bool     aim_long_gap_ = false;
     int      answer_start_delay_ms_ = -1;  // fire -> answer-first-byte, logged on every grade
+    uint32_t ride_gap_start_ms_ = 0;       // the ridden gap opens at fire - since
+    bool     ride_gap_pending_ = false;    // until the next master request completes it
     Status   status_ = Status::Idle;
     uint32_t armed_at_ms_ = 0;
     uint32_t tx_started_ms_ = 0;
@@ -2032,6 +2060,15 @@ inline void BmsLinkCore::record_probe_stray_(uint32_t t_ms, const std::string& i
     ring_now(t_ms, "probe stray " + lenid + " +" +
                        std::to_string(t_ms - telecom_waiter_->probe_tx_ms()) + "ms " +
                        info.substr(0, 24));
+}
+
+// The first master request after a fired read completes the ride-gap
+// datum: one ring line per read, next to the start-delay line, so
+// clipped-vs-clean verdicts line up with gap lengths directly.
+inline void BmsLinkCore::record_ride_gap_(uint32_t t_ms) {
+    if (!read_waiter_) return;
+    std::string g;
+    if (read_waiter_->ride_gap_complete(t_ms, &g)) ring_now(t_ms, g);
 }
 
 inline void BmsLinkCore::notify_telecom_probe_(uint32_t t_ms) {
