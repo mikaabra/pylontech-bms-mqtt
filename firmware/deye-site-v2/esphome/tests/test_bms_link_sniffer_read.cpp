@@ -402,7 +402,10 @@ static void test_second_operation_not_killed() {
     auto tick_both = [&](uint32_t t) {
         h.w.tick(t);
         h.r.tick(t);
-        bool off = linksniff::op_just_finished(prev_w, prev_r, h.w.status(), h.r.status());
+        bool off = linksniff::op_just_finished(prev_w, prev_r,
+                                              linksniff::TeleOpController::Status::Idle,
+                                              h.w.status(), h.r.status(),
+                                              linksniff::TeleOpController::Status::Idle);
         prev_w = h.w.status();
         prev_r = h.r.status();
         return off;  // true = the wrapper turns the enable off here

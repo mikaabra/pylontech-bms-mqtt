@@ -58,6 +58,7 @@ esphome:
           ((BmsLinkSniffer*)id(link_sniffer))->bind_entities(id(link_last_anomaly), id(link_anomaly_dump), id(link_write_status), id(link_write_enable));
           ((BmsLinkSniffer*)id(link_sniffer))->bind_read_entities(id(link_read_status), id(pack1_balance_mv), id(pack2_balance_mv), id(pack3_balance_mv), id(pack4_balance_mv));
           ((BmsLinkSniffer*)id(link_sniffer))->bind_debug_entities(id(link_debug_value));
+          ((BmsLinkSniffer*)id(link_sniffer))->bind_teleop_entities(id(link_teleop_status));
 
 esp32:
   board: esp32-s3-devkitc-1
@@ -360,12 +361,24 @@ sensor:
   - platform: template
     name: "Link Reads Sent"
     id: link_reads_sent
+    icon: "mdi:eye-check-outline"
     entity_category: diagnostic
-    update_interval: 60s
     accuracy_decimals: 0
+    update_interval: 60s
     lambda: |-
       if (!id(link_sniffer)) return {};
       return ((BmsLinkSniffer*)id(link_sniffer))->reads_sent();
+
+  - platform: template
+    name: "Link TeleOps Sent"
+    id: link_teleops_sent
+    icon: "mdi:power-cycle"
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    update_interval: 60s
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->teleops_sent();
 
   # stored 0x4C per pack, published ONLY from checksum-valid,
   # battery-matched block reads (the strict trust rule) - unknown until
@@ -502,6 +515,13 @@ text_sensor:
     id: link_anomaly_dump
     entity_category: diagnostic
     # push-only: the Dump Anomaly Ring button publishes on demand
+    update_interval: never
+
+  - platform: template
+    name: "Link TeleOp Status"
+    id: link_teleop_status
+    entity_category: diagnostic
+    # push-only: the wrapper publishes the sequence verdicts
     update_interval: never
 
   - platform: template
@@ -811,6 +831,42 @@ button:
           if (sel == 1) param = 0x4C;
           uint16_t raw = (uint16_t)id(link_debug_write_value).state;
           ((BmsLinkSniffer*)id(link_sniffer))->arm_debug_write((uint8_t)pack, param, raw);
+
+  # SYS_OFF restart, sniffer-sent (the 2026-11-11 vendor-tool session's
+  # frames, gap-timed by us instead of the tool's hit/miss presses): one
+  # press = probe, verified answer, then the teleControl write. 00 is
+  # hard-refused (the master battery's reboot takes the bus down).
+  - platform: template
+    name: "Send SYS_OFF Restart"
+    icon: "mdi:power-cycle"
+    entity_category: config
+    state_topic: null
+    command_topic: null
+    on_press:
+      - lambda: |-
+          if (!id(link_sniffer)) return;
+          int pack = 0;
+          if (id(link_target_pack).active_index().has_value())
+            pack = (int)*id(link_target_pack).active_index();
+          ((BmsLinkSniffer*)id(link_sniffer))->arm_sys_off((uint8_t)pack);
+
+  # the captured recovery: probe, LMCHG disable, LMCHG enable - the pair
+  # that woke pack 04 in the vendor session. New-gen packs (03/04) only;
+  # old-gen targets are refused (no captured old-gen disable - the
+  # physical button is that path).
+  - platform: template
+    name: "Send LMCHG Wake Pair"
+    icon: "mdi:weather-sunny"
+    entity_category: config
+    state_topic: null
+    command_topic: null
+    on_press:
+      - lambda: |-
+          if (!id(link_sniffer)) return;
+          int pack = 0;
+          if (id(link_target_pack).active_index().has_value())
+            pack = (int)*id(link_target_pack).active_index();
+          ((BmsLinkSniffer*)id(link_sniffer))->arm_wake_pair((uint8_t)pack);
 
   - platform: template
     name: "Dump Anomaly Ring"

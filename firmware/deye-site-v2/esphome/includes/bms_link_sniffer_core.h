@@ -42,6 +42,7 @@ namespace linksniff {
 
 class WriteController;
 class ReadController;
+class TeleOpController;
 
 // ---- constants ------------------------------------------------------------
 static constexpr int      kNumPacks          = 4;     // Link slaves 01..04
@@ -255,6 +256,66 @@ inline std::string build_read_frame(uint8_t pack) {
     return result;
 }
 
+// ---- guarded teleControl client (SYS_OFF restart + LMCHG wake pair) --------
+// All frames below are byte-exact against the 2026-11-11 vendor-tool
+// wire captures (PROTOCOL_REFERENCE "teleControl captured on the wire");
+// the telecontrol oracle pins every literal.
+//
+// teleControl gates (the XML teleControl_Group bit numbers, verified on
+// the wire): 00 DISCHG, 01 CHG, 02 LMCHG, 04 SYS_OFF.
+static constexpr uint8_t kTeleGateLmchg  = 0x02;
+static constexpr uint8_t kTeleGateSysOff = 0x04;
+
+// D5C9 presence probe (the addressing mechanism: the D545 write carries
+// no target — the probe selects the pack, the pack answers with a LENID
+// 9052 identity block, and the next write lands on the freshly-probed
+// pack). CHK family = the shared ASCII-complement function: the oracle
+// pins probes for every address against the captured class (whole-frame
+// byte-sum 1033 = 0x409, CHK = FD (0x0C - addr)).
+inline std::string build_probe_frame(uint8_t addr) {
+    char body[20];
+    snprintf(body, sizeof body, "8000D5C9E002%02X", (unsigned)addr);
+    std::string result = "~";
+    result += body;
+    result += rs485_calc_chksum(body);
+    result += "\r";
+    return result;
+}
+
+// D545 teleControl enable frame: LENID A006, INFO = [variant][gate][10],
+// computed CHK — reproduces every captured enable literal in the catalog
+// (SYS_OFF both variants, CHG, DISCHG, LMCHG; class 938 = 0x3AA).
+inline std::string build_telecontrol_enable(uint8_t variant, uint8_t gate) {
+    char body[24];
+    snprintf(body, sizeof body, "8000D545A006%02X%02X10", (unsigned)variant, (unsigned)gate);
+    std::string result = "~";
+    result += body;
+    result += rs485_calc_chksum(body);
+    result += "\r";
+    return result;
+}
+
+// Captured new-generation LMCHG disable, byte-exact literal
+// (~ 80 00 D5 45 A0 06 04 02 01 FF C2). Disable frames from the vendor
+// tool carry an off-formula CHK (FF C(4-gate)) that the packs demonstrably
+// accept battery-side (this exact sequence woke pack 04) — replicate the
+// wire, not the formula. No old-gen disable was ever captured: the wake
+// pair is new-gen-only and refuses old-gen targets rather than guess.
+static const char kLmchgDisableNewGen[] = "~8000D545A006040201FFC2\r";
+
+// The probe answer's LENID (identity block, INFO = 00 [id] ...; captured
+// literal "80 00 D5 00 90 52 00 [id] ..."). Routing matches LENID exactly.
+static const char kProbeAnswerLenid[] = "9052";
+
+// Tool-observed variant byte per Link address (PROTOCOL_REFERENCE
+// teleControl catalog: the tool sent 01 for packs at addresses 01-02
+// and 04 for 03-04; both landed). Wire fact, not a behavior claim.
+inline bool telecontrol_variant(uint8_t pack, uint8_t& variant) {
+    if (pack == 1 || pack == 2) { variant = 0x01; return true; }
+    if (pack == 3 || pack == 4) { variant = 0x04; return true; }
+    return false;
+}
+
 // Battery number from a block INFO (chars 0..1). Also the pack identity
 // check: a trusted read must name the pack we asked (RTN-00 responses
 // carry no requester echo — the reference-data identify is all we get).
@@ -318,6 +379,8 @@ enum class EventKind {
     RingReleased,     // incident window re-opened after recovery + delay (wrapper publishes)
     AckForWrite,      // bare ack consumed by a pending injection wait (not an anomaly)
     BlockForRead,     // D547 block (or its damaged remnant) consumed by a pending read (not an anomaly)
+    AckForTeleOp,     // bare ack consumed by a pending teleControl frame (not an anomaly)
+    ProbeAnswer,      // 9052 identity block routed to a pending teleControl probe (not an anomaly)
 };
 
 struct LinkEvent {
@@ -609,10 +672,17 @@ private:
         }
         if (cid2 == "00") {
             if (len == 0) return on_bare_ack(t_ms);
+            if (lenid == kProbeAnswerLenid && probe_answer_expected_(t_ms))
+                return on_probe_answer_(t_ms, info);
             on_response(t_ms);
             return;
         }
-        // config-plane traffic: the single most important anomaly class
+        // config-plane traffic: the single most important anomaly class.
+        // A D5C9 presence probe from ANYONE re-latches the teleControl
+        // write target — if one of OUR sequences is mid-flight, abort it
+        // before any unsent frame (fail-closed: the target is no longer
+        // provably ours).
+        if (cid2 == "C9") notify_telecom_probe_(t_ms);
         std::string d = "cid2=" + cid2 + " len=" + std::to_string(len);
         push_event(EventKind::AnomalyConfig, t_ms, 0, d);
         anomalies_++;
@@ -765,6 +835,7 @@ private:
 public:
     void set_ack_waiter(WriteController* w) { ack_waiter_ = w; }
     void set_read_waiter(ReadController* r) { read_waiter_ = r; }
+    void set_telecom_waiter(TeleOpController* t) { telecom_waiter_ = t; }
     uint32_t dropped_events() const { return dropped_events_; }
     uint32_t last_frame_end_ms() const { return last_frame_end_ms_; }
     uint32_t last_rx_ms() const { return last_rx_t_ms_; }
@@ -821,6 +892,13 @@ private:
 
     WriteController* ack_waiter_ = nullptr;
     ReadController* read_waiter_ = nullptr;
+    TeleOpController* telecom_waiter_ = nullptr;
+    // Defined after TeleOpController (incomplete-type boundary, same
+    // pattern as on_bare_ack / on_read_candidate_)
+    void on_probe_answer_(uint32_t t_ms, const std::string& info);
+    bool probe_answer_expected_(uint32_t t_ms);
+    void notify_telecom_probe_(uint32_t t_ms);
+    bool route_teleop_ack_(uint32_t t_ms);
 };
 
 // ---------------------------------------------------------------------------
@@ -1059,7 +1137,8 @@ private:
 };
 
 // Bare-ack routing: a pending injection wait consumes it (AckForWrite,
-// not an anomaly); anything else stays unexpected config-plane oddity.
+// not an anomaly); a pending teleControl frame likewise (AckForTeleOp);
+// anything else stays unexpected config-plane oddity.
 inline void BmsLinkCore::on_bare_ack(uint32_t t_ms) {
     last_frame_end_ms_ = frame_end_t_ms_;
     if (ack_waiter_ && ack_waiter_->ack_expected(t_ms)) {
@@ -1067,6 +1146,7 @@ inline void BmsLinkCore::on_bare_ack(uint32_t t_ms) {
         ack_waiter_->on_ack(t_ms);
         return;
     }
+    if (route_teleop_ack_(t_ms)) return;
     push_event(EventKind::AnomalyAck, t_ms, 0, "bare ack with no write pending");
     anomalies_++;
     ring_now(t_ms, kRawBareAck);
@@ -1330,6 +1410,377 @@ private:
 };
 
 // ---------------------------------------------------------------------------
+// Guarded teleControl client — the 2026-11-11 vendor-tool session
+// productionized (SYS_OFF restart + the LMCHG wake pair). One press = ONE
+// scripted sequence aimed through the same fire gates as the other clients
+// (enable re-checked at every state, watchdog/cadence/clean-slot holds,
+// 150..250 ms confirmed silence). The D545 write carries no target: every
+// sequence opens with a D5C9 presence probe, requires the pack's 9052
+// identity answer, and only then sends the write — no answer means no
+// write, and a foreign D5C9 probe observed mid-sequence aborts before any
+// unsent frame (the target latch may have moved). Only the cross-op 4 s
+// cooldown is waived INSIDE one press's sequence: every frame still waits
+// for a fresh clean master pair after our previous frame plus
+// kTeleIntraGapMs, strictly tighter than the vendor tool's human timing
+// that landed these same sequences all session. Short frames (~12 ms of
+// wire) fire into regular idle windows - no long-gap aim needed.
+// ---------------------------------------------------------------------------
+static constexpr uint32_t kTeleAnswerWindowMs = 1500;   // probe answer collect
+static constexpr uint32_t kTeleOpDeadlineMs   = 15000;  // whole-sequence budget
+static constexpr uint32_t kTeleIntraGapMs     = 400;    // min spacing between our frames in one press
+
+class TeleOpController {
+public:
+    enum class Op { None, SysOff, WakePair };
+    enum class Status {
+        Idle, Denied, Armed, WaitProbe, WaitWindow, WaitAck, Settle,
+        Done, NoAnswer, NoAck, Collision, Aborted, Expired
+    };
+
+    using EnableFn = bool (*)(void*);
+    using TxFn = bool (*)(const std::string&, void*);
+
+    TeleOpController(BmsLinkCore& core, SharedTxGate& gate,
+                     EnableFn enable, TxFn tx, void* ctx)
+        : core_(core), gate_(gate), enable_(enable), tx_(tx), ctx_(ctx) {}
+
+    bool request_sys_off(uint8_t pack, uint32_t now) {
+        if (in_flight_()) {
+            line_ = "ignored: previous teleControl sequence still in flight";
+            return false;
+        }
+        uint8_t variant = 0;
+        if (pack < kLinkPackFirst || pack > kLinkPackLast ||
+            !telecontrol_variant(pack, variant)) {
+            deny("pack must be 01-04 (never 00 - the master battery)");
+            return false;
+        }
+        start_(Op::SysOff, pack, variant, now);
+        line_ = "armed: SYS_OFF pack " + hex2(pack) + " (variant " + hex2(variant) +
+                "): probe, then the teleControl write - one sequence across the" +
+                " next windows, expires in " + std::to_string(kTeleOpDeadlineMs / 1000) + " s";
+        return true;
+    }
+
+    bool request_wake_pair(uint8_t pack, uint32_t now) {
+        if (in_flight_()) {
+            line_ = "ignored: previous teleControl sequence still in flight";
+            return false;
+        }
+        uint8_t variant = 0;
+        if (pack < kLinkPackFirst || pack > kLinkPackLast ||
+            !telecontrol_variant(pack, variant)) {
+            deny("pack must be 01-04 (never 00 - the master battery)");
+            return false;
+        }
+        if (variant != 0x04) {
+            deny("the wake pair exists only as the captured new-gen sequence (packs 03-04);"\
+                 " for an old-gen pack the physical button is the recovery");
+            return false;
+        }
+        start_(Op::WakePair, pack, variant, now);
+        line_ = "armed: LMCHG wake pair pack " + hex2(pack) + " (variant " + hex2(variant) +
+                "): probe, disable, enable - one sequence, expires in " +
+                std::to_string(kTeleOpDeadlineMs / 1000) + " s";
+        return true;
+    }
+
+    void tick(uint32_t t_ms) {
+        if (gate_.cooldown_active &&
+            (int32_t)(t_ms - gate_.last_tx_ms) >= (int32_t)kTxDueCooldownMs)
+            gate_.cooldown_active = false;
+        if (late_ack_until_ms_ != 0 && (int32_t)(late_ack_until_ms_ - t_ms) <= 0)
+            late_ack_until_ms_ = 0;
+        if (gate_.need_clean_slot && core_.pairs_total() > gate_.clean_pair_baseline)
+            gate_.need_clean_slot = false;
+        switch (status_) {
+            case Status::Armed:      tick_armed(t_ms); break;
+            case Status::WaitProbe:  tick_wait_probe(t_ms); break;
+            case Status::WaitWindow: tick_wait_window(t_ms); break;
+            case Status::WaitAck:    tick_wait_ack(t_ms); break;
+            case Status::Settle:     tick_settle(t_ms); break;
+            default: break;  // terminal: nothing fires without a fresh press
+        }
+    }
+
+    bool probe_window_active(uint32_t now) const {
+        return status_ == Status::WaitProbe &&
+               (int32_t)(now - probe_tx_ms_) <= (int32_t)kTeleAnswerWindowMs;
+    }
+
+    bool ack_expected(uint32_t now) const {
+        if (status_ == Status::WaitAck) return true;
+        return wrote_any_ && late_ack_until_ms_ != 0 &&
+               (status_ == Status::NoAck || status_ == Status::Collision ||
+                status_ == Status::Settle) &&
+               (int32_t)(late_ack_until_ms_ - now) > 0;
+    }
+
+    void on_probe_answer(uint32_t t_ms, const std::string& info) {
+        if (status_ != Status::WaitProbe) return;
+        (void)t_ms;
+        std::string id = info.size() > 2 ? info.substr(2, 8) : std::string("?");
+        line_ = "probe answered (id " + id + "...) - sending " + op_name_() +
+                " in the next quiet window (short frame, regular idle fits)";
+        status_ = Status::WaitWindow;
+    }
+
+    void on_ack(uint32_t t_ms) {
+        int lat = (int)(t_ms - tx_started_ms_);
+        if (status_ == Status::WaitAck) {
+            if (op_ == Op::SysOff) {
+                status_ = Status::Done;
+                line_ = "SYS_OFF acked in " + std::to_string(lat) + " ms - ack-level landing;"\
+                        " the pack restarts (a reboot preserves parameters - NOT the" \
+                        " 6-second button factory reset). Watch the LEDs; the wake pair" \
+                        " button recovers a pack that stays dark";
+                end_tx_op_();
+            } else if (seq_idx_ == 0) {
+                status_ = Status::Settle;
+                settle_from_ms_ = t_ms;
+                line_ = "LMCHG disable acked in " + std::to_string(lat) +
+                        " ms - settling, then the enable";
+                end_tx_op_();
+            } else {
+                status_ = Status::Done;
+                line_ = "wake pair complete: disable then enable, this enable acked in " +
+                        std::to_string(lat) + " ms - expect the pack back (LEDs, telemetry)"\
+                        " within the minute; verify by read";
+                end_tx_op_();
+            }
+        } else if (ack_expected(t_ms)) {
+            line_ += " | late bare ack " + std::to_string(lat) +
+                     " ms after our frame: likely the answer - the frame landed"
+                     " (ack-level only)";
+        }
+    }
+
+    void on_foreign_probe(uint32_t t_ms) {
+        (void)t_ms;
+        if (!in_flight_()) return;
+        // pre-write states: our write may not have flown; the latch is
+        // compromised - stop. WaitAck/Done: our frame is already out.
+        if (status_ != Status::WaitProbe && status_ != Status::WaitWindow &&
+            status_ != Status::Settle)
+            return;
+        status_ = Status::Aborted;
+        line_ = "aborted: another presence probe re-latched the teleControl target -"\
+                " sequence stopped before any unsent frame; press again";
+        end_tx_op_();
+    }
+
+    Op op() const { return op_; }
+    uint8_t last_pack() const { return pack_; }
+    Status status() const { return status_; }
+    const std::string& status_line() const { return line_; }
+    uint32_t tx_count() const { return tx_count_; }
+
+private:
+    bool in_flight_() const {
+        return status_ == Status::Armed || status_ == Status::WaitProbe ||
+               status_ == Status::WaitWindow || status_ == Status::WaitAck ||
+               status_ == Status::Settle;
+    }
+
+    void deny(const std::string& why) {
+        status_ = Status::Denied;
+        line_ = "denied: " + why;
+    }
+
+    void start_(Op op, uint8_t pack, uint8_t variant, uint32_t now) {
+        op_ = op;
+        pack_ = pack;
+        variant_ = variant;
+        seq_idx_ = 0;
+        wrote_any_ = false;
+        armed_at_ms_ = now;
+        status_ = Status::Armed;
+    }
+
+    const char* op_name_() const {
+        return op_ == Op::SysOff ? "SYS_OFF" :
+               (seq_idx_ == 0 ? "LMCHG disable" : "LMCHG enable");
+    }
+
+    void require_clean_() {
+        gate_.need_clean_slot = true;
+        gate_.clean_pair_baseline = core_.pairs_total();
+    }
+    void end_tx_op_() {
+        require_clean_();
+        late_ack_until_ms_ = gate_.last_tx_ms + kTxDueCooldownMs;
+    }
+
+    bool common_holds_(uint32_t t_ms, const char* who) {
+        if (!enable_(ctx_)) {
+            status_ = Status::Aborted;
+            line_ = std::string("aborted: enable switched off mid-sequence - ") + who +
+                    (wrote_any_ ? " (frames already sent stay sent; nothing more fires)"
+                                : " (the probe was sent, the write was not)");
+            return false;
+        }
+        if ((int32_t)(t_ms - armed_at_ms_) > (int32_t)kTeleOpDeadlineMs) {
+            status_ = Status::Expired;
+            line_ = "expired: no safe window within " +
+                    std::to_string(kTeleOpDeadlineMs / 1000) +
+                    " s - nothing further fires; press again";
+            return false;
+        }
+        if (core_.watchdog_tripped()) return false;
+        if (!core_.bus_established(t_ms)) return false;
+        if (gate_.need_clean_slot) return false;
+        return true;
+    }
+
+    void fire_frame_(uint32_t t_ms, const std::string& what) {
+        std::string frame = seq_idx_ == 0
+            ? (op_ == Op::SysOff
+                   ? build_telecontrol_enable(variant_, kTeleGateSysOff)
+                   : std::string(kLmchgDisableNewGen))
+            : build_telecontrol_enable(variant_, kTeleGateLmchg);
+        tx_started_ms_ = t_ms;
+        bool ok = tx_(frame, ctx_);
+        gate_.last_tx_ms = t_ms;
+        gate_.cooldown_active = true;
+        tx_count_++;
+        require_clean_();
+        if (!ok) {
+            status_ = Status::Aborted;
+            line_ = "aborted: uart flush failed sending " + what +
+                    " - bytes may be on the wire; nothing further fires this press";
+            end_tx_op_();
+            return;
+        }
+        wrote_any_ = true;
+        status_ = Status::WaitAck;
+        line_ = what + " sent (" + std::to_string(frame.size()) +
+                " chars) - waiting for the single-frame ack (150 ms window;"\
+                " late acks listened for, never a retry)";
+    }
+
+    void tick_armed(uint32_t t_ms) {
+        // the probe is the operation's first frame: full cross-op gates,
+        // including the shared 4 s cooldown
+        if (!common_holds_(t_ms, "before the probe")) return;
+        if (gate_.cooldown_active) return;
+        uint32_t since = core_.since_last_rx(t_ms);
+        if (since < kGapConfirmMs || since > kGapMaxMs) return;
+        std::string frame = build_probe_frame(pack_);
+        probe_tx_ms_ = t_ms;
+        bool ok = tx_(frame, ctx_);
+        gate_.last_tx_ms = t_ms;
+        gate_.cooldown_active = true;
+        tx_count_++;
+        require_clean_();
+        if (!ok) {
+            status_ = Status::Aborted;
+            line_ = "aborted: uart flush failed sending the probe - bytes may be on" \
+                    " the wire; the write WILL NOT fire without a verified probe;" \
+                    " press again";
+            return;
+        }
+        status_ = Status::WaitProbe;
+        line_ = "probe sent (pack " + hex2(pack_) + ") - waiting for the identity" \
+                " answer (1.5 s); the write does NOT fire without it";
+    }
+
+    void tick_wait_probe(uint32_t t_ms) {
+        if (!common_holds_(t_ms, "waiting for the probe answer")) return;
+        if (probe_window_active(t_ms)) return;
+        status_ = Status::NoAnswer;
+        line_ = "no probe answer in " + std::to_string(kTeleAnswerWindowMs / 1000) +
+                " s - the teleControl write was NOT sent (fail-closed: no answer,"\
+                " no write); press again";
+    }
+
+    void tick_wait_window(uint32_t t_ms) {
+        // intra-op: the shared cooldown is deliberately waived (bounded by
+        // the clean-pair demand + the settle gap); everything else holds
+        if (!common_holds_(t_ms, "before the write")) return;
+        uint32_t since = core_.since_last_rx(t_ms);
+        if (since < kGapConfirmMs || since > kGapMaxMs) return;
+        fire_frame_(t_ms, op_ == Op::SysOff ? std::string("SYS_OFF write")
+                                            : std::string("LMCHG disable"));
+    }
+
+    void tick_wait_ack(uint32_t t_ms) {
+        // the ack deadline runs ungated, like the write client: bus holds
+        // (clean-slot, cadence) never postpone a NoAck verdict
+        if (!enable_(ctx_)) {
+            status_ = Status::Aborted;
+            line_ = std::string(op_name_()) +
+                    " - result unknown (enable switched off after TX); nothing" \
+                    " further fires";
+            end_tx_op_();
+            return;
+        }
+        if ((int32_t)(t_ms - tx_started_ms_) < (int32_t)kAckDeadlineMs) return;
+        bool traffic = (int32_t)(core_.last_rx_ms() - tx_started_ms_) > 0;
+        const char* verdict = traffic ? "collision after the frame" : "no ack in the window";
+        if (op_ == Op::SysOff) {
+            status_ = traffic ? Status::Collision : Status::NoAck;
+            line_ = std::string(verdict) + " - disarmed, result unknown (the pack may" \
+                    " still have taken it; no ack never means not-written)." \
+                    " Listening for a late ack until the cooldown passes; press again" \
+                    " if the LEDs show nothing changed";
+            end_tx_op_();
+            return;
+        }
+        if (seq_idx_ == 0) {
+            // the disable's ack is unobserved: continue to the enable - the
+            // enable is the recovery direction whether or not the disable
+            // landed (re-enabling an already-enabled LMCHG gate is a no-op)
+            status_ = Status::Settle;
+            settle_from_ms_ = t_ms;
+            line_ = std::string(verdict) + " on the LMCHG disable - continuing to the" \
+                    " enable anyway (the enable is the recovery direction either way);" \
+                    " listening for the disable's late ack until the cooldown passes";
+            end_tx_op_();
+            return;
+        }
+        status_ = traffic ? Status::Collision : Status::NoAck;
+        line_ = std::string(verdict) + " on the LMCHG enable - disarmed, result unknown." \
+                " Listening for a late ack until the cooldown passes; the disable side" \
+                " of the pair already flew; press again if the pack stays dark";
+        end_tx_op_();
+    }
+
+    void tick_settle(uint32_t t_ms) {
+        if (!common_holds_(t_ms, "between the pair")) return;
+        if ((int32_t)(t_ms - settle_from_ms_) < (int32_t)kTeleIntraGapMs) return;
+        seq_idx_ = 1;
+        status_ = Status::WaitWindow;
+        line_ = "settle passed - the LMCHG enable fires in the next quiet window";
+    }
+
+    static std::string hex2(uint8_t v) {
+        char b[3];
+        snprintf(b, sizeof b, "%02X", (unsigned)v);
+        return b;
+    }
+
+    BmsLinkCore& core_;
+    SharedTxGate& gate_;
+    EnableFn enable_;
+    TxFn tx_;
+    void* ctx_;
+
+    Op op_ = Op::None;
+    uint8_t pack_ = 0;
+    uint8_t variant_ = 0;
+    int seq_idx_ = 0;              // 0 = the first write frame, 1 = the enable
+    bool wrote_any_ = false;
+    Status status_ = Status::Idle;
+    uint32_t armed_at_ms_ = 0;
+    uint32_t probe_tx_ms_ = 0;
+    uint32_t tx_started_ms_ = 0;
+    uint32_t settle_from_ms_ = 0;
+    uint32_t late_ack_until_ms_ = 0;
+    uint32_t tx_count_ = 0;
+    std::string line_ = "idle";
+};
+
+// ---------------------------------------------------------------------------
 // Enable auto-off decision (review-vote fix): a finished write stays Acked
 // until the next write, so "any client terminal" fired a PHANTOM auto-off on
 // the second operation - a read armed right after a write verdict was
@@ -1342,6 +1793,11 @@ inline bool write_status_in_flight(WriteController::Status s) {
 inline bool read_status_in_flight(ReadController::Status s) {
     return s == ReadController::Status::Armed || s == ReadController::Status::WaitBlock;
 }
+inline bool teleop_status_in_flight(TeleOpController::Status s) {
+    using T = TeleOpController::Status;
+    return s == T::Armed || s == T::WaitProbe || s == T::WaitWindow ||
+           s == T::WaitAck || s == T::Settle;
+}
 inline bool write_status_terminal(WriteController::Status s) {
     using S = WriteController::Status;
     return s == S::Acked || s == S::NoAck || s == S::Collision ||
@@ -1353,10 +1809,19 @@ inline bool read_status_terminal(ReadController::Status s) {
            s == R::Damaged || s == R::NoBlock || s == R::Aborted ||
            s == R::Expired || s == R::Denied;
 }
+inline bool teleop_status_terminal(TeleOpController::Status s) {
+    using T = TeleOpController::Status;
+    return s == T::Done || s == T::NoAnswer || s == T::NoAck ||
+           s == T::Collision || s == T::Aborted || s == T::Expired ||
+           s == T::Denied;
+}
 inline bool op_just_finished(WriteController::Status prev_w, ReadController::Status prev_r,
-                             WriteController::Status cur_w, ReadController::Status cur_r) {
+                              TeleOpController::Status prev_t,
+                              WriteController::Status cur_w, ReadController::Status cur_r,
+                              TeleOpController::Status cur_t) {
     return (write_status_in_flight(prev_w) && write_status_terminal(cur_w)) ||
-           (read_status_in_flight(prev_r) && read_status_terminal(cur_r));
+           (read_status_in_flight(prev_r) && read_status_terminal(cur_r)) ||
+           (teleop_status_in_flight(prev_t) && teleop_status_terminal(cur_t));
 }
 
 inline bool BmsLinkCore::on_read_candidate_(uint32_t t_ms, const std::string& raw, int len) {
@@ -1365,6 +1830,30 @@ inline bool BmsLinkCore::on_read_candidate_(uint32_t t_ms, const std::string& ra
     std::string short_line = read_waiter_->on_block(raw, len);
     push_event(EventKind::BlockForRead, t_ms, read_waiter_->last_pack(), short_line);
     ring_now(t_ms, short_line);  // ring budget truncates the 562-char frame; the verdict stays
+    return true;
+}
+
+inline void BmsLinkCore::on_probe_answer_(uint32_t t_ms, const std::string& info) {
+    last_frame_end_ms_ = frame_end_t_ms_;
+    telecom_waiter_->on_probe_answer(t_ms, info);
+    std::string id = info.size() > 2 ? info.substr(2, 8) : std::string("?");
+    push_event(EventKind::ProbeAnswer, t_ms, telecom_waiter_->last_pack(),
+               "9052 identity answer id " + id);
+    ring_now(t_ms, "9052 id " + id);
+}
+
+inline bool BmsLinkCore::probe_answer_expected_(uint32_t t_ms) {
+    return telecom_waiter_ && telecom_waiter_->probe_window_active(t_ms);
+}
+
+inline void BmsLinkCore::notify_telecom_probe_(uint32_t t_ms) {
+    if (telecom_waiter_) telecom_waiter_->on_foreign_probe(t_ms);
+}
+
+inline bool BmsLinkCore::route_teleop_ack_(uint32_t t_ms) {
+    if (!telecom_waiter_ || !telecom_waiter_->ack_expected(t_ms)) return false;
+    push_event(EventKind::AckForTeleOp, t_ms, 0, "bare ack for teleControl frame");
+    telecom_waiter_->on_ack(t_ms);
     return true;
 }
 
