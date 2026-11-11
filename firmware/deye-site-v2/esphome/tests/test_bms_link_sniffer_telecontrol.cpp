@@ -395,6 +395,8 @@ static void test_wake_pair_end_to_end() {
     // the enable fires on the next window tick
     h.t.tick(disable_tx + 1420);
     check(h.t.status() == TeleOpController::Status::WaitAck, "enable fired");
+    check_line_has(h.t.status_line(), "LMCHG enable sent",
+                   "the sent line names the frame it sent (live 17:29 lesson)");
     check(h.bus.tx_log.size() == 3, "probe + disable + enable out");
     check_str(h.bus.tx_log[2], "~8000D545A006040210FC58\r",
               "LMCHG enable byte-exact");

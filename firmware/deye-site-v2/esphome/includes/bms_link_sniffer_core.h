@@ -1800,8 +1800,13 @@ private:
         if (!common_holds_(t_ms, "before the write")) return;
         uint32_t since = core_.since_last_rx(t_ms);
         if (since < kGapConfirmMs || since > kGapMaxMs) return;
-        fire_frame_(t_ms, op_ == Op::SysOff ? std::string("SYS_OFF write")
-                                            : std::string("LMCHG disable"));
+        // the sent line must name the frame it actually sent: live wake
+        // pair 17:29 labeled the enable "disable sent" while the wire
+        // bytes were the byte-exact enable
+        fire_frame_(t_ms, seq_idx_ == 1 && op_ == Op::WakePair
+                          ? std::string("LMCHG enable")
+                          : (op_ == Op::SysOff ? std::string("SYS_OFF write")
+                                               : std::string("LMCHG disable")));
     }
 
     void tick_wait_ack(uint32_t t_ms) {
