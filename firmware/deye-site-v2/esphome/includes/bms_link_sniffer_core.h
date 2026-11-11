@@ -449,6 +449,30 @@ public:
         return cnt ? (uint32_t)(sum / cnt) : 0;
     }
 
+    std::string gap_report() const {
+        std::string seq;
+        uint64_t sum = 0; uint32_t cnt = 0, mn = 0, mx = 0;
+        // ring order: growth phase is already oldest->newest; once full,
+        // gap_head_ marks the next overwrite slot, i.e. the oldest entry
+        size_t n = gap_ring_.size();
+        for (size_t k = 0; k < n; k++) {
+            const GapSample& s = gap_ring_[(n < 32) ? k : (gap_head_ + k) % 32];
+            sum += s.gap_ms; cnt++;
+            if (mn == 0 || s.gap_ms < mn) mn = s.gap_ms;
+            if (s.gap_ms > mx) mx = s.gap_ms;
+            if (!seq.empty()) seq += ",";
+            seq += std::to_string(s.gap_ms);
+        }
+        std::string out = "n=" + std::to_string(cnt);
+        if (cnt) {
+            out += " min=" + std::to_string(mn)
+                 + " avg=" + std::to_string((uint32_t)(sum / cnt))
+                 + " max=" + std::to_string(mx)
+                 + " gaps=" + seq;
+        }
+        return out;
+    }
+
     // frames/s over the window since the previous call (rate sensor)
     float take_rate_per_s(uint32_t now) {
         if (rate_anchor_ms_ == 0) { rate_anchor_ms_ = now; rate_anchor_total_ = frames_total_; return 0.0f; }

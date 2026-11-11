@@ -604,6 +604,30 @@ static void test_publish_text_is_ascii() {
     check(dump.find("\\x98") != std::string::npos, "noise byte escaped as \\x98");
 }
 
+static void test_gap_report() {
+    BmsLinkCore c;
+    // 4 regular 624 ms slots then one 1000 ms rotation-boundary slot.
+    // Only requests 2..5 record a gap (the first request has no prior
+    // frame end): gaps 609,609,609 (624-15) and 985 (1000-15).
+    uint32_t t = 1000;
+    for (int i = 0; i < 5; i++) {
+        send(c, poll_req(1 + (i % 4), "42"), t);
+        send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
+        t += (i == 3) ? 1000 : 624;
+    }
+    std::string rep = c.gap_report();
+    check(rep.substr(0, 3) == "n=4", "gap report count");
+    check(rep.find("min=609") != std::string::npos, "gap report min");
+    check(rep.find("max=985") != std::string::npos, "gap report max (long boundary)");
+    check(rep.find("avg=703") != std::string::npos, "gap report avg");
+    check(rep.find("gaps=609,609,609,985") != std::string::npos,
+          "gap report sequence oldest->newest");
+    send(c, poll_req(2, "42"), t);
+    send(c, std::string(REAL_42_RESPONSE) + "\r", t + 15);
+    std::string rep6 = c.gap_report();
+    check(rep6.substr(0, 3) == "n=5", "gap report count grows");
+}
+
 int main() {
     test_lenid4();
     test_real_frames_parse_clean();
@@ -626,6 +650,7 @@ int main() {
     test_late_answer_while_watchdog_tripped();
     test_retrip_cancels_release();
     test_publish_text_is_ascii();
+    test_gap_report();
 
     if (failures == 0) {
         printf("test_bms_link_sniffer_core: ALL PASS\n");

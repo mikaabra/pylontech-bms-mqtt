@@ -504,6 +504,18 @@ text_sensor:
     # push-only: the Dump Anomaly Ring button publishes on demand
     update_interval: never
 
+  - platform: template
+    name: "Link Gap Report"
+    id: link_gap_report
+    icon: "mdi:timeline-clock"
+    entity_category: diagnostic
+    # live idle-gap sequence + stats, polled: answers the
+    # longer-gap (rotation-boundary) question from running data
+    update_interval: 60s
+    lambda: |-
+      if (!id(link_sniffer)) return {};
+      return ((BmsLinkSniffer*)id(link_sniffer))->gap_report();
+
   - platform: version
     name: "ESPHome Version"
 
