@@ -127,7 +127,8 @@ static void test_allowlist_gate() {
 static void test_deny_sets_status() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
     check(!w.request(0x00, 0x4C, 3420, 1000), "request with bad pack returns false");
     check(w.status() == WriteController::Status::Denied, "status Denied");
@@ -138,7 +139,8 @@ static void test_deny_sets_status() {
 static void test_fire_window() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
 
     send(c, poll_req(1, "42"), 1000);
@@ -153,7 +155,8 @@ static void test_fire_window() {
 
     BmsLinkCore c2;
     FakeBus bus2;
-    WriteController w2(c2, FakeBus::enable_cb, FakeBus::tx_cb, &bus2);
+    linksniff::SharedTxGate gate_w2;
+    WriteController w2(c2, gate_w2, FakeBus::enable_cb, FakeBus::tx_cb, &bus2);
     c2.set_ack_waiter(&w2);
     uint32_t t = 10000;
     slot(c2, t, 2);
@@ -171,7 +174,8 @@ static void test_fire_window() {
 static void test_verdict_before_next_poll() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
     using S = WriteController::Status;
 
@@ -201,7 +205,8 @@ static void test_verdict_before_next_poll() {
 static void test_outage_expiry() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
 
     uint32_t t = 1000;
@@ -230,7 +235,8 @@ static void test_outage_expiry() {
 static void test_press_in_flight_ignored() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
 
     send(c, poll_req(1, "42"), 1000);
@@ -254,7 +260,8 @@ static void test_press_in_flight_ignored() {
 static void test_burst_storm_single_frame() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
 
     uint32_t t = 1000;
@@ -287,7 +294,8 @@ static void test_burst_storm_single_frame() {
 static void test_late_ack_reported() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
 
     uint32_t t = 1000;
@@ -324,7 +332,8 @@ static void test_late_ack_reported() {
 static void test_explicit_second_press() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
 
     uint32_t t = 1000;
@@ -367,7 +376,8 @@ static void test_explicit_second_press() {
 static void test_cooldown_only_gate() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
 
     uint32_t t = 1000;
@@ -411,7 +421,8 @@ static void test_cooldown_only_gate() {
 static void test_long_uptime_latches() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
     using S = WriteController::Status;
 
@@ -461,7 +472,8 @@ static void test_long_uptime_latches() {
 static void test_clean_pair_only_gate() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
 
     uint32_t t = 1000;
@@ -504,7 +516,8 @@ static void test_clean_pair_only_gate() {
 static void test_collision_detected() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
 
     uint32_t t = 1000;
@@ -536,7 +549,8 @@ static void test_collision_detected() {
 static void test_has_tx_reset_wordings() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
     using S = WriteController::Status;
 
@@ -580,7 +594,8 @@ static void test_has_tx_reset_wordings() {
 static void test_enable_off_aborts() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
     using S = WriteController::Status;
 
@@ -610,7 +625,8 @@ static void test_enable_off_aborts() {
 static void test_uart_fail_aborts() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
 
     uint32_t t = 1000;
@@ -627,7 +643,8 @@ static void test_uart_fail_aborts() {
 static void test_noise_only_no_cadence() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
 
     uint8_t junk[] = {0x33, 0x55};
@@ -647,7 +664,8 @@ static void test_noise_only_no_cadence() {
 static void test_millis_wraparound() {
     BmsLinkCore c;
     FakeBus bus;
-    WriteController w(c, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
+    linksniff::SharedTxGate gate_w;
+    WriteController w(c, gate_w, FakeBus::enable_cb, FakeBus::tx_cb, &bus);
     c.set_ack_waiter(&w);
 
     send(c, poll_req(1, "42"), 0xFFFFFF00u);
