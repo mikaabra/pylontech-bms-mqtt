@@ -412,6 +412,16 @@ sensor:
     update_interval: 60s
     lambda: 'return heap_caps_get_free_size(MALLOC_CAP_INTERNAL);'
 
+  - platform: template
+    name: "Debug Parameter Value"
+    id: link_debug_value
+    entity_category: diagnostic
+    accuracy_decimals: 0
+    # push-only: raw u16 from the last trusted non-balance block read;
+    # name/scale/unit live in the Debug Read Parameter select label
+    update_interval: never
+
+
 binary_sensor:
   - platform: template
     name: "Link Slot Watchdog"
@@ -458,15 +468,6 @@ binary_sensor:
     id: mqtt_connected
     icon: "mdi:cloud-check"
     lambda: 'return id(mqtt_client).is_connected();'
-
-  - platform: template
-    name: "Debug Parameter Value"
-    id: link_debug_value
-    entity_category: diagnostic
-    accuracy_decimals: 0
-    # push-only: raw u16 from the last trusted non-balance block read;
-    # name/scale/unit live in the Debug Read Parameter select label
-    update_interval: never
 
 text_sensor:
   - platform: template
