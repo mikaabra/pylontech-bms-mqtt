@@ -930,7 +930,32 @@ Pre-registration executed as ruled: up to 3 attempts; press only with >=2 consec
 
 
 
-**Session state**: the corridor design is proven on the wire — packs 04 and 02 read clean at both ends with margins inside the derived band, from a design perspective that no longer relies on which signal is stronger. Pack 01 remains unreadable: all three fires landed inside the master's recurring suppression phase (timing coincidence; mechanism not isolated; no pack-specific effect demonstrated) — retries stay held pending the reviewer's ruling, with a clean-phase retry and the 014C isolation experiment as the queued candidates. The CID2-47 short-read probe remains queued behind it (and requires its own micro-PR: no custom-INFO 47 transmit path exists in the deployed firmware — the probe plan assumed one).
+## 2026-11-12 20:04-20:44 — #107 merged + flashed (with incident); first live CID2-47 variant probe: 8/8 total silence
+
+**#107 accepted at d79e489 → merged squash e6575c6** (Variant Probe Shape select + Fire Variant Probe button, MQTT-stripped; review-required change applied: the third copy of the read-gate refusal block folded into `read_gates_ok_(pack)` — textually proven, each shared refusal string 3-removed/1-added; both placement corners disclosed and accepted: shape/param refusals moved after the shared gates, unreachable on the wired device). Build from merged main: **config hash changed to 0xf08c2344** (the YAML changed main.cpp) so **the device's `compilation_time` is a real discriminator this time: 2026-11-12 20:29:20 +0100**, confirmed on-device via native API `device_info`.
+
+**Flash incident (honest record, fully recovered):** the v3 staging tar put `bootloader.bin` at the archive root while the write command referenced the v2 layout (`bootloader/bootloader.bin`); esptool refused with No-such-file **after** a successful erase → the chip error-looped `invalid header: 0xffffffff` on empty flash (MQTT stale/offline, 1,082 loops counted in the console log). Second quirk recorded: **pyserial 3.5 does not accept `dtr=`/`rts=` constructor kwargs** — the non-resetting console reader must set `s.dtr`/`s.rts` attributes **before** `s.open()`. Recovery: correct paths → write 100% + "Hash of data verified" + `verify-flash` digest match for bootloader AND app. Boot CLEAN: no invalid headers, MQTT online in seconds, uptime reset, watchdog OFF, 4/4 packs answering. The non-resetting reader (dtr/rts held off, per the #106 ruling) captured the boot and self-terminated — flash-only attach held. Housekeeping: Pi `/tmp` tmpfs hit 100% (3.9G, mid-round) — the capture lives on `/` (11% used, safe); `/tmp` cleanup pending on the Pi.
+
+**First live CID2-47 variant probe (the merges' purpose):** native API, one press per invocation, auto-repress ONLY on "no safe window" (the recorded reading rule). Matrix = four shapes × packs 03/04 = 8 presses, 19:35:37–19:39:24 UTC. Wire-verified requests, all well-formed and checksummed:
+
+```
+19:35:39.703  ~8000D547C004034CFCA3   03 / 034C (len-4, LENID C004)   press→TX ~2.2 s
+19:35:49.735  ~8000D547A00603004CFC43  03 / 004C (len-6, LENID A006)   ~2.3 s
+19:36:19.265  ~8000D547A006034C01FC42  03 / 4C01                      ~2.0 s
+19:37:08.859  ~8000D547A006034C4CFC2C  03 / 4C4C                      re-press (press 1 held)
+19:37:50.948  ~8000D547C004044CFCA2    04 / 034C                      ~5.9 s (longest safe-window wait)
+19:38:18.560  ~8000D547A00604004CFC42  04 / 004C                      ~1.6 s
+19:38:58.122  ~8000D547A006044C01FC41  04 / 4C01                      ~1.1 s
+19:39:25.124  ~8000D547A006044C4CFC2B  04 / 4C4C                      ~1.1 s
+```
+
+One hold: 03/4C4C press 1 (19:36:54 UTC) returned "no safe window within 6 s" = no frame sent → re-pressed per the rule → frame + evidence. Device verdicts **8/8: "no answer in the 1.5 s window (variant probe)"**.
+
+**Wire cross-check (frame reassembled over the whole probe period):** every 1.5-s answer window contains ONLY the ambient rotation — the master's D500 polls (`~8000D500B07E000X…` telemetry, `~8000D500905200…` state) with their recurring answers (`~8050D542E0020X…` / `~8050D544E0020X…` at ~240–260 ms turnaround), which appear equally in probe-free stretches BEFORE any request. **ZERO D547-class answers, ZERO malformed frames, ZERO bytes attributable to our requests.** The packs answer the master's D500 polls constantly (4/4 responding throughout) — bus and capture healthy; per the reviewer's malformed-frame rule this is TRUE SILENCE, not "something answered".
+
+**Reading:** all four custom short-read D547 shapes to both packs → nothing answers, and notably **no error-04/06 refusal frames either** — packs 03/04 do not respond to these probes AT ALL (no ack, no error, no short answer). The same packs DO answer the block-read client's real LENID-class D547 requests and every D500 poll, so the mute is shape-specific to the custom short-INFO probes. Next-family decision (different CMD/VER, different LENID framing, closer-to-master request forms) goes to the reviewer.
+
+**Session state (2026-11-12 ~20:45):** all four packs read-verified at target through the corridor (01/02 = 3420, 03/04 = 3430; pack 01's three earlier failures were phase coincidence, no pack-specific effect — resolved by the clean-phase retry). The predictor unlock/re-lock (#104), the four variant probe shapes (#102), and their YAML wiring (#107) are merged, flashed, and live-verified. The CID2-47 custom short-read probe question is ANSWERED for the tested family: total silence to all four shapes on both answering packs, no error frames, no malformed frames — the next probe-family decision (different CMD/VER or LENID framing, or requests closer to the master's own answered forms) belongs to the reviewer. Open items: dongle termination-jumper verification at the rack (NC-believed, unverified); Pi `/tmp` cleanup; the 48-s suppression phase's mechanism stays un-isolated (recorded in #101).
 
 ### Online Resources
 - [Pylontech CAN V1.2 vs V1.3](https://www.setfirelabs.com/energy-monitoring/pylontech-battery-can-comms-v1-2-vs-v1-3)
