@@ -150,26 +150,7 @@ public:
     // same press is a baseline read of the stored 0x4C.
     void arm_read(uint8_t pack) {
         if (!read_status_) return;
-        if (!write_enable_ || !write_enable_->state) {
-            read_status_->publish_state(
-                "refused: Link Operate Enable is off (turn it on deliberately)");
-            return;
-        }
-        if (pack == 0) {
-            read_status_->publish_state("refused: select a target pack first");
-            return;
-        }
-        auto ws = write_.status();
-        if (ws == linksniff::WriteController::Status::Armed ||
-            ws == linksniff::WriteController::Status::WaitAck) {
-            read_status_->publish_state("refused: a write is in flight - wait for its verdict");
-            return;
-        }
-        if (teleop_in_flight_()) {
-            read_status_->publish_state(
-                "refused: a teleControl sequence is in flight - wait for its verdict");
-            return;
-        }
+        if (!read_gates_ok_(pack)) return;
         // the balance read only claims write-verify when the last accepted
         // write to this pack was the balance param itself
         bool expect_valid =
@@ -185,28 +166,9 @@ public:
     // XML via gen_param_menus.py)
     void arm_debug_read(uint8_t pack, uint8_t param) {
         if (!read_status_) return;
-        if (!write_enable_ || !write_enable_->state) {
-            read_status_->publish_state(
-                "refused: Link Operate Enable is off (turn it on deliberately)");
-            return;
-        }
-        if (pack == 0) {
-            read_status_->publish_state("refused: select a target pack first");
-            return;
-        }
+        if (!read_gates_ok_(pack)) return;
         if (param == 0) {
             read_status_->publish_state("refused: select a read parameter first");
-            return;
-        }
-        auto ws = write_.status();
-        if (ws == linksniff::WriteController::Status::Armed ||
-            ws == linksniff::WriteController::Status::WaitAck) {
-            read_status_->publish_state("refused: a write is in flight - wait for its verdict");
-            return;
-        }
-        if (teleop_in_flight_()) {
-            read_status_->publish_state(
-                "refused: a teleControl sequence is in flight - wait for its verdict");
             return;
         }
         bool expect_valid =
@@ -229,28 +191,9 @@ public:
     // names the shape+pack; the verdict lands on Link Read Status.
     void arm_variant_probe(uint8_t pack, uint8_t shape) {
         if (!read_status_) return;
-        if (!write_enable_ || !write_enable_->state) {
-            read_status_->publish_state(
-                "refused: Link Operate Enable is off (turn it on deliberately)");
-            return;
-        }
-        if (pack == 0) {
-            read_status_->publish_state("refused: select a target pack first");
-            return;
-        }
+        if (!read_gates_ok_(pack)) return;
         if (shape > 3) {
             read_status_->publish_state("refused: select a probe shape first");
-            return;
-        }
-        auto ws = write_.status();
-        if (ws == linksniff::WriteController::Status::Armed ||
-            ws == linksniff::WriteController::Status::WaitAck) {
-            read_status_->publish_state("refused: a write is in flight - wait for its verdict");
-            return;
-        }
-        if (teleop_in_flight_()) {
-            read_status_->publish_state(
-                "refused: a teleControl sequence is in flight - wait for its verdict");
             return;
         }
         linksniff::ReadVariant variant;
@@ -558,6 +501,37 @@ private:
     }
     bool teleop_in_flight_() const {
         return linksniff::teleop_status_in_flight(teleop_.status());
+    }
+
+    // shared refusal gates for the three read-side arms (arm_read,
+    // arm_debug_read, arm_variant_probe) - the same four checks were
+    // copied between them, folded here per CLAUDE.md's third-copy rule
+    // and the #107 review verdict. Each refusal publishes its
+    // byte-identical line to Link Read Status and the arm returns;
+    // true = every gate passed. Check order preserved from the folded
+    // blocks; arm-local refusals (param/shape) sit after these gates.
+    bool read_gates_ok_(uint8_t pack) {
+        if (!write_enable_ || !write_enable_->state) {
+            read_status_->publish_state(
+                "refused: Link Operate Enable is off (turn it on deliberately)");
+            return false;
+        }
+        if (pack == 0) {
+            read_status_->publish_state("refused: select a target pack first");
+            return false;
+        }
+        auto ws = write_.status();
+        if (ws == linksniff::WriteController::Status::Armed ||
+            ws == linksniff::WriteController::Status::WaitAck) {
+            read_status_->publish_state("refused: a write is in flight - wait for its verdict");
+            return false;
+        }
+        if (teleop_in_flight_()) {
+            read_status_->publish_state(
+                "refused: a teleControl sequence is in flight - wait for its verdict");
+            return false;
+        }
+        return true;
     }
 
     static bool enable_cb_(void* ctx) {
