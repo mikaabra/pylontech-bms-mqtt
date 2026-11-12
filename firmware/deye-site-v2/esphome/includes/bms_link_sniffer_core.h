@@ -312,13 +312,6 @@ static const char kRawBareAck[] = "8000D5000000FD9F";
 // Byte-exact against bms073.build(cid2=0x47, info=f"{pack:02X}") — the
 // captured request for pack 01 is ~8000D547E00201FD1C (pinned in the
 // read oracle against the Python builder's output).
-// The read-shape selector's sole surviving shape: the block read. The
-// four short-read probe shapes (kShort4C/kShort004C/kShort4C01/
-// kShort4C4C, PR #102) drew total live silence on packs 03/04 and were
-// retired per the #108 verdict; extending this enum is its own reviewed
-// change.
-enum class ReadVariant { kBlock };
-
 inline std::string build_read_frame(uint8_t pack) {
     int len = 2;  // INFO = the pack address, 2 ASCII-hex chars
     int digit_sum = (len / 256) + ((len / 16) % 16) + (len % 16);
