@@ -742,41 +742,6 @@ select:
     state_topic: null
     command_topic: null
 
-  # CID2-47 variant probe shape (review-gated wiring; the variant path
-  # itself is already merged in the core, PR #102) - the operator surface
-  # for the short-read evidence probes, a sibling of the read client: it
-  # shares the Target Pack select above (NO parallel pack selector; the
-  # CORE allowlist is the enforcement - packs 01/02 deny fail-closed at
-  # request time) and the Link Operate Enable switch. Reviewer
-  # expectations for when the probe first runs: packs 03/04 only; the
-  # expected outcomes are an error code 04 or 06, silence, or the jackpot
-  # a short answer - ALL THREE ARE EVIDENCE. Malformed-frame reading
-  # rule from the #102 verdict: a garbled answer with an unparseable
-  # LENID is rejected as malformed before the variant hook - treat 'no
-  # answer' plus a malformed frame in the same window as SOMETHING
-  # ANSWERED, not silence.
-  # Nothing arms at boot: restore off, and the initial option is
-  # display-only - a selection never transmits; only a deliberate Fire
-  # Variant Probe press does (one press = one frame).
-  - platform: template
-    name: "Variant Probe Shape"
-    id: link_variant_shape
-    icon: "mdi:flask-outline"
-    entity_category: config
-    options:
-      - "Short 034C (len-4)"
-      - "Short 004C (len-6)"
-      - "Short 4C01 (len-6)"
-      - "Short 4C4C (len-6)"
-    optimistic: true
-    initial_option: "Short 034C (len-4)"
-    # option order mirrors the core ReadVariant enum (kShort4C,
-    # kShort004C, kShort4C01, kShort4C4C) - the Fire Variant Probe
-    # button maps active_index -> shape 0-3
-    restore_value: false
-    state_topic: null
-    command_topic: null
-
 button:
   # review round 3: restart and dump keep their MQTT command topics by
   # default - a retained PRESS would reboot the device on every broker
@@ -846,32 +811,6 @@ button:
           if (!ai.has_value()) return;
           uint8_t param = (uint8_t)(0x07 + (int)*ai);
           ((BmsLinkSniffer*)id(link_sniffer))->arm_debug_read((uint8_t)pack, param);
-
-  # CID2-47 variant probe, one frame per press (see the Variant Probe
-  # Shape select above for the reviewer expectations): pack comes from
-  # the SAME Target Pack select (the core allowlist is the only pack
-  # enforcement, 01/02 deny fail-closed), Link Operate Enable is
-  # honored exactly like the block read, expectations are forced off -
-  # an answer is recorded as EVIDENCE ONLY and never becomes a value.
-  # The press is logged naming shape+pack via the armed line on Link
-  # Read Status ("armed: variant probe pack NN INFO 034C ..."), and the
-  # verdict (VariantEvidence / NoAnswerMasterPoll) surfaces there too.
-  - platform: template
-    name: "Fire Variant Probe"
-    icon: "mdi:flask"
-    entity_category: diagnostic
-    state_topic: null
-    command_topic: null
-    on_press:
-      - lambda: |-
-          if (!id(link_sniffer)) return;
-          int pack = 0;
-          if (id(link_target_pack).active_index().has_value())
-            pack = (int)*id(link_target_pack).active_index();
-          int shape = 0xFF;
-          if (id(link_variant_shape).active_index().has_value())
-            shape = (int)*id(link_variant_shape).active_index();
-          ((BmsLinkSniffer*)id(link_sniffer))->arm_variant_probe((uint8_t)pack, (uint8_t)shape);
 
   - platform: template
     name: "Send Debug Parameter Write"
