@@ -881,6 +881,22 @@ while True:
 
 **Standing state at PR creation.** The sniffer remains dark pending a long-enough window (or operator hands — power-cycle may yield one; the S3 USB-JTAG console is the rack-side forensic path). The reads sent during the incident: ZERO armed (the standing no-pack-01-reads rule was never in play). The corridor design stands ready for the reviewer's design review as the ONLY geometry the wire admits; whether it re-flashes at all is the reviewer's and user's call after the crash cause is known.
 
+## 2026-11-12 19:12-19:18 — The corridor session (v2 flashed, executed per the reviewer's ruling)
+
+**Firmware**: the accepted #99 (with the verdict's three corrections: the reviewer-checked margin table in the comment block, request clearance >=134 ms on the 455-kind quiet, lead window widened to 700 catching the ~696 worst case; oracle 696-fires/710-holds added; 9/9 suites green) built in the worktree and flashed over USB (factory image at 0x0, hash-verified, console attached, boot banner only). ELF check: `pre-long` present, `predicted-long` absent.
+
+**Termination states recorded with the capture** (per the ruling): sniffer end 120R, operator-verified continuous since ~21:45 Nov 11; dongle end **NC-believed, physically UNVERIFIED** — the standing first rack item.
+
+**Pack 04 (19:14:39)** — the first deliberate collision-free corridor read, CLEAN AT BOTH ENDS: fired 250 ms into a pre-long quiet (fire line `pre-long`, since in [250,300]); the sniffer graded `read ok: 0x4C = 3430 mV`; the master end received **562/562 whole** — closing poll +251.8 ms, closing answer +277..~426, block head +510.9 (**head clearance +85 ms**), block end +1096.3, and the long gap's closing poll at +1507.1 (**tail air +411 ms**). Both reviewer validators satisfied.
+
+**Pack 02 (19:15:38)** — CLEAN AT BOTH ENDS: fired 250 ms pre-long; `read ok: 0x4C = 3420 mV` (at target) at the sniffer; 562/562 at the master end (closing poll +243.6, block head +515.5 = **+95 ms clearance**, next poll +1499.9 = **tail air +397 ms**). Worth the record: 02 was the flip-flopping unreliable reader at the old aim.
+
+**Pack 01 × 3 (19:15:56, 19:16:41, 19:17:28)** — three in-band corridor fires (all `pre-long`, since 250), IDENTICAL geometry each time: closing exchange transits clean (+239/+263; head clearance ~+100 measured while the block ran), block head +509-515, then **cut by the next ordinary slot's poll at +866-867** (master-end prefix 337-342/562), and the rotation then continues **without its long gaps for seconds**. Sniffer grades: no-block, no-block, 559/562-damaged. Class (c) × 3 — recorded with fire lines, not counted as corridor results.
+
+**The new, unpre-registered observation (measured on all three 01 fires):** correlating every fire against the full long-gap timeline (662 long gaps of ~1230 ms, one per ~2511 ms, across the session window): the 02 fire's next long arrived ON TIME; the 04 fire's arrived +1 slot late; **every pack-01 fire coincided with 2-5 consecutive long-gap SKIPS starting exactly at our request.** A D547 request addressed to pack 01 — the chain head, adjacent to the master — suppresses the master's long-gap schedule; the same request to 02/04 does not materially. The class-(c) mispredictions were not random insert noise: **the request itself removes the long gap the block needs to ride.** Under this design, pack-01 corridor retries cannot succeed (each costs one disturbed master slot). No further 01 attempts were made after the third concurrence.
+
+**Session state**: the corridor design is proven on the wire — packs 04 and 02 read clean at both ends with margins inside the derived band, from a design perspective that no longer relies on which signal is stronger. Pack 01 remains unreadable, now for a measured mechanical reason awaiting the reviewer's ruling. The CID2-47 short-read probe remains queued behind it (and requires its own micro-PR: no custom-INFO 47 transmit path exists in the deployed firmware — the probe plan assumed one).
+
 ### Online Resources
 - [Pylontech CAN V1.2 vs V1.3](https://www.setfirelabs.com/energy-monitoring/pylontech-battery-can-comms-v1-2-vs-v1-3)
 - [EPever B-Series Modbus Specification](https://www.developpez.net/forums/attachments/p196506d1451307310/systemes/autres-systemes/automation/probleme-com-modbus-pl7-pro/controllerprotocolv2.3.pdf/)
