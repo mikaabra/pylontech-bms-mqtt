@@ -215,24 +215,32 @@ static constexpr uint32_t kAimLatestFireMs   = 180;  // reviewer runway cap: fir
 // from our block head. HEAD MARGIN is the deciding variable: each extra
 // ms of fire offset buys a ms of clearance. Band re-derived against the
 // wire-measured worst cases (closing answers 117 B/~122 ms and 144
-// B/~150 ms, 10-25 ms answer-start delay, block turnaround 506-532 ms):
-//   fire 250-300 -> head margin +60..+179 across all variant
-//   combinations; our ~21 ms request clears the closing poll (at
-//   quiet+~500) by >=154 ms; block end (fire+1091..1117) leaves >=320 ms
-//   inside the silence. Deliberately NOT capped by kAimLatestFireMs -
-// that constant is the runway cap for firing INSIDE a long gap and has
-// no meaning here. Band width 50 ms = 5+ feed ticks: real ticks at odd
-// phases (e.g. since=257) always land inside (v1's 175-180 band could
-// be straddled by 10 ms ticks at 171/181 and never fire - oracle case
-// pins the jittered landing).
+// B/~150 ms, 10-25 ms answer-start delay, block turnaround 506-532 ms),
+// the reviewer-checked arithmetic:
+//   block start .............. quiet-open + 756-832 ms
+//   closing answer ends ..... quiet-open + 653-696 ms
+//   head margin ............. +60 to +179 ms across all variants
+//   block end ............... quiet-open + 1341-1417 ms
+//   tail margin to silence .. >= 316 ms
+//   our ~21 ms request clears the closing poll by >=134 ms (the 455-kind
+//   quiet; 154 ms on the 500-kind)
+// Deliberately NOT capped by kAimLatestFireMs - that constant is the
+// runway cap for firing INSIDE a long gap and has no meaning here.
+// Band width 50 ms = 5+ feed ticks: real ticks at odd phases (e.g.
+// since=257) always land inside (v1's 175-180 band could be straddled
+// by 10 ms ticks at 171/181 and never fire - oracle case pins the
+// jittered landing).
 // The predictor: every observed >=kLongGapMs quiet resyncs the phase;
 // stale predictions slide forward one period at a time, and a
 // prediction older than kPreLongStaleMs unlocks the aim entirely - the
 // rotation may have changed shape, and bounded slides keep the loop
-// trivial (<=4 iterations at the stale bound).
+// trivial (<=4 iterations at the stale bound). The lead window's upper
+// bound is 700: the worst-case corridor lead is ~696 ms (144 B closing
+// answer + 25 ms start delay) - those corridors are inside the window;
+// a wider lead is not a corridor and costs latency, not safety.
 static constexpr uint32_t kLongGapPeriodMs    = 2511;   // long-to-long quiet-open period (wire)
 static constexpr uint32_t kPreLongLeadMinMs   = 630;     // corridor lead lower bound (long-open - quiet-open)
-static constexpr uint32_t kPreLongLeadMaxMs   = 690;     // corridor lead upper bound
+static constexpr uint32_t kPreLongLeadMaxMs   = 700;     // corridor lead upper bound (worst-case lead ~696)
 static constexpr uint32_t kPreLongStaleMs     = 10000;   // unlock after this long without an observed long
 static constexpr uint32_t kPreLongFireFromMs  = 250;     // re-derived fire band, lower bound
 static constexpr uint32_t kPreLongFireToMs    = 300;     // re-derived fire band, upper bound

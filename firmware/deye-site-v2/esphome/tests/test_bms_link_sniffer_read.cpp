@@ -599,6 +599,45 @@ static void test_aim_stale_prediction_unlocks_until_relock() {
     check(h.bus.tx_log.size() == 1, "exactly one frame fired, and only after the re-lock");
 }
 
+static void test_aim_upper_leads_696_fires_710_holds() {
+    Harness h;
+    // the widened lead bound (verdict correction 3): the worst-case
+    // corridor lead is ~696 ms (144 B closing answer + 25 ms start
+    // delay) - below the old 690 cap, inside the new 700. A 710 lead is
+    // not a corridor: misses cost latency, not safety.
+    pair_at(h, 1, 1000);          // ends 1015
+    pair_at(h, 2, 3080);          // gap 2065 -> LOCK, long open 1015; ends 3095
+    pair_at(h, 3, 3564);          // gap 469, ends 3579
+    pair_at(h, 4, 4048);          // gap 469, ends 4063
+    pair_at(h, 5, 4532);          // gap 469, ends 4547
+    pair_at(h, 6, 5016);          // gap 469, ends 5031
+    pair_at(h, 7, 5326);          // gap 295, ends 5341: quiet opens 5341;
+                                  // P slides to 6037 -> lead 6037-5341 = 696
+    check(h.r.request(0x01, 0x4C, false, 0, 5400, true), "aimed read armed (696-lead case)");
+    h.r.tick(5591);               // since 250: in band, lead 696 - the verdict's worst case
+    check(h.r.status() == ReadController::Status::WaitBlock,
+          "the 696 ms worst-case lead corridor fires under the widened bound");
+    check_line_has(h.r.status_line(), "pre-long", "fire line names the window class");
+    check(h.bus.tx_log.size() == 1, "exactly one frame fired");
+
+    // The 710 ms lead is outside: the same lock (long open 1015) with P
+    // slid to 6037 predicts the long at 6037, so a quiet opening at
+    // 6037 - 710 = 5327 carries a 710 lead - an in-band tick must hold.
+    Harness h2;
+    pair_at(h2, 1, 1000);         // ends 1015
+    pair_at(h2, 2, 3080);         // LOCK, ends 3095
+    pair_at(h2, 3, 3564);
+    pair_at(h2, 4, 4048);
+    pair_at(h2, 5, 4532);         // ends 4547
+    pair_at(h2, 6, 5016);         // gap 469, ends 5031
+    pair_at(h2, 7, 5312);         // gap 281, ends 5327: quiet opens 5327, lead 710
+    check(h2.r.request(0x01, 0x4C, false, 0, 5400, true), "aimed read armed (710-lead case)");
+    h2.r.tick(5577);              // since 250: in band, lead 710: OUTSIDE the window
+    check(h2.r.status() == ReadController::Status::Armed,
+          "a 710 ms lead is not a corridor - in-band tick holds");
+    check(h2.bus.tx_log.empty(), "nothing fired outside the lead window");
+}
+
 static void test_aim_expires_without_long_observed() {
     Harness h;
     // all-regular cadence (no gap ever reaches 700): the predictor never
@@ -671,6 +710,7 @@ int main() {
     test_cooldown_bidirectional();
     test_enable_gates();
     test_aim_fires_in_pre_long_quiet();
+    test_aim_upper_leads_696_fires_710_holds();
     test_aim_jittered_ticks_find_the_band();
     test_aim_stale_prediction_unlocks_until_relock();
     test_aim_expires_without_long_observed();
