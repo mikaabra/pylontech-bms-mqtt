@@ -314,29 +314,35 @@ static const char kRawBareAck[] = "8000D5000000FD9F";
 // captured request for pack 01 is ~8000D547E00201FD1C (pinned in the
 // read oracle against the Python builder's output).
 //
-// Read variants (reviewer ruling, PR read-variant-micro): the 562-char
-// block is ~1094 ms head-to-tail and only the corridor quiet before the
-// ~2511.4±2 ms rotation's long gap can carry it (wire-measured, #99);
-// the CID2-47 probe still queued needs a different question — does a
+// Read variants (reviewer ruling rounds 1-2, PR read-variant-micro): the
+// 562-char block is ~1094 ms head-to-tail and only the corridor quiet
+// before the ~2511.4±2 ms rotation's long gap can carry it (wire-measured,
+// #99); the CID2-47 probe still queued needs a different question — does a
 // SHORT INFO draw a SHORT answer at all? INFO comes only from the
-// reviewed allowlist of exact variants below, nothing free-form: the
-// isolation INFO "<pack>4C" (pack 01 => "014C") and the three
-// short-read candidate tails "<pack>004C"/"<pack>4C01"/"<pack>4C4C".
-// A variant answer is EVIDENCE ONLY — whether there was an answer at
-// all, its LENID and how long it took to arrive — never something the
+// reviewed allowlist of exact variants below, nothing free-form: FOUR
+// short-read candidate shapes, "<pack>4C"/"<pack>004C"/"<pack>4C01"/
+// "<pack>4C4C", packs 03/04 ONLY. Round 2 retired the v1 pack-01
+// isolation INFO 014C: the clean-phase retry read pack 01 clean through
+// the corridor and settled request-vs-answer (records #103, merged), so
+// a pack-01 variant frame has no purpose left; the len-4 shape is
+// retargeted to packs 03/04 as the fourth short-read candidate
+// (034C/044C) — the only time it was ever tried was on old-gen pack 01,
+// and the new-gen packs might parse it differently. A variant answer is
+// EVIDENCE ONLY — whether there was an answer at all, its return code
+// (RTN), its LENID and how long it took to arrive — never something the
 // device accepts as a value. This extends ReadController's existing
 // request path (same fire gates, same TX client); there is deliberately
 // no parallel transmit path. LENID lengths stay in the captured family:
 // 2->E002 (block, byte-exact regression), 4->C004, 6->A006 (the
 // teleControl captures' 6-char-INFO LENID) — same digit-sum formula.
-enum class ReadVariant { kBlock, kIso4C, kShort004C, kShort4C01, kShort4C4C };
+enum class ReadVariant { kBlock, kShort4C, kShort004C, kShort4C01, kShort4C4C };
 
 // The exact allowlisted INFO chars per variant (never free-form).
 inline std::string read_variant_info(uint8_t pack, ReadVariant variant) {
     char info[7];
     switch (variant) {
         case ReadVariant::kBlock:     snprintf(info, sizeof info, "%02X", (unsigned)pack); break;
-        case ReadVariant::kIso4C:     snprintf(info, sizeof info, "%02X4C", (unsigned)pack); break;
+        case ReadVariant::kShort4C:   snprintf(info, sizeof info, "%02X4C", (unsigned)pack); break;
         case ReadVariant::kShort004C: snprintf(info, sizeof info, "%02X004C", (unsigned)pack); break;
         case ReadVariant::kShort4C01: snprintf(info, sizeof info, "%02X4C01", (unsigned)pack); break;
         case ReadVariant::kShort4C4C: snprintf(info, sizeof info, "%02X4C4C", (unsigned)pack); break;
@@ -344,15 +350,18 @@ inline std::string read_variant_info(uint8_t pack, ReadVariant variant) {
     return info;
 }
 
-// Variant allowlist (reviewer ruling, PR read-variant-micro): kBlock is
-// the existing block read (any observed Link address); kIso4C carries
-// the 014C isolation experiment and is pack 01 ONLY; the short-read
-// candidates probe packs 03/04 ONLY. Extending either is its own
-// reviewed change — every other combination denies fail-closed.
+// Variant allowlist (reviewer ruling round 2, PR read-variant-micro):
+// kBlock is the existing block read (any observed Link address); every
+// kShort* is packs 03/04 ONLY — the four short-read candidates probe the
+// two new-gen near packs, and NOTHING but kBlock is ever allowed for
+// packs 01/02 (the pack-01 isolation variant was retired when the
+// clean-phase retry settled request-vs-answer, records #103). Extending
+// either is its own reviewed change — every other combination denies
+// fail-closed.
 inline bool read_variant_allowed(ReadVariant v, uint8_t pack) {
     switch (v) {
         case ReadVariant::kBlock: return true;
-        case ReadVariant::kIso4C: return pack == 0x01;
+        case ReadVariant::kShort4C:
         case ReadVariant::kShort004C:
         case ReadVariant::kShort4C01:
         case ReadVariant::kShort4C4C: return pack == 0x03 || pack == 0x04;
@@ -515,7 +524,7 @@ enum class EventKind {
     BlockForRead,     // D547 block (or its damaged remnant) consumed by a pending read (not an anomaly)
     AckForTeleOp,     // bare ack consumed by a pending teleControl frame (not an anomaly)
     ProbeAnswer,      // 9052 identity block routed to a pending teleControl probe (not an anomaly)
-    VariantAnswer,    // CID2-47 variant probe's answer consumed as evidence (not an anomaly)
+    VariantAnswer,    // CID2-47 variant probe graded: answer consumed as evidence, or no-answer-before-master-poll (not an anomaly)
 };
 
 struct LinkEvent {
@@ -794,11 +803,14 @@ private:
         if (len < 0) return malformed(t_ms, raw, "lenid hex");
         // A pending CID2-47 VARIANT probe consumes its answer here, before
         // the block-candidate branch and every later verdict (reviewer
-        // ruling, PR read-variant-micro): the variant grader is
-        // deliberately lenient — any CID/LENID counts and checksum
-        // validity is NOT required, a collision remnant is still an
-        // answer — and it never touches values: a new answer shape is
-        // evidence, never something the device accepts as a value.
+        // ruling round 2, PR read-variant-micro): acceptance is #87-style
+        // STRUCTURAL — the first response-shaped frame (80 00 D5, any RTN)
+        // after our TX is the answer (see on_variant_answer_), a master
+        // poll arriving first grades the probe terminal, and content is
+        // never matched to claim ownership (checksum validity is NOT
+        // required, a collision remnant is still an answer) — and it never
+        // touches values: a new answer shape is evidence, never something
+        // the device accepts as a value.
         if (variant_waiter_ && on_variant_answer_(t_ms, frame_start_t_ms_, raw, len))
             return;
         // Our own D547 block read's answer (or its collision-damaged
@@ -1367,24 +1379,28 @@ inline void BmsLinkCore::on_bare_ack(uint32_t t_ms) {
 //               trustworthy regardless of what survived; press again
 //   NoBlock     window closed with no block-sized answer
 //
-// Read VARIANTS (reviewer ruling, PR read-variant-micro) ride the same
-// request path - one selector, no parallel TX client: CID2 stays fixed
-// at 0x47, INFO comes only from the reviewed allowlist
-// (read_variant_allowed: 014C -> pack 01, the isolation experiment; the
-// short-read tails -> packs 03/04), the param band is skipped (INFO is
-// fixed by the allowlist), expectations are forced off, and every
-// existing fire gate applies unchanged. A fired variant waits in
-// WaitVariant and grades EVIDENCE-ONLY (VariantEvidence): whether there
-// was an answer at all, its LENID and how long it took to arrive. A new
-// answer shape is never a value - value_raw_ stays untouched and
-// nothing publishes.
+// Read VARIANTS (reviewer ruling rounds 1-2, PR read-variant-micro) ride
+// the same request path - one selector, no parallel TX client: CID2 stays
+// fixed at 0x47, INFO comes only from the reviewed allowlist
+// (read_variant_allowed: the four short-read shapes -> packs 03/04
+// only), the param band is skipped (INFO is fixed by the allowlist),
+// expectations are forced off, and every existing fire gate applies
+// unchanged. A fired variant waits in WaitVariant and grades
+// EVIDENCE-ONLY (VariantEvidence): whether there was an answer at all,
+// its return code (RTN), its LENID and how long it took to arrive - or
+// NoAnswerMasterPoll when the master's next poll (CID2 42/44) arrives
+// before any answer. Acceptance is #87-style structural, never
+// content-matched: on this bus every pack answers with ADR 00
+// (PROTOCOL_REFERENCE.md:409), so v1's ADR-vs-pack matcher could never
+// match a real answer. A new answer shape is never a value - value_raw_
+// stays untouched and nothing publishes.
 // ---------------------------------------------------------------------------
 class ReadController {
 public:
     enum class Status {
         Idle, Denied, Armed, WaitBlock,
         ReadOk, Mismatch, WrongPack, Damaged, NoBlock, Aborted, Expired,
-        WaitVariant, VariantEvidence
+        WaitVariant, VariantEvidence, NoAnswerMasterPoll
     };
 
     using EnableFn = bool (*)(void*);
@@ -1411,15 +1427,16 @@ public:
                 return false;
             }
         } else {
-            // reviewer ruling, PR read-variant-micro: param is meaningless
-            // for a variant (INFO is fixed by the allowlist, so the band
-            // check is skipped), expectations are forced off (evidence is
-            // never graded against a value), and the pack must be on the
-            // variant allowlist - deny fail-closed otherwise.
+            // reviewer ruling rounds 1-2, PR read-variant-micro: param is
+            // meaningless for a variant (INFO is fixed by the allowlist,
+            // so the band check is skipped), expectations are forced off
+            // (evidence is never graded against a value), and the pack
+            // must be on the variant allowlist - deny fail-closed
+            // otherwise (four short-read shapes, packs 03/04 only).
             if (!read_variant_allowed(variant, pack)) {
                 deny("variant probe INFO " + read_variant_info(pack, variant) +
-                     " not on the reviewed allowlist (014C is pack 01 only;"
-                     " short-read tails are packs 03/04 only)");
+                     " not on the reviewed allowlist (the four short-read shapes are"
+                     " packs 03/04 only; nothing but the block read goes to packs 01/02)");
                 return false;
             }
         }
@@ -1468,39 +1485,67 @@ public:
     }
 
     // core consults this for every frame while a variant probe is in
-    // flight: same collect-window length as the block read
+    // flight: same collect-window length as the block read. The window's
+    // grade closes on the FIRST response-shaped frame (consumed as
+    // evidence) or the first master poll (NoAnswerMasterPoll) - whichever
+    // arrives first - or by expiry.
     bool variant_window_active(uint32_t now) const {
         return status_ == Status::WaitVariant &&
                (int32_t)(now - tx_started_ms_) <= (int32_t)kBlockWindowMs;
     }
 
     // Evidence-only grading for the CID2-47 read variants (reviewer
-    // ruling, PR read-variant-micro): the frame counts as our probe's
-    // answer when its ADR field names the pack we asked - any CID/LENID
-    // counts, checksum validity is NOT required (a collision remnant is
-    // still an answer). The verdict records answer-present, the frame's
-    // LENID and the fire->answer-start delay, and never touches
-    // value_raw_ or publishes anything: a new answer shape is evidence,
-    // never something the device accepts as a value. A wrong-pack frame
-    // (ADR mismatch) is NOT consumed - normal processing keeps it and
-    // the controller keeps waiting. Returns false for exactly that case.
+    // ruling round 2, PR read-variant-micro): #87-style STRUCTURAL
+    // acceptance replaces v1's ADR matcher, which could never match a
+    // real answer - on this bus every pack answers with ADR 00
+    // (PROTOCOL_REFERENCE.md:409), so an address-vs-pack compare sees an
+    // address that never occurs (the v1 oracle passed only on synthetic
+    // ADR=pack fixtures). The core hands us only the FIRST
+    // response-shaped frame after our TX (80 00 D5, any RTN) with no
+    // master poll in between, so every call here IS the answer. The
+    // verdict records the RETURN CODE (RTN; 00 = broad answer/bare ack,
+    // 04 = CID2 invalid, 06 = invalid INFO - the likeliest informative
+    // results to a strange read shape), the frame's LENID and the
+    // fire->answer-start delay; checksum validity is NOT required (a
+    // collision remnant is still an answer), value_raw_ stays untouched
+    // and nothing publishes: a new answer shape is evidence, never
+    // something the device accepts as a value.
     bool on_variant_evidence(const std::string& raw, uint32_t answer_start_ms,
                              std::string* short_line) {
-        if (raw.substr(2, 2) != hex2(pack_)) return false;
         int start_delay = (int32_t)(answer_start_ms - tx_started_ms_);
         if (start_delay < 0) start_delay = 0;
+        std::string rtn = raw.substr(6, 2);
         std::string lenid = raw.substr(8, 4);
         status_ = Status::VariantEvidence;
-        line_ = "variant answer (evidence only): pack " + hex2(pack_) + " answered, LENID=" +
-                lenid + ", start+" + std::to_string(start_delay) +
+        line_ = "variant answer (evidence only): pack " + hex2(pack_) + " answered, RTN=" +
+                rtn + " LENID=" + lenid + ", start+" + std::to_string(start_delay) +
                 " ms - a new answer shape never becomes a value; nothing"
                 " published; press Read again";
         if (short_line) {
-            *short_line = "D547 " + hex2(pack_) + " " + variant_info_ + " ans LENID=" +
-                          lenid + " start+" + std::to_string(start_delay) +
-                          "ms evidence-only";
+            *short_line = "D547 " + hex2(pack_) + " " + variant_info_ + " ans RTN=" +
+                          rtn + " LENID=" + lenid + " start+" +
+                          std::to_string(start_delay) + "ms evidence-only";
         }
         return true;
+    }
+
+    // A master poll (CID2 42/44 - the same signature the core dispatches
+    // via on_request) arrived inside the open window: no answer came
+    // before the master's next poll, and every frame that follows belongs
+    // to the master's exchange - the terminal status closes the window,
+    // so the hook consumes nothing from here on and the poll frame itself
+    // takes the normal on_request path (cadence, pairing). The B07E
+    // telemetry answer to that poll can therefore never be mistaken for
+    // evidence. Grade-guards on WaitVariant so the verdict lands once.
+    void on_variant_master_poll(std::string* short_line) {
+        if (status_ != Status::WaitVariant) return;  // fail-closed: grade once
+        status_ = Status::NoAnswerMasterPoll;
+        line_ = "no answer before the master's next poll (variant probe); nothing"
+                " published - press Read again";
+        if (short_line) {
+            *short_line = "D547 " + hex2(pack_) + " " + variant_info_ +
+                          " no-answer-before-master-poll";
+        }
     }
 
     // The core routes our block here before pairing/classification. The
@@ -2239,7 +2284,8 @@ inline bool read_status_terminal(ReadController::Status s) {
     using R = ReadController::Status;
     return s == R::ReadOk || s == R::Mismatch || s == R::WrongPack ||
            s == R::Damaged || s == R::NoBlock || s == R::Aborted ||
-           s == R::Expired || s == R::Denied || s == R::VariantEvidence;
+           s == R::Expired || s == R::Denied || s == R::VariantEvidence ||
+           s == R::NoAnswerMasterPoll;
 }
 inline bool teleop_status_terminal(TeleOpController::Status s) {
     using T = TeleOpController::Status;
@@ -2266,15 +2312,41 @@ inline bool BmsLinkCore::on_read_candidate_(uint32_t t_ms, uint32_t answer_start
     return true;
 }
 
-// Variant-answer routing (reviewer ruling, PR read-variant-micro):
-// mirroring the read-candidate consult, the frame is consumed as our
-// own pending variant probe's answer evidence before any pairing or
-// verdict. The LENID length is deliberately not graded here - any shape
-// counts as the answer.
+// Variant-answer routing (reviewer ruling round 2, PR read-variant-micro):
+// #87-style STRUCTURAL acceptance replaces v1's ADR matcher (which could
+// never match a real answer: every pack on this bus answers with ADR 00 -
+// PROTOCOL_REFERENCE.md:409, "Response frames: VER 80, ADR 00, CID1 D5";
+// the v1 oracle passed only on synthetic ADR=pack fixtures). The hook sees
+// every parsed frame in arrival order and classifies by shape alone:
+//   - a master poll (CID2 42/44 on the wire - the same signature on_request
+//     dispatches) inside the open window grades the probe TERMINAL
+//     (NoAnswerMasterPoll): no answer came before the master's next poll
+//     and the frames that follow belong to the master's exchange. The hook
+//     returns false so the poll itself takes the normal listener path; the
+//     terminal status closes the window, so nothing later is consumed.
+//   - the FIRST response-shaped frame after our TX (VER 80 ADR 00 CID1
+//     D5, CID2 not 42/44 - any RTN: 00 broad answers/bare acks and error
+//     codes 04/06/... alike) is THE ANSWER, consumed as evidence with the
+//     return code, LENID and delay recorded. Checksum validity is NOT
+//     required - a collision remnant is still an answer.
+// Anything else falls through to the normal listener path, unharmed: a
+// master poll with no window open, non-80-prefixed garbage, frames while
+// nothing is waiting.
 inline bool BmsLinkCore::on_variant_answer_(uint32_t t_ms, uint32_t answer_start_ms,
                                             const std::string& raw, int len) {
     (void)len;
     if (!variant_waiter_->variant_window_active(t_ms)) return false;
+    std::string rtn = raw.substr(6, 2);  // CID2 on requests, RTN on responses
+    if (rtn == "42" || rtn == "44") {
+        // the master polled before any answer: grade terminal, consume
+        // nothing - the frame continues to normal processing
+        std::string short_line;
+        variant_waiter_->on_variant_master_poll(&short_line);
+        push_event(EventKind::VariantAnswer, t_ms, variant_waiter_->last_pack(), short_line);
+        ring_now(t_ms, short_line);
+        return false;
+    }
+    if (raw.substr(0, 6) != "8000D5") return false;  // not response-shaped
     std::string short_line;
     if (!variant_waiter_->on_variant_evidence(raw, answer_start_ms, &short_line)) return false;
     push_event(EventKind::VariantAnswer, t_ms, variant_waiter_->last_pack(), short_line);
