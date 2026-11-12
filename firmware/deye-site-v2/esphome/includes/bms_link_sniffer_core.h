@@ -231,10 +231,27 @@ static constexpr uint32_t kAimLatestFireMs   = 180;  // reviewer runway cap: fir
 // by 10 ms ticks at 171/181 and never fire - oracle case pins the
 // jittered landing).
 // The predictor: every observed >=kLongGapMs quiet resyncs the phase;
-// stale predictions slide forward one period at a time, and a
-// prediction older than kPreLongStaleMs unlocks the aim entirely - the
-// rotation may have changed shape, and bounded slides keep the loop
-// trivial (<=4 iterations at the stale bound). The lead window's upper
+// there is exactly ONE prediction - last observed long open + one
+// period - and no slide (reviewer ruling, option A, PR prelong-unlock).
+// A missed expected long therefore disarms by construction: every
+// later quiet opens past the prediction (lead < 0), no shift, no fresh
+// corridor candidates, until an observed long re-anchors. The retired
+// slide - shifting the prediction one period per miss - was built to
+// absorb "inserted slots"; the 20.24-h capture (records #101)
+// identified those as the master's suppression runs: 2-7 consecutive
+// skipped longs on a tight ~48.0 s onset lattice (CV 0.22),
+// P(skip|skipped)=46% run persistence, P(skip|on-time)=16.7%
+// fresh-onset ceiling - so a fire after one miss lands inside a live
+// run almost half the time. Demonstrated live (records #103, 19:39:43
+// Nov 12, pack-01 attempt 1): the run began ~7 s before the corridor
+// fire, the expected long never arrived, and the slide fired anyway
+// into the ongoing run. Intended side effect: a successful block read
+// fills its long gap, so that long is never observed - the predictor
+// then stays unlocked until the next one, ~2.5 s later; latency cost,
+// not safety, and how it should behave. A prediction older than
+// kPreLongStaleMs ALSO unlocks the aim - kept as defence in depth even
+// though the missing slide mostly makes it redundant (the rotation may
+// have changed shape outright). The lead window's upper
 // bound is 700: the worst-case corridor lead is ~696 ms (144 B closing
 // answer + 25 ms start delay) - those corridors are inside the window;
 // a wider lead is not a corridor and costs latency, not safety.
@@ -576,14 +593,17 @@ public:
     bool long_gap_due() const { return slots_since_long_gap_ >= kLongGapEverySlots - 1; }
 
     // Pre-long-corridor query (see the kPreLongLead* comment block).
-    // Stale check FIRST: a prediction older than kPreLongStaleMs unlocks
-    // the aim (the rotation changed shape) and keeps the catch-up loop
-    // bounded without a separate iteration cap.
+    // Locked-and-fresh only, fail-closed every way:
+    //   - never locked (no observed long ever): no corridor;
+    //   - stale anchor (kPreLongStaleMs): no corridor;
+    //   - the prediction is exactly last observed long + one period - a
+    //     missed expected long leaves every later quiet opening past it
+    //     (lead < 0), so there is no slide and no fresh corridor
+    //     candidate until an observed long re-anchors the phase.
     bool pre_long_quiet(uint32_t quiet_open_ms, uint32_t now_ms) const {
         if (!long_open_seen_) return false;
         if ((int32_t)(now_ms - last_long_open_ms_) > (int32_t)kPreLongStaleMs) return false;
         uint32_t p = last_long_open_ms_ + kLongGapPeriodMs;
-        while ((int32_t)(now_ms - (p + kLongGapMs)) > 0) p += kLongGapPeriodMs;
         int32_t lead = (int32_t)(p - quiet_open_ms);
         return lead >= (int32_t)kPreLongLeadMinMs && lead <= (int32_t)kPreLongLeadMaxMs;
     }
