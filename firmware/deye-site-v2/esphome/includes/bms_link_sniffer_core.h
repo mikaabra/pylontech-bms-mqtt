@@ -307,17 +307,75 @@ inline std::string sanitize_publish_text(const std::string& s) {
 // The captured bare ack (RTN 00, empty INFO), interior without SOI/EOI.
 static const char kRawBareAck[] = "8000D5000000FD9F";
 
-// CID2 0x47 int-parameter block-read frame:
-//   ~ VER(80) ADR(00) CID1(D5) CID2(47) LENID(E002) [pack] CHK CR
-// Byte-exact against bms073.build(cid2=0x47, info=f"{pack:02X}") — the
+// CID2 0x47 int-parameter read frames — one builder, two shapes:
+//   ~ VER(80) ADR(00) CID1(D5) CID2(47) LENID INFO CHK CR
+// The block form (INFO = the pack address, 2 ASCII-hex chars) is
+// byte-exact against bms073.build(cid2=0x47, info=f"{pack:02X}") — the
 // captured request for pack 01 is ~8000D547E00201FD1C (pinned in the
 // read oracle against the Python builder's output).
-inline std::string build_read_frame(uint8_t pack) {
-    int len = 2;  // INFO = the pack address, 2 ASCII-hex chars
+//
+// Read variants (reviewer ruling rounds 1-2, PR read-variant-micro): the
+// 562-char block is ~1094 ms head-to-tail and only the corridor quiet
+// before the ~2511.4±2 ms rotation's long gap can carry it (wire-measured,
+// #99); the CID2-47 probe still queued needs a different question — does a
+// SHORT INFO draw a SHORT answer at all? INFO comes only from the
+// reviewed allowlist of exact variants below, nothing free-form: FOUR
+// short-read candidate shapes, "<pack>4C"/"<pack>004C"/"<pack>4C01"/
+// "<pack>4C4C", packs 03/04 ONLY. Round 2 retired the v1 pack-01
+// isolation INFO 014C: the clean-phase retry read pack 01 clean through
+// the corridor and settled request-vs-answer (records #103, merged), so
+// a pack-01 variant frame has no purpose left; the len-4 shape is
+// retargeted to packs 03/04 as the fourth short-read candidate
+// (034C/044C) — the only time it was ever tried was on old-gen pack 01,
+// and the new-gen packs might parse it differently. A variant answer is
+// EVIDENCE ONLY — whether there was an answer at all, its return code
+// (RTN), its LENID and how long it took to arrive — never something the
+// device accepts as a value. This extends ReadController's existing
+// request path (same fire gates, same TX client); there is deliberately
+// no parallel transmit path. LENID lengths stay in the captured family:
+// 2->E002 (block, byte-exact regression), 4->C004, 6->A006 (the
+// teleControl captures' 6-char-INFO LENID) — same digit-sum formula.
+enum class ReadVariant { kBlock, kShort4C, kShort004C, kShort4C01, kShort4C4C };
+
+// The exact allowlisted INFO chars per variant (never free-form).
+inline std::string read_variant_info(uint8_t pack, ReadVariant variant) {
+    char info[7];
+    switch (variant) {
+        case ReadVariant::kBlock:     snprintf(info, sizeof info, "%02X", (unsigned)pack); break;
+        case ReadVariant::kShort4C:   snprintf(info, sizeof info, "%02X4C", (unsigned)pack); break;
+        case ReadVariant::kShort004C: snprintf(info, sizeof info, "%02X004C", (unsigned)pack); break;
+        case ReadVariant::kShort4C01: snprintf(info, sizeof info, "%02X4C01", (unsigned)pack); break;
+        case ReadVariant::kShort4C4C: snprintf(info, sizeof info, "%02X4C4C", (unsigned)pack); break;
+    }
+    return info;
+}
+
+// Variant allowlist (reviewer ruling round 2, PR read-variant-micro):
+// kBlock is the existing block read (any observed Link address); every
+// kShort* is packs 03/04 ONLY — the four short-read candidates probe the
+// two new-gen near packs, and NOTHING but kBlock is ever allowed for
+// packs 01/02 (the pack-01 isolation variant was retired when the
+// clean-phase retry settled request-vs-answer, records #103). Extending
+// either is its own reviewed change — every other combination denies
+// fail-closed.
+inline bool read_variant_allowed(ReadVariant v, uint8_t pack) {
+    switch (v) {
+        case ReadVariant::kBlock: return true;
+        case ReadVariant::kShort4C:
+        case ReadVariant::kShort004C:
+        case ReadVariant::kShort4C01:
+        case ReadVariant::kShort4C4C: return pack == 0x03 || pack == 0x04;
+    }
+    return false;  // keep the tail fail-closed
+}
+
+inline std::string build_read_frame(uint8_t pack, ReadVariant variant = ReadVariant::kBlock) {
+    std::string info = read_variant_info(pack, variant);
+    int len = (int)info.size();  // INFO length in ASCII-hex chars
     int digit_sum = (len / 256) + ((len / 16) % 16) + (len % 16);
     int lchk = (~digit_sum + 1) & 0xF;
-    char body[20];
-    snprintf(body, sizeof body, "8000D547%X%03X%02X", lchk, len, (unsigned)pack);
+    char body[24];
+    snprintf(body, sizeof body, "8000D547%X%03X%s", lchk, len, info.c_str());
     std::string result = "~";
     result += body;
     result += rs485_calc_chksum(body);
@@ -466,6 +524,7 @@ enum class EventKind {
     BlockForRead,     // D547 block (or its damaged remnant) consumed by a pending read (not an anomaly)
     AckForTeleOp,     // bare ack consumed by a pending teleControl frame (not an anomaly)
     ProbeAnswer,      // 9052 identity block routed to a pending teleControl probe (not an anomaly)
+    VariantAnswer,    // CID2-47 variant probe graded: answer consumed as evidence, or no-answer-before-master-poll (not an anomaly)
 };
 
 struct LinkEvent {
@@ -742,6 +801,18 @@ private:
         std::string lenid = raw.substr(8, 4);
         int len = lenid4_len(lenid);
         if (len < 0) return malformed(t_ms, raw, "lenid hex");
+        // A pending CID2-47 VARIANT probe consumes its answer here, before
+        // the block-candidate branch and every later verdict (reviewer
+        // ruling round 2, PR read-variant-micro): acceptance is #87-style
+        // STRUCTURAL — the first response-shaped frame (80 00 D5, any RTN)
+        // after our TX is the answer (see on_variant_answer_), a master
+        // poll arriving first grades the probe terminal, and content is
+        // never matched to claim ownership (checksum validity is NOT
+        // required, a collision remnant is still an answer) — and it never
+        // touches values: a new answer shape is evidence, never something
+        // the device accepts as a value.
+        if (variant_waiter_ && on_variant_answer_(t_ms, frame_start_t_ms_, raw, len))
+            return;
         // Our own D547 block read's answer (or its collision-damaged
         // remnant) routes to the read controller before any pairing,
         // size or checksum verdict: the reader grades the frame itself
@@ -878,6 +949,10 @@ private:
     // the frame was consumed as our own pending block read's answer
     bool on_read_candidate_(uint32_t t_ms, uint32_t answer_start_ms,
                             const std::string& raw, int len);
+    // Defined after ReadController (variant-answer consult) — true when
+    // the frame was consumed as our own pending variant probe's answer
+    bool on_variant_answer_(uint32_t t_ms, uint32_t answer_start_ms,
+                            const std::string& raw, int len);
 
     // ---- helpers -------------------------------------------------------------
     void close_open_slot_unanswered() {
@@ -958,6 +1033,7 @@ private:
 public:
     void set_ack_waiter(WriteController* w) { ack_waiter_ = w; }
     void set_read_waiter(ReadController* r) { read_waiter_ = r; }
+    void set_variant_waiter(ReadController* r) { variant_waiter_ = r; }
     void set_telecom_waiter(TeleOpController* t) { telecom_waiter_ = t; }
     uint32_t dropped_events() const { return dropped_events_; }
     uint32_t last_frame_end_ms() const { return last_frame_end_ms_; }
@@ -1017,6 +1093,7 @@ private:
 
     WriteController* ack_waiter_ = nullptr;
     ReadController* read_waiter_ = nullptr;
+    ReadController* variant_waiter_ = nullptr;
     TeleOpController* telecom_waiter_ = nullptr;
     // Defined after TeleOpController (incomplete-type boundary, same
     // pattern as on_bare_ack / on_read_candidate_)
@@ -1301,12 +1378,29 @@ inline void BmsLinkCore::on_bare_ack(uint32_t t_ms) {
 //   Damaged     envelope or checksum broken by the collision - value NOT
 //               trustworthy regardless of what survived; press again
 //   NoBlock     window closed with no block-sized answer
+//
+// Read VARIANTS (reviewer ruling rounds 1-2, PR read-variant-micro) ride
+// the same request path - one selector, no parallel TX client: CID2 stays
+// fixed at 0x47, INFO comes only from the reviewed allowlist
+// (read_variant_allowed: the four short-read shapes -> packs 03/04
+// only), the param band is skipped (INFO is fixed by the allowlist),
+// expectations are forced off, and every existing fire gate applies
+// unchanged. A fired variant waits in WaitVariant and grades
+// EVIDENCE-ONLY (VariantEvidence): whether there was an answer at all,
+// its return code (RTN), its LENID and how long it took to arrive - or
+// NoAnswerMasterPoll when the master's next poll (CID2 42/44) arrives
+// before any answer. Acceptance is #87-style structural, never
+// content-matched: on this bus every pack answers with ADR 00
+// (PROTOCOL_REFERENCE.md:409), so v1's ADR-vs-pack matcher could never
+// match a real answer. A new answer shape is never a value - value_raw_
+// stays untouched and nothing publishes.
 // ---------------------------------------------------------------------------
 class ReadController {
 public:
     enum class Status {
         Idle, Denied, Armed, WaitBlock,
-        ReadOk, Mismatch, WrongPack, Damaged, NoBlock, Aborted, Expired
+        ReadOk, Mismatch, WrongPack, Damaged, NoBlock, Aborted, Expired,
+        WaitVariant, VariantEvidence, NoAnswerMasterPoll
     };
 
     using EnableFn = bool (*)(void*);
@@ -1317,8 +1411,9 @@ public:
         : core_(core), gate_(gate), enable_(enable), tx_(tx), ctx_(ctx) {}
 
     bool request(uint8_t pack, uint8_t param, bool has_expect, uint16_t expect, uint32_t now,
-                 bool aim_long_gap = false) {
-        if (status_ == Status::Armed || status_ == Status::WaitBlock) {
+                 bool aim_long_gap = false, ReadVariant variant = ReadVariant::kBlock) {
+        if (status_ == Status::Armed || status_ == Status::WaitBlock ||
+            status_ == Status::WaitVariant) {
             line_ = "ignored: previous read still in flight";
             return false;
         }
@@ -1326,20 +1421,43 @@ public:
             deny("pack must be 01-04 (observed Link addresses)");
             return false;
         }
-        if (!read_param_valid(param)) {
-            deny("parameter 0x" + hex2(param) + " outside the readable u16 band 0x07-0x7C");
-            return false;
+        if (variant == ReadVariant::kBlock) {
+            if (!read_param_valid(param)) {
+                deny("parameter 0x" + hex2(param) + " outside the readable u16 band 0x07-0x7C");
+                return false;
+            }
+        } else {
+            // reviewer ruling rounds 1-2, PR read-variant-micro: param is
+            // meaningless for a variant (INFO is fixed by the allowlist,
+            // so the band check is skipped), expectations are forced off
+            // (evidence is never graded against a value), and the pack
+            // must be on the variant allowlist - deny fail-closed
+            // otherwise (four short-read shapes, packs 03/04 only).
+            if (!read_variant_allowed(variant, pack)) {
+                deny("variant probe INFO " + read_variant_info(pack, variant) +
+                     " not on the reviewed allowlist (the four short-read shapes are"
+                     " packs 03/04 only; nothing but the block read goes to packs 01/02)");
+                return false;
+            }
         }
         pack_ = pack;
         param_ = param;
-        has_expect_ = has_expect;
-        expect_raw_ = expect;
+        variant_ = variant;
+        variant_info_ = read_variant_info(pack, variant);
+        has_expect_ = has_expect && variant == ReadVariant::kBlock;
+        expect_raw_ = has_expect_ ? expect : 0;
         aim_long_gap_ = aim_long_gap;
         armed_at_ms_ = now;
         status_ = Status::Armed;
-        line_ = "armed: pack " + hex2(pack) + " param 0x" + hex2(param) +
-                " block read; one frame on the next " +
-                (aim_long_gap ? "(long-gap-aligned) " : "") + "window, expires in 6 s";
+        if (variant != ReadVariant::kBlock) {
+            line_ = "armed: variant probe pack " + hex2(pack) + " INFO " + variant_info_ +
+                    "; one frame on the next " +
+                    (aim_long_gap ? "(long-gap-aligned) " : "") + "window, expires in 6 s";
+        } else {
+            line_ = "armed: pack " + hex2(pack) + " param 0x" + hex2(param) +
+                    " block read; one frame on the next " +
+                    (aim_long_gap ? "(long-gap-aligned) " : "") + "window, expires in 6 s";
+        }
         return true;
     }
 
@@ -1352,8 +1470,9 @@ public:
         if (gate_.need_clean_slot && core_.pairs_total() > gate_.clean_pair_baseline)
             gate_.need_clean_slot = false;
         switch (status_) {
-            case Status::Armed:     tick_armed(t_ms); break;
-            case Status::WaitBlock: tick_wait_block(t_ms); break;
+            case Status::Armed:       tick_armed(t_ms); break;
+            case Status::WaitBlock:   tick_wait_block(t_ms); break;
+            case Status::WaitVariant: tick_wait_variant(t_ms); break;
             default: break;  // terminal: nothing fires without a fresh press
         }
     }
@@ -1363,6 +1482,70 @@ public:
     bool block_window_active(uint32_t now) const {
         return status_ == Status::WaitBlock &&
                (int32_t)(now - tx_started_ms_) <= (int32_t)kBlockWindowMs;
+    }
+
+    // core consults this for every frame while a variant probe is in
+    // flight: same collect-window length as the block read. The window's
+    // grade closes on the FIRST response-shaped frame (consumed as
+    // evidence) or the first master poll (NoAnswerMasterPoll) - whichever
+    // arrives first - or by expiry.
+    bool variant_window_active(uint32_t now) const {
+        return status_ == Status::WaitVariant &&
+               (int32_t)(now - tx_started_ms_) <= (int32_t)kBlockWindowMs;
+    }
+
+    // Evidence-only grading for the CID2-47 read variants (reviewer
+    // ruling round 2, PR read-variant-micro): #87-style STRUCTURAL
+    // acceptance replaces v1's ADR matcher, which could never match a
+    // real answer - on this bus every pack answers with ADR 00
+    // (PROTOCOL_REFERENCE.md:409), so an address-vs-pack compare sees an
+    // address that never occurs (the v1 oracle passed only on synthetic
+    // ADR=pack fixtures). The core hands us only the FIRST
+    // response-shaped frame after our TX (80 00 D5, any RTN) with no
+    // master poll in between, so every call here IS the answer. The
+    // verdict records the RETURN CODE (RTN; 00 = broad answer/bare ack,
+    // 04 = CID2 invalid, 06 = invalid INFO - the likeliest informative
+    // results to a strange read shape), the frame's LENID and the
+    // fire->answer-start delay; checksum validity is NOT required (a
+    // collision remnant is still an answer), value_raw_ stays untouched
+    // and nothing publishes: a new answer shape is evidence, never
+    // something the device accepts as a value.
+    bool on_variant_evidence(const std::string& raw, uint32_t answer_start_ms,
+                             std::string* short_line) {
+        int start_delay = (int32_t)(answer_start_ms - tx_started_ms_);
+        if (start_delay < 0) start_delay = 0;
+        std::string rtn = raw.substr(6, 2);
+        std::string lenid = raw.substr(8, 4);
+        status_ = Status::VariantEvidence;
+        line_ = "variant answer (evidence only): pack " + hex2(pack_) + " answered, RTN=" +
+                rtn + " LENID=" + lenid + ", start+" + std::to_string(start_delay) +
+                " ms - a new answer shape never becomes a value; nothing"
+                " published; press Read again";
+        if (short_line) {
+            *short_line = "D547 " + hex2(pack_) + " " + variant_info_ + " ans RTN=" +
+                          rtn + " LENID=" + lenid + " start+" +
+                          std::to_string(start_delay) + "ms evidence-only";
+        }
+        return true;
+    }
+
+    // A master poll (CID2 42/44 - the same signature the core dispatches
+    // via on_request) arrived inside the open window: no answer came
+    // before the master's next poll, and every frame that follows belongs
+    // to the master's exchange - the terminal status closes the window,
+    // so the hook consumes nothing from here on and the poll frame itself
+    // takes the normal on_request path (cadence, pairing). The B07E
+    // telemetry answer to that poll can therefore never be mistaken for
+    // evidence. Grade-guards on WaitVariant so the verdict lands once.
+    void on_variant_master_poll(std::string* short_line) {
+        if (status_ != Status::WaitVariant) return;  // fail-closed: grade once
+        status_ = Status::NoAnswerMasterPoll;
+        line_ = "no answer before the master's next poll (variant probe); nothing"
+                " published - press Read again";
+        if (short_line) {
+            *short_line = "D547 " + hex2(pack_) + " " + variant_info_ +
+                          " no-answer-before-master-poll";
+        }
     }
 
     // The core routes our block here before pairing/classification. The
@@ -1497,7 +1680,7 @@ private:
             return;  // mid-idle, not at the edge
         }
 
-        std::string frame = build_read_frame(pack_);
+        std::string frame = build_read_frame(pack_, variant_);
         tx_started_ms_ = t_ms;
         // ride-gap latch (reviewer instrument, the pack-02 flip showed
         // it is the datum that decides clipped vs clean): the gap this
@@ -1515,6 +1698,14 @@ private:
         if (!ok) {
             status_ = Status::Aborted;
             line_ = "aborted: uart flush failed - bytes may be on the wire; press Read again";
+            return;
+        }
+        if (variant_ != ReadVariant::kBlock) {
+            status_ = Status::WaitVariant;
+            line_ = aim_class
+                ? "sent, variant probe INFO " + variant_info_ + " - collecting (1.5 s window;"\
+                  " fired " + std::to_string(since) + " ms into a " + aim_class + " gap)"
+                : "sent, variant probe INFO " + variant_info_ + " - collecting (1.5 s window)";
             return;
         }
         status_ = Status::WaitBlock;
@@ -1537,6 +1728,18 @@ private:
                 " shredded the response; press Read again for a new single read";
     }
 
+    void tick_wait_variant(uint32_t t_ms) {
+        if (variant_window_active(t_ms)) return;
+        if (!enable_(ctx_)) {
+            status_ = Status::Aborted;
+            line_ = "variant frame was sent, but evidence collection stopped early"
+                    " (enable switched off); nothing recorded - press Read again";
+            return;
+        }
+        status_ = Status::Expired;
+        line_ = "no answer in the 1.5 s window (variant probe); nothing published - press Read again";
+    }
+
     static std::string hex2(uint8_t v) {
         char b[3];
         snprintf(b, sizeof b, "%02X", (unsigned)v);
@@ -1551,6 +1754,8 @@ private:
 
     uint8_t  pack_ = 0;
     uint8_t  param_ = 0;
+    ReadVariant variant_ = ReadVariant::kBlock;  // the allowlisted probe shape (kBlock = today's read)
+    std::string variant_info_;                   // exact INFO chars ("<pack>4C", "<pack>004C", ...)
     bool     has_expect_ = false;
     uint16_t expect_raw_ = 0;
     uint16_t value_raw_ = 0;
@@ -2062,7 +2267,8 @@ inline bool write_status_in_flight(WriteController::Status s) {
     return s == WriteController::Status::Armed || s == WriteController::Status::WaitAck;
 }
 inline bool read_status_in_flight(ReadController::Status s) {
-    return s == ReadController::Status::Armed || s == ReadController::Status::WaitBlock;
+    using R = ReadController::Status;
+    return s == R::Armed || s == R::WaitBlock || s == R::WaitVariant;
 }
 inline bool teleop_status_in_flight(TeleOpController::Status s) {
     using T = TeleOpController::Status;
@@ -2078,7 +2284,8 @@ inline bool read_status_terminal(ReadController::Status s) {
     using R = ReadController::Status;
     return s == R::ReadOk || s == R::Mismatch || s == R::WrongPack ||
            s == R::Damaged || s == R::NoBlock || s == R::Aborted ||
-           s == R::Expired || s == R::Denied;
+           s == R::Expired || s == R::Denied || s == R::VariantEvidence ||
+           s == R::NoAnswerMasterPoll;
 }
 inline bool teleop_status_terminal(TeleOpController::Status s) {
     using T = TeleOpController::Status;
@@ -2102,6 +2309,48 @@ inline bool BmsLinkCore::on_read_candidate_(uint32_t t_ms, uint32_t answer_start
     std::string short_line = read_waiter_->on_block(raw, len, answer_start_ms);
     push_event(EventKind::BlockForRead, t_ms, read_waiter_->last_pack(), short_line);
     ring_now(t_ms, short_line);  // ring budget truncates the 562-char frame; the verdict stays
+    return true;
+}
+
+// Variant-answer routing (reviewer ruling round 2, PR read-variant-micro):
+// #87-style STRUCTURAL acceptance replaces v1's ADR matcher (which could
+// never match a real answer: every pack on this bus answers with ADR 00 -
+// PROTOCOL_REFERENCE.md:409, "Response frames: VER 80, ADR 00, CID1 D5";
+// the v1 oracle passed only on synthetic ADR=pack fixtures). The hook sees
+// every parsed frame in arrival order and classifies by shape alone:
+//   - a master poll (CID2 42/44 on the wire - the same signature on_request
+//     dispatches) inside the open window grades the probe TERMINAL
+//     (NoAnswerMasterPoll): no answer came before the master's next poll
+//     and the frames that follow belong to the master's exchange. The hook
+//     returns false so the poll itself takes the normal listener path; the
+//     terminal status closes the window, so nothing later is consumed.
+//   - the FIRST response-shaped frame after our TX (VER 80 ADR 00 CID1
+//     D5, CID2 not 42/44 - any RTN: 00 broad answers/bare acks and error
+//     codes 04/06/... alike) is THE ANSWER, consumed as evidence with the
+//     return code, LENID and delay recorded. Checksum validity is NOT
+//     required - a collision remnant is still an answer.
+// Anything else falls through to the normal listener path, unharmed: a
+// master poll with no window open, non-80-prefixed garbage, frames while
+// nothing is waiting.
+inline bool BmsLinkCore::on_variant_answer_(uint32_t t_ms, uint32_t answer_start_ms,
+                                            const std::string& raw, int len) {
+    (void)len;
+    if (!variant_waiter_->variant_window_active(t_ms)) return false;
+    std::string rtn = raw.substr(6, 2);  // CID2 on requests, RTN on responses
+    if (rtn == "42" || rtn == "44") {
+        // the master polled before any answer: grade terminal, consume
+        // nothing - the frame continues to normal processing
+        std::string short_line;
+        variant_waiter_->on_variant_master_poll(&short_line);
+        push_event(EventKind::VariantAnswer, t_ms, variant_waiter_->last_pack(), short_line);
+        ring_now(t_ms, short_line);
+        return false;
+    }
+    if (raw.substr(0, 6) != "8000D5") return false;  // not response-shaped
+    std::string short_line;
+    if (!variant_waiter_->on_variant_evidence(raw, answer_start_ms, &short_line)) return false;
+    push_event(EventKind::VariantAnswer, t_ms, variant_waiter_->last_pack(), short_line);
+    ring_now(t_ms, short_line);
     return true;
 }
 
