@@ -178,40 +178,6 @@ public:
         read_status_->publish_state(read_.status_line());
     }
 
-    // one-shot trigger from the Fire Variant Probe button (CID2-47
-    // short-read evidence probes, variant path merged in the core,
-    // PR #102). shape is the Variant Probe Shape select index 0-3 ->
-    // kShort4C/kShort004C/kShort4C01/kShort4C4C (option order mirrors
-    // the core's allowlisted enum order). One press = ONE frame: pack
-    // and gate handling are identical to the block read (the shared
-    // Target Pack select, Link Operate Enable, in-flight write/teleop
-    // refusals), the core allowlist denies packs 01/02 fail-closed,
-    // and expectations are forced off - the answer (or silence) is
-    // graded EVIDENCE-ONLY and never becomes a value. The armed line
-    // names the shape+pack; the verdict lands on Link Read Status.
-    void arm_variant_probe(uint8_t pack, uint8_t shape) {
-        if (!read_status_) return;
-        if (!read_gates_ok_(pack)) return;
-        if (shape > 3) {
-            read_status_->publish_state("refused: select a probe shape first");
-            return;
-        }
-        linksniff::ReadVariant variant;
-        switch (shape) {
-            case 0:  variant = linksniff::ReadVariant::kShort4C; break;
-            case 1:  variant = linksniff::ReadVariant::kShort004C; break;
-            case 2:  variant = linksniff::ReadVariant::kShort4C01; break;
-            default: variant = linksniff::ReadVariant::kShort4C4C; break;
-        }
-        // param is ignored for variants (INFO is fixed by the allowlist)
-        // but stays the block read's 0x4C for consistency; has_expect
-        // false - evidence never grades against expectations; the same
-        // corridor aim as the block read (aim_long_gap = true)
-        read_.request(pack, linksniff::kReadBalanceParam, false, 0,
-                      esphome::millis(), true, variant);
-        read_status_->publish_state(read_.status_line());
-    }
-
     // one-shot trigger from the SYS_OFF button. One press = probe, then the
     // D545 SYS_OFF write - the controller refuses to fire the write unless
     // the probed pack answered. Packs 01-04 only (00 is the master battery:
@@ -412,13 +378,6 @@ private:
                 // the graded verdict and the ring holds the compact record
                 anomaly_like = false;
                 break;
-            case linksniff::EventKind::VariantAnswer:
-                // healthy expected event (CID2-47 variant probes): Link
-                // Read Status already carries the EVIDENCE-ONLY verdict
-                // (VariantEvidence / NoAnswerMasterPoll) and the ring
-                // holds the short record - the core marks it not-an-anomaly
-                anomaly_like = false;
-                break;
             case linksniff::EventKind::AckForTeleOp:
                 // healthy expected event: Link TeleOp Status reports the
                 // ack within its sequence verdict
@@ -503,13 +462,13 @@ private:
         return linksniff::teleop_status_in_flight(teleop_.status());
     }
 
-    // shared refusal gates for the three read-side arms (arm_read,
-    // arm_debug_read, arm_variant_probe) - the same four checks were
-    // copied between them, folded here per CLAUDE.md's third-copy rule
-    // and the #107 review verdict. Each refusal publishes its
-    // byte-identical line to Link Read Status and the arm returns;
-    // true = every gate passed. Check order preserved from the folded
-    // blocks; arm-local refusals (param/shape) sit after these gates.
+    // shared refusal gates for the read-side arms (arm_read,
+    // arm_debug_read) - the same four checks were copied between them,
+    // folded here per CLAUDE.md's third-copy rule and the #107 review
+    // verdict. Each refusal publishes its byte-identical line to Link
+    // Read Status and the arm returns; true = every gate passed. Check
+    // order preserved from the folded blocks; arm-local refusals
+    // (param) sit after these gates.
     bool read_gates_ok_(uint8_t pack) {
         if (!write_enable_ || !write_enable_->state) {
             read_status_->publish_state(
