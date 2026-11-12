@@ -97,6 +97,7 @@ struct Harness {
           r(c, gate, FakeBus::enable_cb, FakeBus::tx_cb, &bus) {
         c.set_ack_waiter(&w);
         c.set_read_waiter(&r);
+        c.set_variant_waiter(&r);
     }
 };
 
@@ -758,6 +759,232 @@ static void test_ride_gap_recorded_per_read() {
     check(n == 1, "one ride-gap line per read, latch consumed once");
 }
 
+// ---- CID2-47 read variants (reviewer ruling, PR read-variant-micro) ----
+// One selector extends the existing read request; no parallel TX path.
+// INFO comes only from the reviewed allowlist: 014C for the isolation
+// experiment (pack 01 only), plus the three short-read candidate tails
+// (packs 03/04 only). Grading is EVIDENCE-ONLY: answer-present, its
+// LENID, and its arrival delay - a new answer shape is never a value.
+// NOTE the LENID pin: the brief sketched the len-4 LENID as "D004", but
+// the digit-sum formula both this repo's lenid4_valid and the pack's
+// parser use gives lchk = two's complement of the digit sum: 4 -> 0xC,
+// so the isolation frame carries C004 (a D004 frame would fail the pack
+// side's own LCHK check). A006 for the 6-char tails matches the captured
+// teleControl LENID family for 6-char INFO.
+
+static void test_variant_frames_byte_exact() {
+    // the block form is the byte-exact regression: default + explicit
+    check_str(linksniff::build_read_frame(0x01),
+              std::string("~8000D547E00201FD1C\r"),
+              "default (kBlock) keeps the pinned capture byte-exact");
+    check_str(linksniff::build_read_frame(0x01, linksniff::ReadVariant::kBlock),
+              linksniff::build_read_frame(0x01),
+              "explicit kBlock equals the default");
+    // isolation variant: INFO 014C, LENID C004 - helper-built AND pinned
+    check_str(linksniff::build_read_frame(0x01, linksniff::ReadVariant::kIso4C),
+              std::string("~8000D547C004014C") +
+                  rs485_calc_chksum("8000D547C004014C") + "\r",
+              "isolation frame via the shared CHK helper");
+    check_str(linksniff::build_read_frame(0x01, linksniff::ReadVariant::kIso4C),
+              std::string("~8000D547C004014CFCA5\r"),
+              "isolation frame pinned literal");
+    // short-read candidates: 6-char INFO, LENID A006
+    check_str(linksniff::build_read_frame(0x03, linksniff::ReadVariant::kShort004C),
+              std::string("~8000D547A00603004C") +
+                  rs485_calc_chksum("8000D547A00603004C") + "\r",
+              "short-004C pack 03 via the shared CHK helper");
+    check_str(linksniff::build_read_frame(0x03, linksniff::ReadVariant::kShort004C),
+              std::string("~8000D547A00603004CFC43\r"),
+              "short-004C pack 03 pinned literal");
+    check_str(linksniff::build_read_frame(0x04, linksniff::ReadVariant::kShort4C01),
+              std::string("~8000D547A006044C01FC41\r"),
+              "short-4C01 pack 04 pinned literal");
+    check_str(linksniff::build_read_frame(0x04, linksniff::ReadVariant::kShort4C4C),
+              std::string("~8000D547A006044C4C") +
+                  rs485_calc_chksum("8000D547A006044C4C") + "\r",
+              "short-4C4C pack 04 via the shared CHK helper");
+    check_str(linksniff::build_read_frame(0x04, linksniff::ReadVariant::kShort4C4C),
+              std::string("~8000D547A006044C4CFC2B\r"),
+              "short-4C4C pack 04 pinned literal");
+    // the LENID family stays in the measured/captured set
+    check_str(linksniff::build_read_frame(0x01, linksniff::ReadVariant::kIso4C).substr(9, 4),
+              std::string("C004"), "4-char INFO LENID is C004 (digit-sum LCHK)");
+    check_str(linksniff::build_read_frame(0x03, linksniff::ReadVariant::kShort004C).substr(9, 4),
+              std::string("A006"), "6-char INFO LENID is A006 (teleControl family)");
+}
+
+static void test_variant_allowlist() {
+    Harness h;
+    check(!h.r.request(0x03, 0x4C, false, 0, 1000, false, linksniff::ReadVariant::kIso4C),
+          "014C isolation variant refused on pack 03");
+    check(h.r.status() == ReadController::Status::Denied, "denied");
+    check_line_has(h.r.status_line(), "allowlist", "deny names the allowlist");
+    check_line_has(h.r.status_line(), "variant", "deny names the variant");
+    check(!h.r.request(0x01, 0x4C, false, 0, 1000, false, linksniff::ReadVariant::kShort004C),
+          "short-read tail refused on pack 01");
+    check(h.r.status() == ReadController::Status::Denied, "denied fail-closed");
+    check(h.bus.tx_log.empty(), "nothing transmitted on allowlist denies");
+    // the allowlisted pairs arm
+    check(h.r.request(0x01, 0x4C, false, 0, 1000, false, linksniff::ReadVariant::kIso4C),
+          "014C isolation variant armed on pack 01");
+    check(h.r.status() == ReadController::Status::Armed, "armed");
+    check_line_has(h.r.status_line(), "INFO 014C", "armed line names the exact INFO");
+    // expire the first arm (no cadence) so the next press is legal
+    for (uint32_t t = 1000; t < 7200; t += 100) h.r.tick(t);
+    check(h.r.status() == ReadController::Status::Expired, "first arm expired");
+    check(h.r.request(0x04, 0x4C, false, 0, 1000, false, linksniff::ReadVariant::kShort4C01),
+          "short-read 4C01 armed on pack 04");
+    check(h.r.status() == ReadController::Status::Armed, "armed");
+    check_line_has(h.r.status_line(), "INFO 044C01", "armed line names the exact INFO");
+}
+
+static void test_variant_gates_hold() {
+    // every existing fire gate applies to variant frames: no cadence ->
+    // hold to expiry, never a TX (the existing test_expiry_no_cadence
+    // pattern)
+    Harness h;
+    check(h.r.request(0x01, 0x4C, false, 0, 1000, false, linksniff::ReadVariant::kIso4C),
+          "variant armed");
+    for (uint32_t t = 1000; t < 7200; t += 100)
+        h.r.tick(t);
+    check(h.r.status() == ReadController::Status::Expired,
+          "no cadence -> expired, no fire");
+    check_line_has(h.r.status_line(), "no safe window within 6 s",
+                   "same expiry wording as the block read");
+    check(h.bus.tx_log.empty(), "the variant never TXed without cadence");
+
+    // the enable gate (the existing test_enable_gates pattern): a
+    // perfectly cadenced bus, the switch off - aborted before any TX
+    Harness h2;
+    pair_at(h2, 1, 1000);
+    h2.bus.enable = false;
+    check(h2.r.request(0x01, 0x4C, false, 0, 1030, false, linksniff::ReadVariant::kIso4C),
+          "variant armed (enable off)");
+    h2.r.tick(1170);
+    check(h2.r.status() == ReadController::Status::Aborted,
+          "enable off aborts the armed variant");
+    check_line_has(h2.r.status_line(), "enable switched off", "abort names the gate");
+    check(h2.bus.tx_log.empty(), "nothing fired with the gate closed");
+}
+
+static void test_variant_fires_in_corridor() {
+    // the #99 corridor fire-oracle pattern, driven with the isolation
+    // variant: same locks, same band, same gates - only the INFO differs
+    Harness h;
+    pair_at(h, 1, 1000);          // ends 1015
+    pair_at(h, 2, 3080);          // long open 1015, ends 3095 (LOCK)
+    check(h.r.request(0x01, 0x4C, false, 0, 3100, true, linksniff::ReadVariant::kIso4C),
+          "isolation variant armed (aimed)");
+    check_line_has(h.r.status_line(), "variant probe pack 01 INFO 014C",
+                   "armed line names the variant");
+    check_line_has(h.r.status_line(), "long-gap-aligned", "armed line keeps the aim tag");
+    h.r.tick(3275);               // since 180 in a non-corridor quiet: holds
+    check(h.r.status() == ReadController::Status::Armed, "non-corridor tick holds");
+    pair_at(h, 3, 3564);          // gap 469
+    pair_at(h, 4, 4048);
+    pair_at(h, 5, 4532);
+    pair_at(h, 6, 5016);
+    pair_at(h, 7, 5340);          // ends 5355: corridor, lead 682
+    h.r.tick(5535);               // since 180: retired v1 band -> holds
+    check(h.r.status() == ReadController::Status::Armed,
+          "corridor quiet holds below the re-derived band");
+    h.r.tick(5605);               // since 250: re-derived band -> fires
+    check(h.r.status() == ReadController::Status::WaitVariant,
+          "variant fires through the corridor path");
+    check_line_has(h.r.status_line(), "variant probe INFO 014C",
+                   "sent line names the variant");
+    check_line_has(h.r.status_line(), "pre-long", "sent line names the window class");
+    check(h.bus.tx_log.size() == 1, "exactly one frame");
+    check_str(h.bus.tx_log[0], std::string("~8000D547C004014CFCA5\r"),
+              "the TX callback received the exact 014C frame");
+}
+
+static void test_variant_answer_evidence() {
+    Harness h;
+    uint32_t t = 1000;
+    pair_at(h, 1, t);
+    check(h.r.request(0x01, 0x4C, false, 0, t + 30, false, linksniff::ReadVariant::kIso4C),
+          "isolation variant armed");
+    h.r.tick(t + 170);
+    check(h.r.status() == ReadController::Status::WaitVariant,
+          "variant fired, evidence window open");
+    check(h.bus.tx_log.size() == 1, "one probe frame");
+    check_str(h.bus.tx_log[0], std::string("~8000D547C004014CFCA5\r"),
+              "the 014C probe went out");
+    check(!h.r.request(0x01, 0x4C, false, 0, t + 200, false, linksniff::ReadVariant::kIso4C),
+          "press during WaitVariant is ignored");
+    check_line_has(h.r.status_line(), "ignored: previous read still in flight", "ignore wording");
+    check(h.bus.tx_log.size() == 1, "still exactly one frame");
+
+    // a short RTN frame whose ADR names pack 01 - the hypothesized new
+    // answer shape, with the CHK deliberately broken: a collision
+    // remnant is still an answer per the ruling
+    send(h.c, "~8001D500A006014C010000\r", t + 300);
+    check(h.r.status() == ReadController::Status::VariantEvidence,
+          "ADR-matching frame consumed as evidence");
+    check_line_has(h.r.status_line(), "LENID=A006", "verdict records the LENID");
+    check_line_has(h.r.status_line(), "start+130", "verdict records the fire->answer delay");
+    check_line_has(h.r.status_line(), "evidence", "verdict states evidence-only");
+    check(h.r.value_raw() == 0, "evidence never becomes a value");
+    check(h.c.checksum_errors() == 0, "consumed remnant added no checksum error");
+    check(h.c.anomalies_total() == 0, "consumed answer added no anomaly");
+    auto ev = h.c.drain_events();
+    check(has_event(ev, EventKind::VariantAnswer), "VariantAnswer event visible");
+    for (const auto& e : ev)
+        if (e.kind == EventKind::VariantAnswer)
+            check(e.pack == 1, "VariantAnswer attributed to the probe's pack");
+    std::string dump = h.c.dump_bounded();
+    check(dump.find("D547 01 014C ans LENID=A006 start+130ms evidence-only") != std::string::npos,
+          "ring line mirrors the read-candidate evidence record");
+}
+
+static void test_variant_wrong_pack_not_consumed() {
+    Harness h;
+    uint32_t t = 1000;
+    pair_at(h, 1, t);
+    check(h.r.request(0x01, 0x4C, false, 0, t + 30, false, linksniff::ReadVariant::kIso4C),
+          "isolation variant armed");
+    h.r.tick(t + 170);
+    check(h.r.status() == ReadController::Status::WaitVariant, "variant fired");
+    // pack 02 answers (ADR 02): another conversation - the controller
+    // keeps waiting and the frame takes the normal listener path
+    send(h.c, "~8002D500A006024C01FC4C\r", t + 300);
+    check(h.r.status() == ReadController::Status::WaitVariant,
+          "wrong-pack answer NOT consumed");
+    auto ev = h.c.drain_events();
+    check(!has_event(ev, EventKind::VariantAnswer), "no VariantAnswer for a wrong-pack frame");
+    check(has_event(ev, EventKind::AnomalyUnpaired),
+          "the frame fell through to normal processing");
+    // the window then lapses with the no-answer verdict
+    h.r.tick(t + 1730);
+    check(h.r.status() == ReadController::Status::Expired, "window lapse -> Expired");
+    check_line_has(h.r.status_line(), "no answer in the 1.5 s window", "no-answer wording");
+    check_line_has(h.r.status_line(), "nothing published", "and the fail-closed wording");
+    check(h.r.value_raw() == 0, "no value ever recorded");
+}
+
+static void test_variant_no_answer_expiry() {
+    Harness h;
+    uint32_t t = 1000;
+    pair_at(h, 1, t);
+    check(h.r.request(0x01, 0x4C, false, 0, t + 30, false, linksniff::ReadVariant::kIso4C),
+          "isolation variant armed");
+    h.r.tick(t + 170);
+    check(h.r.status() == ReadController::Status::WaitVariant, "variant fired");
+    check(h.bus.tx_log.size() == 1, "one probe frame on the wire");
+    h.r.tick(t + 1670);   // window edge: exactly 1500 ms
+    check(h.r.status() == ReadController::Status::WaitVariant, "window edge still waiting");
+    h.r.tick(t + 1730);   // past the window, no frames delivered
+    check(h.r.status() == ReadController::Status::Expired, "no answer -> Expired");
+    check_line_has(h.r.status_line(), "no answer in the 1.5 s window (variant probe)",
+                   "exact variant no-answer wording");
+    check_line_has(h.r.status_line(), "nothing published", "nothing published");
+    check(h.bus.tx_log.size() == 1, "one frame per press held");
+    check(h.r.value_raw() == 0, "no value without an answer");
+    auto ev = h.c.drain_events();
+    check(!has_event(ev, EventKind::VariantAnswer), "no answer event without an answer");
+}
+
 int main() {
     test_builder_byte_exact();
     test_deny_shapes();
@@ -783,6 +1010,13 @@ int main() {
     test_01b_missed_long_blocks_corridor_fire();
     test_aim_relock_after_miss_fires_next_corridor();
     test_ride_gap_recorded_per_read();
+    test_variant_frames_byte_exact();
+    test_variant_allowlist();
+    test_variant_gates_hold();
+    test_variant_fires_in_corridor();
+    test_variant_answer_evidence();
+    test_variant_wrong_pack_not_consumed();
+    test_variant_no_answer_expiry();
     if (failures) {
         printf("%d read-oracle failures\n", failures);
         return 1;
