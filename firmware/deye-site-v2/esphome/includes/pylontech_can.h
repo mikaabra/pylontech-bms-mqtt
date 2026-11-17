@@ -261,6 +261,11 @@ public:
                     temps_dirty_ = true;
                 }
             }
+        } else {
+            // an out-of-gate temperature freezes the pair silently - stale
+            // detection is frame-age based and never fires on a live bus -
+            // so the skip must surface in the diagnostic error counter
+            error_count_++;
         }
 
         float vmin = 0, vmax = 0;
@@ -300,6 +305,11 @@ public:
                     cells_dirty_ = true;
                 }
             }
+        } else {
+            // a half-invalid cell extreme publishes nothing (P2 #4), which
+            // freezes min/max/delta at their last values - a permanently
+            // broken extreme would otherwise be invisible, so count it
+            error_count_++;
         }
     }
 
