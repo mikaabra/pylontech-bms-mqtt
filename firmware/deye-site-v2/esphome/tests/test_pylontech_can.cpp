@@ -17,6 +17,7 @@
 
 #define USE_MQTT
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 #include <vector>
@@ -59,6 +60,18 @@ static int count_topic_payload(const char* suffix, const char* payload) {
             g_pub_messages[i] == payload) count++;
     }
     return count;
+}
+
+static bool last_payload_for(const char* suffix, std::string& out) {
+    size_t n = strlen(suffix);
+    for (size_t i = g_pub_topics.size(); i-- > 0;) {
+        if (g_pub_topics[i].size() >= n &&
+            g_pub_topics[i].compare(g_pub_topics[i].size() - n, n, suffix) == 0) {
+            out = g_pub_messages[i];
+            return true;
+        }
+    }
+    return false;
 }
 
 static void reset_capture() {
@@ -186,6 +199,35 @@ static void test_half_invalid_extreme_publishes_nothing() {
           "recovered pair publishes the real min/max/delta");
     check(!seen_topic_payload("/ext/cell_v_delta", "0.000"),
           "no zero delta was ever published");
+
+    // reviewer follow-up: a permanently invalid extreme is silent on the
+    // wire (stale detection is frame-age based) - the diag error counter
+    // is its only visible trace; two invalid frames were fed, so it must
+    // read exactly 2 at the next diagnostic pass
+    reset_capture();
+    g_ms = 74000;
+    can.publish_diagnostics();
+    std::string ec;
+    check(last_payload_for("/diag/error_count", ec) && atoi(ec.c_str()) == 2,
+          "each half-invalid cell frame bumps the diag error counter");
+
+    // same contract on the temperature gate: out-of-gate temps freeze
+    // the pair silently and must count (valid cells in this frame keep
+    // the cell path quiet, isolating the temp counter)
+    std::vector<uint8_t> h(8, 0);
+    h[0] = 0x00; h[1] = 0x80;   // t1 = int16 0x8000 = -3276.8C (out of gate)
+    h[2] = 0xC8; h[3] = 0x00;   // t2 = 20.0C
+    h[4] = 0xE4; h[5] = 0x0C;   // v1 = 3.300 V
+    h[6] = 0x48; h[7] = 0x0D;   // v2 = 3.400 V
+    g_ms = 100000;
+    can.handle_0x370(h);
+    reset_capture();
+    g_ms = 135000;
+    can.publish_diagnostics();
+    check(last_payload_for("/diag/error_count", ec) && atoi(ec.c_str()) == 3,
+          "an out-of-gate temperature frame bumps the error counter too");
+    check(!seen_topic("/ext/temp_min"),
+          "the frozen temp pair stayed silent off the wire");
 }
 
 // ---- 4. a partially-landed alarm group repairs the wire (review #112 follow-up)
