@@ -1760,11 +1760,18 @@ public:
     void on_foreign_probe(uint32_t t_ms) {
         (void)t_ms;
         if (!in_flight_()) return;
-        // pre-write states: our write may not have flown; the latch is
-        // compromised - stop. WaitAck/Done: our frame is already out.
-        if (status_ != Status::WaitProbe && status_ != Status::WaitWindow &&
-            status_ != Status::Settle)
-            return;
+        // Abort whenever the sequence still has an unsent frame. The
+        // teleControl write carries no target address - the probe latches
+        // it - so a foreign probe inside the wake pair's disable-WaitAck
+        // would send our enable through the WRONG pack's latch and leave
+        // ours LMCHG-disabled (foreign feedback P1). WaitAck of a single
+        // frame op, or of the pair's enable: every frame is already out,
+        // nothing left to compromise.
+        bool unsent = (status_ == Status::WaitProbe || status_ == Status::WaitWindow ||
+                       status_ == Status::Settle) ||
+                      (status_ == Status::WaitAck && op_ == Op::WakePair &&
+                       seq_idx_ == 0);
+        if (!unsent) return;
         status_ = Status::Aborted;
         line_ = "aborted: another presence probe re-latched the teleControl target -"\
                 " sequence stopped before any unsent frame; press again";
@@ -1796,8 +1803,8 @@ private:
         variant_ = variant;
         seq_idx_ = 0;
         wrote_any_ = false;
-        disable_sent_ = false;
-        enable_sent_ = false;
+        disable_attempted_ = false;
+        enable_flushed_ = false;
         rejected_answer_ms_ = 0;
         armed_at_ms_ = now;
         status_ = Status::Armed;
@@ -1807,8 +1814,12 @@ private:
     // leaves the pack potentially LMCHG-disabled, and every terminal line
     // from such a stop must say so - "press again" alone is dangerous
     // ambiguity when half of the pair is battery-side already.
+    // Foreign feedback P2: the disable attempt counts from the moment it
+    // reached the UART ("bytes may be on the wire" even on a failed
+    // flush), while the enable only clears the warning once its flush
+    // succeeded - so a flush-failed or enable-off abort in between warns.
     void append_pair_warning_() {
-        if (op_ == Op::WakePair && disable_sent_ && !enable_sent_) {
+        if (op_ == Op::WakePair && disable_attempted_ && !enable_flushed_) {
             line_ += " - the LMCHG enable was NOT sent and this pack may be"
                      " left with LMCHG disabled; press Wake Pair again or"
                      " use the physical button";
@@ -1877,6 +1888,16 @@ private:
         gate_.cooldown_active = true;
         tx_count_++;
         require_clean_();
+        // Foreign feedback P2: record the pair's frames BEFORE the flush
+        // verdict - the disable counts as transmitted the moment it hits
+        // the UART ("bytes may be on the wire" even on a failed flush), so
+        // the abort below warns; the enable clears the warning only on a
+        // confirmed flush (an unconfirmed enable leaves the pack possibly
+        // disabled - the same rule the enable's NoAck verdict applies).
+        if (op_ == Op::WakePair) {
+            if (seq_idx_ == 0) disable_attempted_ = true;
+            else if (ok) enable_flushed_ = true;
+        }
         if (!ok) {
             status_ = Status::Aborted;
             line_ = "aborted: uart flush failed sending " + what +
@@ -1886,10 +1907,6 @@ private:
             return;
         }
         wrote_any_ = true;
-        if (op_ == Op::WakePair) {
-            if (seq_idx_ == 0) disable_sent_ = true;
-            else enable_sent_ = true;
-        }
         status_ = Status::WaitAck;
         line_ = what + " sent (" + std::to_string(frame.size()) +
                 " chars) - waiting for the single-frame ack (150 ms window;"\
@@ -1975,6 +1992,11 @@ private:
             line_ = std::string(op_name_()) +
                     " - result unknown (enable switched off after TX); nothing" \
                     " further fires";
+            // Foreign feedback P2: Operate Enable off while the disable's
+            // ack is pending kills the pair's enable with it - the disable
+            // half may be battery-side, so the operator must get the
+            // recovery warning, not a bare "nothing further fires"
+            append_pair_warning_();
             end_tx_op_();
             return;
         }
@@ -2037,8 +2059,8 @@ private:
     uint8_t variant_ = 0;
     int seq_idx_ = 0;              // 0 = the first write frame, 1 = the enable
     bool wrote_any_ = false;
-    bool disable_sent_ = false;    // the wake pair's disable left our UART
-    bool enable_sent_ = false;     // the wake pair's enable left our UART
+    bool disable_attempted_ = false;  // the wake pair's disable reached the UART
+    bool enable_flushed_ = false;     // the wake pair's enable flush CONFIRMED ok
     Status status_ = Status::Idle;
     uint32_t armed_at_ms_ = 0;
     uint32_t probe_tx_ms_ = 0;

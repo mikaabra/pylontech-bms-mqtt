@@ -9,8 +9,12 @@
 //     frame family whose CHK is NOT the computed complement function
 //   - the fail-closed chain: no probe answer -> the write never fires;
 //     a foreign presence probe mid-sequence -> abort before any unsent
-//     frame; pack 00 / out-of-range refused; the wake pair refuses
-//     old-gen targets (no captured old-gen disable exists)
+//     frame, including inside the wake pair's disable-WaitAck (the write
+//     is unaddressed, the probe latches the target - feedback P1); every
+//     abort after the disable attempt (flush failure, enable-off) carries
+//     the LMCHG recovery warning, and a flush-confirmed enable clears it
+//     (feedback P2); pack 00 / out-of-range refused; the wake pair
+//     refuses old-gen targets (no captured old-gen disable exists)
 //   - sequencing: probe -> answer -> write, with the cross-op 4 s
 //     cooldown waived ONLY inside one press's sequence and every frame
 //     still waiting on a fresh clean master pair + kTeleIntraGapMs
@@ -61,6 +65,13 @@ static void check_line_has(const std::string& line, const char* needle, const ch
     if (line.find(needle) == std::string::npos) {
         failures++;
         printf("FAIL: %s - line lacks '%s': %s\n", what, needle, line.c_str());
+    }
+}
+
+static void check_line_lacks(const std::string& line, const char* needle, const char* what) {
+    if (line.find(needle) != std::string::npos) {
+        failures++;
+        printf("FAIL: %s - line should not contain '%s': %s\n", what, needle, line.c_str());
     }
 }
 
@@ -612,6 +623,178 @@ static void test_half_pair_warning() {
     check(h.bus.tx_log.size() == 2, "probe + disable only - no enable was sent");
 }
 
+// ---- 16. foreign probe inside the disable's WaitAck (feedback P1) -------------
+// The write carries no target address - the probe latches it. A foreign
+// probe arriving while OUR disable's ack is pending must abort before the
+// enable: firing it anyway would enable the WRONG pack (through the
+// foreign probe's latch) and leave ours LMCHG-disabled. The enable's own
+// WaitAck is the negative control: every frame already out, no abort.
+
+static void test_foreign_probe_in_disable_waitack() {
+    Harness h;
+    uint32_t pair_end = establish_cadence(h, 1500000);
+    check(h.t.request_wake_pair(4, pair_end + 30), "wake arm accepted");
+    h.t.tick(pair_end + 170);
+    check(h.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
+    send(h.c, probe_answer_frame("4A473234"), pair_end + 170 + 60);
+    check(h.t.status() == TeleOpController::Status::WaitWindow, "answer accepted");
+    pair_at(h, 4, pair_end + 170 + 300);
+    h.t.tick(pair_end + 170 + 470);
+    check(h.t.status() == TeleOpController::Status::WaitAck, "disable fired");
+    uint32_t disable_tx = pair_end + 640;
+    check(h.bus.tx_log.size() == 2, "probe + disable out");
+
+    // someone else probes pack 01 inside our ack window
+    std::string other_body = "8000D5C9E00201";
+    send(h.c, "~" + other_body + rs485_calc_chksum(other_body) + "\r", disable_tx + 60);
+    check(h.t.status() == TeleOpController::Status::Aborted,
+          "foreign probe in the disable's WaitAck aborts the pair");
+    check_line_has(h.t.status_line(), "re-latched", "abort line");
+    check_line_has(h.t.status_line(), "LMCHG enable was NOT sent",
+                   "abort names the unsent enable");
+    check_line_has(h.t.status_line(), "left with LMCHG disabled",
+                   "abort names the hazard: ours may stay disabled");
+    check(h.bus.tx_log.size() == 2,
+          "no enable fired through the foreign probe's latch");
+    // terminal, and it stays terminal through a perfect window
+    pair_at(h, 2, disable_tx + 300);
+    h.t.tick(disable_tx + 500);
+    check(h.t.status() == TeleOpController::Status::Aborted && h.bus.tx_log.size() == 2,
+          "terminal Aborted: nothing more fires this press");
+}
+
+static void test_foreign_probe_in_enable_waitack_does_not_abort() {
+    Harness h;
+    uint32_t pair_end = establish_cadence(h, 1550000);
+    check(h.t.request_wake_pair(4, pair_end + 30), "wake arm accepted");
+    h.t.tick(pair_end + 170);
+    send(h.c, probe_answer_frame("4A473234"), pair_end + 170 + 60);
+    pair_at(h, 4, pair_end + 170 + 300);
+    h.t.tick(pair_end + 170 + 470);
+    uint32_t disable_tx = pair_end + 640;
+    bare_ack_at(h.c, disable_tx + 100);
+    pair_at(h, 3, disable_tx + 1240);
+    h.t.tick(disable_tx + 1410);
+    check(h.t.status() == TeleOpController::Status::WaitWindow, "enable window armed");
+    h.t.tick(disable_tx + 1420);
+    check(h.t.status() == TeleOpController::Status::WaitAck, "enable fired");
+    uint32_t enable_tx = disable_tx + 1420;
+
+    // the enable is already out - a foreign probe has nothing left to
+    // redirect; the sequence must run to its verdict untouched
+    std::string other_body = "8000D5C9E00201";
+    send(h.c, "~" + other_body + rs485_calc_chksum(other_body) + "\r", enable_tx + 60);
+    check(h.t.status() == TeleOpController::Status::WaitAck,
+          "foreign probe in the enable's WaitAck: no unsent frame, no abort");
+    bare_ack_at(h.c, enable_tx + 110);
+    check(h.t.status() == TeleOpController::Status::Done,
+          "pair completes normally past the late-arriving foreign probe");
+    check_line_has(h.t.status_line(), "wake pair complete", "done line");
+}
+
+// ---- 17. flush-fail aborts carry the pair warning (feedback P2, path A) --------
+// The disable counts as transmitted the moment it reached the UART "bytes
+// may be on the wire" - a failed flush must still warn. A flush-failed
+// enable leaves the pair unconfirmed the same way its NoAck does: warn.
+
+static void test_flush_failed_disable_still_warns() {
+    Harness h;
+    uint32_t pair_end = establish_cadence(h, 1600000);
+    check(h.t.request_wake_pair(4, pair_end + 30), "wake arm accepted");
+    h.t.tick(pair_end + 170);
+    check(h.t.status() == TeleOpController::Status::WaitProbe, "probe fired");
+    send(h.c, probe_answer_frame("4A473234"), pair_end + 170 + 60);
+    check(h.t.status() == TeleOpController::Status::WaitWindow, "answer accepted");
+
+    h.bus.tx_ok = false;  // the disable's flush will fail
+    pair_at(h, 4, pair_end + 170 + 300);
+    h.t.tick(pair_end + 170 + 470);
+    check(h.t.status() == TeleOpController::Status::Aborted, "flush failure aborts");
+    check_line_has(h.t.status_line(), "uart flush failed sending LMCHG disable",
+                   "flush-fail line names the frame");
+    check_line_has(h.t.status_line(), "LMCHG enable was NOT sent",
+                   "flush-failed disable still warns the operator");
+    check_line_has(h.t.status_line(), "physical button", "recovery spelled out");
+}
+
+static void test_flush_failed_enable_warns() {
+    Harness h;
+    uint32_t pair_end = establish_cadence(h, 1650000);
+    check(h.t.request_wake_pair(4, pair_end + 30), "wake arm accepted");
+    h.t.tick(pair_end + 170);
+    send(h.c, probe_answer_frame("4A473234"), pair_end + 170 + 60);
+    pair_at(h, 4, pair_end + 170 + 300);
+    h.t.tick(pair_end + 170 + 470);
+    uint32_t disable_tx = pair_end + 640;
+    bare_ack_at(h.c, disable_tx + 100);
+    check(h.t.status() == TeleOpController::Status::Settle, "disable acked, settling");
+
+    h.bus.tx_ok = false;  // the enable's flush will fail
+    pair_at(h, 3, disable_tx + 1240);
+    h.t.tick(disable_tx + 1410);
+    check(h.t.status() == TeleOpController::Status::WaitWindow, "enable window armed");
+    h.t.tick(disable_tx + 1420);
+    check(h.t.status() == TeleOpController::Status::Aborted,
+          "enable flush failure aborts");
+    check_line_has(h.t.status_line(), "uart flush failed sending LMCHG enable",
+                   "flush-fail line names the frame");
+    check_line_has(h.t.status_line(), "left with LMCHG disabled",
+                   "unconfirmed enable warns like its NoAck does");
+}
+
+// ---- 18. enable-off abort warning, exactly through the unsent enable (P2 B) ----
+// Operate Enable switched off while the DISABLE's ack is pending kills the
+// pair's enable with it - the warning must fire (the disable may be
+// battery-side). The same switch during the ENABLE's WaitAck must NOT
+// warn: both frames are out, only the result is unknown.
+
+static void test_enable_off_in_disable_waitack_warns() {
+    Harness h;
+    uint32_t pair_end = establish_cadence(h, 1700000);
+    check(h.t.request_wake_pair(4, pair_end + 30), "wake arm accepted");
+    h.t.tick(pair_end + 170);
+    send(h.c, probe_answer_frame("4A473234"), pair_end + 170 + 60);
+    pair_at(h, 4, pair_end + 170 + 300);
+    h.t.tick(pair_end + 170 + 470);
+    check(h.t.status() == TeleOpController::Status::WaitAck, "disable fired");
+    uint32_t disable_tx = pair_end + 640;
+
+    h.bus.enable = false;  // operator flips Operate Enable off mid-wait
+    h.t.tick(disable_tx + 160);
+    check(h.t.status() == TeleOpController::Status::Aborted, "enable-off aborts");
+    check_line_has(h.t.status_line(), "result unknown (enable switched off after TX)",
+                   "enable-off line");
+    check_line_has(h.t.status_line(), "LMCHG enable was NOT sent",
+                   "enable-off during the disable's wait warns the operator");
+    check_line_has(h.t.status_line(), "left with LMCHG disabled", "hazard named");
+}
+
+static void test_enable_off_in_enable_waitack_does_not_warn() {
+    Harness h;
+    uint32_t pair_end = establish_cadence(h, 1750000);
+    check(h.t.request_wake_pair(4, pair_end + 30), "wake arm accepted");
+    h.t.tick(pair_end + 170);
+    send(h.c, probe_answer_frame("4A473234"), pair_end + 170 + 60);
+    pair_at(h, 4, pair_end + 170 + 300);
+    h.t.tick(pair_end + 170 + 470);
+    uint32_t disable_tx = pair_end + 640;
+    bare_ack_at(h.c, disable_tx + 100);
+    pair_at(h, 3, disable_tx + 1240);
+    h.t.tick(disable_tx + 1410);
+    check(h.t.status() == TeleOpController::Status::WaitWindow, "enable window armed");
+    h.t.tick(disable_tx + 1420);
+    check(h.t.status() == TeleOpController::Status::WaitAck, "enable fired");
+    uint32_t enable_tx = disable_tx + 1420;
+
+    h.bus.enable = false;
+    h.t.tick(enable_tx + 20);
+    check(h.t.status() == TeleOpController::Status::Aborted, "enable-off aborts");
+    check_line_has(h.t.status_line(), "result unknown (enable switched off after TX)",
+                   "enable-off line");
+    check_line_lacks(h.t.status_line(), "LMCHG enable was NOT sent",
+                     "enable confirmed out: no half-pair warning");
+}
+
 // ---- 13. the reviewer's acceptance bound, pinned -------------------------------
 // Wire-math (re-review): probe ~20 ms + turnaround ~200-230 ms + ~104 ms
 // answer at 9600 + batch rounding = a genuine answer lands ~+330-370 ms.
@@ -723,6 +906,12 @@ int main() {
     test_autooff_predicate();
     test_probe_answer_not_consumed_when_no_window();
     test_half_pair_warning();
+    test_foreign_probe_in_disable_waitack();
+    test_foreign_probe_in_enable_waitack_does_not_abort();
+    test_flush_failed_disable_still_warns();
+    test_flush_failed_enable_warns();
+    test_enable_off_in_disable_waitack_warns();
+    test_enable_off_in_enable_waitack_does_not_warn();
     test_answer_delay_bound();
     test_content_gate_rejects_telemetry_in_disguise();
     test_stray_frame_recorded_not_argued();
