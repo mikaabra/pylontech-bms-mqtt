@@ -21,6 +21,7 @@
 #include <cmath>
 #include <string>
 #include "pylontech_protocol.h"
+#include "fixtures/pylontech_frame_fixtures.h"  // ANALOG_FULL/ALARM_FULL live here now
 
 static int failures = 0;
 
@@ -47,21 +48,6 @@ static void check_str(const std::string& got, const char* want, const char* what
 
 // ---------------------------------------------------------------- 0x42 ----
 
-// flags/batt, 10 cells (3200..3272 mV), 4 temps (20.8 / 0.0 / -10.0 / 23.2 C),
-// current -2.00 A (signed wrap), 134.31 V, 80.00 Ah remain, custom byte,
-// 200.00 Ah total, 100 cycles
-static const char* ANALOG_FULL =
-    "0001"
-    "0A"
-    "0C800C880C900C980CA00CA80CB00CB80CC00CC8"
-    "04"
-    "0B7B0AAB0A470B93"
-    "FF38"
-    "3477"
-    "1F40"
-    "44"
-    "4E20"
-    "0064";
 
 static void test_analog_full() {
     BatteryData out;
@@ -152,28 +138,6 @@ static void test_analog_bad_hex() {
 // ext: Balance On (0x01), voltage_status 0x2B, CW bytes 05/80 (cells 1,3,16),
 // mosfets 0x07 (all on), balancing bitmaps 55 (1,3,5,7) / AA (10,12,14,16),
 // final state byte 0x0B (Discharge,Charge,Full)
-static const char* ALARM_FULL =
-    "0001"
-    "10"
-    "00" "00" "02" "00" "01"
-    "00" "00" "00" "00" "00"
-    "00" "00" "00" "00" "00"
-    "00"
-    "04"
-    "00000000"
-    "02"
-    "01"
-    "00"
-    "01"
-    "000000"
-    "2B"
-    "00"
-    "05"
-    "80"
-    "07"
-    "55"
-    "AA"
-    "0B";
 
 static void test_alarm_full() {
     BatteryData out;

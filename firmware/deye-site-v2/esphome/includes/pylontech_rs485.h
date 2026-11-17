@@ -18,8 +18,8 @@ public:
         , num_batteries_(num_batteries)
         , pylontech_addr_(pylontech_addr)
         , device_status_topic_(device_status_topic)
-        , batteries_(num_batteries)
         , availability_((std::string(mqtt_prefix) + "/status").c_str())
+        , batteries_(num_batteries)
         , hyst_cell_voltages_(16 * num_batteries)
         , hyst_batt_temps_(6 * num_batteries)
         , hyst_batt_cell_min_(num_batteries)
@@ -107,21 +107,27 @@ public:
                     if (tilde != std::string::npos) response = response.substr(tilde);
 
                     int batt = current_batt_;
-                    ESP_LOGD("rs485", "RX analog len=%d", response.length());
+                    ESP_LOGD("rs485", "RX analog len=%d", (int)response.length());
 
                     std::string error = rs485_validate_response(response, pylontech_addr_);
                     if (!error.empty()) {
                         ESP_LOGW("rs485", "Batt %d analog poll failed: %s", batt, error.c_str());
                         handle_analog_failure(batt);
                     } else {
-                        last_analog_rx_ = now;
-                        has_analog_rx_ = true;
-                        availability_.mark_online(esphome::mqtt::global_mqtt_client);
-
+                        // Gateway feedback P2: freshness and the online mark
+                        // belong to the DECODED branch only - a checksum-valid
+                        // but unusable response (garbage data, dataless frame)
+                        // must not reset the 90 s stale clock, or repeated
+                        // garbage keeps a dead channel "online" forever.
                         if (response.length() > 18) {
                             std::string data = response.substr(13, response.length() - 13 - 5);
                             BatteryData scratch;
                             Rs485AnalogResult pr = rs485_parse_analog_info(data, scratch);
+                            if (pr.status == Rs485AnalogStatus::Ok) {
+                                last_analog_rx_ = now;
+                                has_analog_rx_ = true;
+                                availability_.mark_online(esphome::mqtt::global_mqtt_client);
+                            }
                             switch (pr.status) {
                             case Rs485AnalogStatus::Ok: {
                                 memcpy(batteries_[batt].cell_voltages, scratch.cell_voltages, sizeof(scratch.cell_voltages));
@@ -193,7 +199,7 @@ public:
 
             if (now - tx_time_ > 1500) {
                 int batt = current_batt_;
-                ESP_LOGW("rs485", "Batt %d analog timeout (rx=%d bytes)", batt, response_buf_.length());
+                ESP_LOGW("rs485", "Batt %d analog timeout (rx=%d bytes)", batt, (int)response_buf_.length());
                 handle_analog_failure(batt);
                 current_batt_ = (batt + 1) % num_batteries_;
                 last_analog_poll_ = now;
@@ -252,7 +258,7 @@ public:
                     if (tilde != std::string::npos) response = response.substr(tilde);
 
                     int batt = alarm_batt_;
-                    ESP_LOGD("rs485", "RX alarm len=%d", response.length());
+                    ESP_LOGD("rs485", "RX alarm len=%d", (int)response.length());
 
                     std::string error = rs485_validate_response(response, pylontech_addr_);
                     if (!error.empty()) {
@@ -261,23 +267,28 @@ public:
                     } else {
                         std::string data = response.substr(13, response.length() - 13 - 5);
                         if (data.length() < 40) {
-                            ESP_LOGW("rs485", "Batt %d alarm response too short: %d bytes data", batt, data.length());
+                            ESP_LOGW("rs485", "Batt %d alarm response too short: %d bytes data", batt, (int)data.length());
                             handle_alarm_failure(batt);
-                        } else {
+                        } else if (parse_alarm_data(batt, data)) {
+                            // has_alarm marks VALID data present: set only on
+                            // a fully parsed response. A parse failure below
+                            // (gateway feedback P2) preserves the previous
+                            // valid alarm set - ONE bad response must not
+                            // drop the battery from stack totals; the explicit
+                            // stale transition is handle_alarm_failure's
+                            // 10-strike poll alarm, same rule as analog.
                             batteries_[batt].has_alarm = true;
                             has_any_alarm_ = true;
-                            if (!parse_alarm_data(batt, data)) {
-                                ESP_LOGW("rs485", "Batt %d alarm hex parse failure", batt);
-                                batteries_[batt].has_alarm = false;
-                                handle_alarm_failure(batt);
-                            } else if (batteries_[batt].alarm_poll_failures > 0 || batteries_[batt].alarm_poll_alarm) {
-                                // reset only after a fully parsed response (see analog path)
+                            if (batteries_[batt].alarm_poll_failures > 0 || batteries_[batt].alarm_poll_alarm) {
                                 batteries_[batt].alarm_poll_failures = 0;
                                 if (batteries_[batt].alarm_poll_alarm) {
                                     batteries_[batt].alarm_poll_alarm = false;
                                     publish_alarm_poll_alarm(batt, false);
                                 }
                             }
+                        } else {
+                            ESP_LOGW("rs485", "Batt %d alarm hex parse failure", batt);
+                            handle_alarm_failure(batt);
                         }
                     }
 

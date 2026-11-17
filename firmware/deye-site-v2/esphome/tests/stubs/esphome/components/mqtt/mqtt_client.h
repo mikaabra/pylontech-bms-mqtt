@@ -5,14 +5,16 @@
 
 inline bool g_pub_accept = true;
 inline std::vector<std::string> g_pub_messages;
+inline std::vector<std::string> g_pub_topics;
 
 namespace esphome {
 namespace mqtt {
 
 struct MQTTClientComponent {
   bool publish(const std::string &topic, const std::string &payload, uint8_t qos = 0, bool retain = false) {
-    (void) topic; (void) qos; (void) retain;
+    (void) qos; (void) retain;
     if (!g_pub_accept) return false;
+    g_pub_topics.push_back(topic);
     g_pub_messages.push_back(payload);
     return true;
   }
