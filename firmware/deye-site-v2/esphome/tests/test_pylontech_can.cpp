@@ -50,6 +50,17 @@ static bool seen_topic_payload(const char* suffix, const char* payload) {
     return false;
 }
 
+static int count_topic_payload(const char* suffix, const char* payload) {
+    size_t n = strlen(suffix);
+    int count = 0;
+    for (size_t i = 0; i < g_pub_topics.size(); i++) {
+        if (g_pub_topics[i].size() >= n &&
+            g_pub_topics[i].compare(g_pub_topics[i].size() - n, n, suffix) == 0 &&
+            g_pub_messages[i] == payload) count++;
+    }
+    return count;
+}
+
 static void reset_capture() {
     g_pub_messages.clear();
     g_pub_topics.clear();
@@ -177,10 +188,76 @@ static void test_half_invalid_extreme_publishes_nothing() {
           "no zero delta was ever published");
 }
 
+// ---- 4. a partially-landed alarm group repairs the wire (review #112 follow-up)
+// The reproduced sequence: OV ON fully published and committed; OV clears
+// and its OFF lands but later group members are refused (partial group);
+// OV returns - it now MATCHES the last committed group, so change
+// detection sees nothing and HA keeps showing an ACTIVE alarm as OFF.
+// The dirty latch retries the group at every opportunity until a full
+// retry succeeds, regardless of the value's subsequent travels.
+
+static void test_partial_alarm_group_repairs_the_wire() {
+    reset_capture();
+    PylontechCAN can("can/test", 1, "can/test/status");
+
+    // 1. overvolt ON: flags + the full alarm group land and commit
+    g_ms = 1000;
+    std::vector<uint8_t> f(8, 0);
+    f[0] = 0x02;   // pack overvolt protect
+    f[4] = 5;      // module count
+    f[7] = 0;
+    can.handle_0x359(f);
+    can.publish_diagnostics();
+    can.publish_diagnostics();   // second pass lands the group (first had state!=0 too)
+    check(seen_topic_payload("/can/prot_overvolt", "1"),
+          "OV ON fully landed and committed");
+
+    // 2. OV clears - partial acceptance: accept the availability stamp +
+    // the group's FIRST member (the OV OFF), refuse every later member
+    reset_capture();
+    f[0] = 0x00;
+    can.handle_0x359(f);
+    g_ms = 5000;
+    g_pub_refuse_after = g_pub_total + 2;   // one heartbeat stamp, then the OV OFF
+    can.publish_diagnostics();
+    g_pub_refuse_after = -1;
+    check(seen_topic_payload("/can/prot_overvolt", "0"),
+          "the OFF landed (first group member accepted)");
+    check(!seen_topic_payload("/can/warn_high_voltage", "0"),
+          "later group members were refused - partial group");
+    check(count_topic_payload("/can/prot_overvolt", "1") == 0,
+          "no full group landed during the partial attempt");
+
+    // 3. overvolt returns: the state now MATCHES the committed group -
+    // without the dirty latch nothing would publish until the heartbeat
+    reset_capture();
+    f[0] = 0x02;
+    can.handle_0x359(f);
+    g_ms = 9000;                  // far from any 60 s heartbeat
+    can.publish_diagnostics();
+    check(seen_topic_payload("/can/prot_overvolt", "1"),
+          "THE PIN: the wire is repaired - the ON correction re-lands"
+          " without waiting for the heartbeat");
+    check(seen_topic_payload("/can/warn_high_voltage", "0"),
+          "the refused group members land with the repair");
+    check(count_topic_payload("/can/prot_overvolt", "1") == 1,
+          "the corrected group landed exactly once");
+
+    // repair committed: a further pass stays quiet
+    reset_capture();
+    g_ms = 15000;
+    can.publish_diagnostics();
+    check(count_topic_payload("/can/prot_overvolt", "1") == 0,
+          "after the full repair the committed group stays quiet");
+    reset_capture();
+    g_pub_total = 0;
+}
+
 int main() {
     test_alarm_update_retries_after_refusal();
     test_refused_heartbeat_does_not_advance();
     test_half_invalid_extreme_publishes_nothing();
+    test_partial_alarm_group_repairs_the_wire();
     if (failures == 0)
         printf("pylontech_can oracle: all scenarios passed\n");
     else

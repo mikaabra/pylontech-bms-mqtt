@@ -46,7 +46,8 @@ public:
                            (fabs(v_charge_max - hys_v_charge_max_.last_val) >= 0.1f) ||
                            (fabs(v_low_lim - hys_v_low_.last_val) >= 0.1f) ||
                            (fabs(i_charge_lim - hys_i_charge_.last_val) >= 0.1f) ||
-                           (fabs(i_dis_lim - hys_i_discharge_.last_val) >= 0.1f);
+                           (fabs(i_dis_lim - hys_i_discharge_.last_val) >= 0.1f) ||
+                           limits_dirty_;
 
             if (changed || heartbeat) {
                 char val[16];
@@ -73,6 +74,9 @@ public:
                     hys_i_discharge_.last_val = i_dis_lim;
                     hys_i_discharge_.last_publish = now;
                     hys_i_discharge_.first = false;
+                    limits_dirty_ = false;
+                } else {
+                    limits_dirty_ = true;
                 }
             }
         }
@@ -239,7 +243,8 @@ public:
         if (tmin >= -40.0f && tmax <= 100.0f) {
             bool temp_changed = hys_temp_min_.first ||
                                 (fabs(tmin - hys_temp_min_.last_val) >= 0.5f) ||
-                                (fabs(tmax - hys_temp_max_.last_val) >= 0.5f);
+                                (fabs(tmax - hys_temp_max_.last_val) >= 0.5f) ||
+                                temps_dirty_;
             if (temp_changed || temp_heartbeat) {
                 snprintf(val, sizeof(val), "%.1f", tmin);
                 bool ok_t = publish_topic("/ext/temp_min", val);
@@ -251,6 +256,9 @@ public:
                     hys_temp_max_.last_val = tmax;
                     hys_temp_max_.first = false;
                     last_temp_publish_ = now;
+                    temps_dirty_ = false;
+                } else {
+                    temps_dirty_ = true;
                 }
             }
         }
@@ -271,7 +279,8 @@ public:
 
             bool cell_changed = hys_cell_v_min_.first ||
                                 (fabs(vmin - hys_cell_v_min_.last_val) >= 0.005f) ||
-                                (fabs(vmax - hys_cell_v_max_.last_val) >= 0.005f);
+                                (fabs(vmax - hys_cell_v_max_.last_val) >= 0.005f) ||
+                                cells_dirty_;
             if (cell_changed || cell_heartbeat) {
                 float delta = vmax - vmin;
                 snprintf(val, sizeof(val), "%.3f", vmin);
@@ -286,6 +295,9 @@ public:
                     hys_cell_v_max_.last_val = vmax;
                     hys_cell_v_max_.first = false;
                     last_cell_publish_ = now;
+                    cells_dirty_ = false;
+                } else {
+                    cells_dirty_ = true;
                 }
             }
         }
@@ -330,18 +342,22 @@ public:
             if (discharge_enabled_) charge_state |= 0x02;
             if (force_charge_request_) charge_state |= 0x04;
 
-            if (charge_state != last_charge_state_ || (now - last_charge_publish_ >= 60000)) {
+            if (charge_state != last_charge_state_ || (now - last_charge_publish_ >= 60000) ||
+                charge_dirty_) {
                 bool ok = publish_mqtt_bool("/can/charge_enabled", charge_enabled_);
                 ok = publish_mqtt_bool("/can/discharge_enabled", discharge_enabled_) && ok;
                 ok = publish_mqtt_bool("/can/force_charge", force_charge_request_) && ok;
                 if (ok) {
                     last_charge_state_ = charge_state;
                     last_charge_publish_ = now;
+                    charge_dirty_ = false;
+                } else {
+                    charge_dirty_ = true;
                 }
             }
         }
 
-        if (now - last_diag_publish_ >= 60000) {
+        if (now - last_diag_publish_ >= 60000 || diag_dirty_) {
             bool ok = true;
             snprintf(payload, sizeof(payload), "%d", frame_count_);
             ok = publish_grouped(ok, "/diag/frame_count", payload);
@@ -349,7 +365,12 @@ public:
             ok = publish_grouped(ok, "/diag/error_count", payload);
             snprintf(payload, sizeof(payload), "%lu", (unsigned long)esp_get_free_heap_size());
             ok = publish_grouped(ok, "/diag/free_heap", payload);
-            if (ok) last_diag_publish_ = now;
+            if (ok) {
+                last_diag_publish_ = now;
+                diag_dirty_ = false;
+            } else {
+                diag_dirty_ = true;
+            }
         }
 
         if (!received_0x359_) return;
@@ -375,7 +396,7 @@ public:
         bool state_changed = (current_state != last_decoded_state_);
         bool heartbeat = (now - last_decoded_publish_ >= 60000);
 
-        if (state_changed || heartbeat) {
+        if (state_changed || heartbeat || alarms_dirty_) {
             bool ok = true;
             ok = publish_mqtt_bool("/can/prot_overvolt", prot_overvolt_) && ok;
             ok = publish_mqtt_bool("/can/prot_undervolt", prot_undervolt_) && ok;
@@ -404,6 +425,13 @@ public:
             if (ok) {
                 last_decoded_state_ = current_state;
                 last_decoded_publish_ = now;
+                alarms_dirty_ = false;
+            } else {
+                // a partial group leaves the wire disagreeing with the
+                // committed state (an OFF that landed, an ON that did not):
+                // stay dirty so the next pass repairs the wire regardless
+                // of what the observed value does next
+                alarms_dirty_ = true;
             }
         }
     }
@@ -719,6 +747,23 @@ private:
     uint32_t last_decoded_publish_ = 0;
     uint32_t last_diag_publish_ = 0;
 
+    // Partial-group latches (review follow-up on #112): when some members
+    // of a publish group land and others are refused, the WIRE disagrees
+    // with the last fully committed group; if the observed value then
+    // returns to the committed one, neither change-detection nor the
+    // delta gates would ever repair it - the repro: overvolt OFF landed,
+    // overvolt returned, its ON correction waited for the heartbeat while
+    // HA showed an active alarm as OFF. A group that failed (fully or
+    // partially) stays dirty and re-attempts at every opportunity until a
+    // COMPLETE retry succeeds. Single-topic publishes have no partial
+    // landing (refused singles never touch the wire) and need no latch.
+    bool limits_dirty_ = false;
+    bool temps_dirty_ = false;
+    bool cells_dirty_ = false;
+    bool charge_dirty_ = false;
+    bool diag_dirty_ = false;
+    bool alarms_dirty_ = false;
+
     // Commit-on-acceptance (gateway feedback P2, ported from the RS485
     // handler's #53 contract): async pool semantics make false =
     // refused/discarded, so callers must gate every hysteresis state
@@ -755,6 +800,12 @@ private:
         last_charge_publish_ = 0;
         last_decoded_state_ = 0;
         last_decoded_publish_ = 0;
+        limits_dirty_ = false;
+        temps_dirty_ = false;
+        cells_dirty_ = false;
+        charge_dirty_ = false;
+        diag_dirty_ = false;
+        alarms_dirty_ = false;
     }
 
     bool publish_mqtt_bool(const char* suffix, bool value) {
