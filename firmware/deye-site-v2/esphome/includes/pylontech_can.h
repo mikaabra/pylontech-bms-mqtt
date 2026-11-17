@@ -50,27 +50,30 @@ public:
 
             if (changed || heartbeat) {
                 char val[16];
+                bool ok = true;
                 snprintf(val, sizeof(val), "%.1f", v_charge_max);
-                publish_topic("/limit/v_charge_max", val);
+                ok = publish_grouped(ok, "/limit/v_charge_max", val);
                 snprintf(val, sizeof(val), "%.1f", v_low_lim);
-                publish_topic("/limit/v_low", val);
+                ok = publish_grouped(ok, "/limit/v_low", val);
                 snprintf(val, sizeof(val), "%.1f", i_charge_lim);
-                publish_topic("/limit/i_charge", val);
+                ok = publish_grouped(ok, "/limit/i_charge", val);
                 snprintf(val, sizeof(val), "%.1f", i_dis_lim);
-                publish_topic("/limit/i_discharge", val);
+                ok = publish_grouped(ok, "/limit/i_discharge", val);
 
-                hys_v_charge_max_.last_val = v_charge_max;
-                hys_v_charge_max_.last_publish = now;
-                hys_v_charge_max_.first = false;
-                hys_v_low_.last_val = v_low_lim;
-                hys_v_low_.last_publish = now;
-                hys_v_low_.first = false;
-                hys_i_charge_.last_val = i_charge_lim;
-                hys_i_charge_.last_publish = now;
-                hys_i_charge_.first = false;
-                hys_i_discharge_.last_val = i_dis_lim;
-                hys_i_discharge_.last_publish = now;
-                hys_i_discharge_.first = false;
+                if (ok) {
+                    hys_v_charge_max_.last_val = v_charge_max;
+                    hys_v_charge_max_.last_publish = now;
+                    hys_v_charge_max_.first = false;
+                    hys_v_low_.last_val = v_low_lim;
+                    hys_v_low_.last_publish = now;
+                    hys_v_low_.first = false;
+                    hys_i_charge_.last_val = i_charge_lim;
+                    hys_i_charge_.last_publish = now;
+                    hys_i_charge_.first = false;
+                    hys_i_discharge_.last_val = i_dis_lim;
+                    hys_i_discharge_.last_publish = now;
+                    hys_i_discharge_.first = false;
+                }
             }
         }
     }
@@ -91,22 +94,27 @@ public:
         if (soc <= 100 && soh <= 100) {
             uint32_t now = millis();
             bool heartbeat = (now - last_soc_publish_ >= 60000);
+            bool ok = true;
 
             if (hys_soc_.first || abs((int)soc - (int)hys_soc_.last_val) >= 1 || heartbeat) {
                 char val[8];
                 snprintf(val, sizeof(val), "%d", soc);
-                publish_topic("/soc", val);
-                hys_soc_.last_val = soc;
-                hys_soc_.first = false;
+                ok = publish_grouped(ok, "/soc", val);
+                if (ok) {
+                    hys_soc_.last_val = soc;
+                    hys_soc_.first = false;
+                }
             }
             if (hys_soh_.first || abs((int)soh - (int)hys_soh_.last_val) >= 1 || heartbeat) {
                 char val[8];
                 snprintf(val, sizeof(val), "%d", soh);
-                publish_topic("/soh", val);
-                hys_soh_.last_val = soh;
-                hys_soh_.first = false;
+                ok = publish_grouped(ok, "/soh", val);
+                if (ok) {
+                    hys_soh_.last_val = soh;
+                    hys_soh_.first = false;
+                }
             }
-            if (heartbeat) {
+            if (heartbeat && ok) {
                 last_soc_publish_ = now;
             }
         }
@@ -164,9 +172,10 @@ public:
         if (changed || heartbeat) {
             char buf[32];
             snprintf(buf, sizeof(buf), "0x%016llX", flags);
-            publish_topic("/flags", buf);
-            last_flags_value_ = flags;
-            last_flags_publish_ = now;
+            if (publish_topic("/flags", buf)) {
+                last_flags_value_ = flags;
+                last_flags_publish_ = now;
+            }
         }
     }
 
@@ -233,14 +242,16 @@ public:
                                 (fabs(tmax - hys_temp_max_.last_val) >= 0.5f);
             if (temp_changed || temp_heartbeat) {
                 snprintf(val, sizeof(val), "%.1f", tmin);
-                publish_topic("/ext/temp_min", val);
+                bool ok_t = publish_topic("/ext/temp_min", val);
                 snprintf(val, sizeof(val), "%.1f", tmax);
-                publish_topic("/ext/temp_max", val);
-                hys_temp_min_.last_val = tmin;
-                hys_temp_min_.first = false;
-                hys_temp_max_.last_val = tmax;
-                hys_temp_max_.first = false;
-                last_temp_publish_ = now;
+                ok_t = publish_topic("/ext/temp_max", val) && ok_t;
+                if (ok_t) {
+                    hys_temp_min_.last_val = tmin;
+                    hys_temp_min_.first = false;
+                    hys_temp_max_.last_val = tmax;
+                    hys_temp_max_.first = false;
+                    last_temp_publish_ = now;
+                }
             }
         }
 
@@ -248,32 +259,34 @@ public:
         bool v1_valid = (v1 >= 2.0f && v1 <= 4.5f);
         bool v2_valid = (v2 >= 2.0f && v2 <= 4.5f);
 
+        // Gateway feedback P2: a lone surviving extreme must NOT be copied
+        // into both minimum and maximum - that manufactured a zero delta
+        // and published an apparently-balanced battery. The pair publishes
+        // only when BOTH extremes validate (a half-invalid frame is a
+        // broken sensor read, not a balanced pack); the last committed
+        // values stay until a clean frame arrives.
         if (v1_valid && v2_valid) {
             vmin = (v1 < v2) ? v1 : v2;
             vmax = (v1 > v2) ? v1 : v2;
-        } else if (v1_valid) {
-            vmin = vmax = v1;
-        } else if (v2_valid) {
-            vmin = vmax = v2;
-        }
 
-        if (vmin > 0) {
             bool cell_changed = hys_cell_v_min_.first ||
                                 (fabs(vmin - hys_cell_v_min_.last_val) >= 0.005f) ||
                                 (fabs(vmax - hys_cell_v_max_.last_val) >= 0.005f);
             if (cell_changed || cell_heartbeat) {
                 float delta = vmax - vmin;
                 snprintf(val, sizeof(val), "%.3f", vmin);
-                publish_topic("/ext/cell_v_min", val);
+                bool ok_c = publish_topic("/ext/cell_v_min", val);
                 snprintf(val, sizeof(val), "%.3f", vmax);
-                publish_topic("/ext/cell_v_max", val);
+                ok_c = publish_topic("/ext/cell_v_max", val) && ok_c;
                 snprintf(val, sizeof(val), "%.3f", delta);
-                publish_topic("/ext/cell_v_delta", val);
-                hys_cell_v_min_.last_val = vmin;
-                hys_cell_v_min_.first = false;
-                hys_cell_v_max_.last_val = vmax;
-                hys_cell_v_max_.first = false;
-                last_cell_publish_ = now;
+                ok_c = publish_topic("/ext/cell_v_delta", val) && ok_c;
+                if (ok_c) {
+                    hys_cell_v_min_.last_val = vmin;
+                    hys_cell_v_min_.first = false;
+                    hys_cell_v_max_.last_val = vmax;
+                    hys_cell_v_max_.first = false;
+                    last_cell_publish_ = now;
+                }
             }
         }
     }
@@ -318,22 +331,25 @@ public:
             if (force_charge_request_) charge_state |= 0x04;
 
             if (charge_state != last_charge_state_ || (now - last_charge_publish_ >= 60000)) {
-                publish_mqtt_bool("/can/charge_enabled", charge_enabled_);
-                publish_mqtt_bool("/can/discharge_enabled", discharge_enabled_);
-                publish_mqtt_bool("/can/force_charge", force_charge_request_);
-                last_charge_state_ = charge_state;
-                last_charge_publish_ = now;
+                bool ok = publish_mqtt_bool("/can/charge_enabled", charge_enabled_);
+                ok = publish_mqtt_bool("/can/discharge_enabled", discharge_enabled_) && ok;
+                ok = publish_mqtt_bool("/can/force_charge", force_charge_request_) && ok;
+                if (ok) {
+                    last_charge_state_ = charge_state;
+                    last_charge_publish_ = now;
+                }
             }
         }
 
         if (now - last_diag_publish_ >= 60000) {
+            bool ok = true;
             snprintf(payload, sizeof(payload), "%d", frame_count_);
-            publish_topic("/diag/frame_count", payload);
+            ok = publish_grouped(ok, "/diag/frame_count", payload);
             snprintf(payload, sizeof(payload), "%d", error_count_);
-            publish_topic("/diag/error_count", payload);
+            ok = publish_grouped(ok, "/diag/error_count", payload);
             snprintf(payload, sizeof(payload), "%lu", (unsigned long)esp_get_free_heap_size());
-            publish_topic("/diag/free_heap", payload);
-            last_diag_publish_ = now;
+            ok = publish_grouped(ok, "/diag/free_heap", payload);
+            if (ok) last_diag_publish_ = now;
         }
 
         if (!received_0x359_) return;
@@ -360,32 +376,35 @@ public:
         bool heartbeat = (now - last_decoded_publish_ >= 60000);
 
         if (state_changed || heartbeat) {
-            publish_mqtt_bool("/can/prot_overvolt", prot_overvolt_);
-            publish_mqtt_bool("/can/prot_undervolt", prot_undervolt_);
-            publish_mqtt_bool("/can/prot_overtemp", prot_overtemp_);
-            publish_mqtt_bool("/can/prot_undertemp", prot_undertemp_);
-            publish_mqtt_bool("/can/prot_discharge_overcurrent", prot_discharge_overcurrent_);
-            publish_mqtt_bool("/can/prot_charge_overcurrent", prot_charge_overcurrent_);
-            publish_mqtt_bool("/can/prot_system_error", prot_system_error_);
+            bool ok = true;
+            ok = publish_mqtt_bool("/can/prot_overvolt", prot_overvolt_) && ok;
+            ok = publish_mqtt_bool("/can/prot_undervolt", prot_undervolt_) && ok;
+            ok = publish_mqtt_bool("/can/prot_overtemp", prot_overtemp_) && ok;
+            ok = publish_mqtt_bool("/can/prot_undertemp", prot_undertemp_) && ok;
+            ok = publish_mqtt_bool("/can/prot_discharge_overcurrent", prot_discharge_overcurrent_) && ok;
+            ok = publish_mqtt_bool("/can/prot_charge_overcurrent", prot_charge_overcurrent_) && ok;
+            ok = publish_mqtt_bool("/can/prot_system_error", prot_system_error_) && ok;
 
-            publish_mqtt_bool("/can/warn_high_voltage", warn_high_voltage_);
-            publish_mqtt_bool("/can/warn_low_voltage", warn_low_voltage_);
-            publish_mqtt_bool("/can/warn_high_temp", warn_high_temp_);
-            publish_mqtt_bool("/can/warn_low_temp", warn_low_temp_);
-            publish_mqtt_bool("/can/warn_high_discharge_current", warn_high_discharge_current_);
-            publish_mqtt_bool("/can/warn_high_charge_current", warn_high_charge_current_);
-            publish_mqtt_bool("/can/warn_comms_fail", warn_comms_fail_);
+            ok = publish_mqtt_bool("/can/warn_high_voltage", warn_high_voltage_) && ok;
+            ok = publish_mqtt_bool("/can/warn_low_voltage", warn_low_voltage_) && ok;
+            ok = publish_mqtt_bool("/can/warn_high_temp", warn_high_temp_) && ok;
+            ok = publish_mqtt_bool("/can/warn_low_temp", warn_low_temp_) && ok;
+            ok = publish_mqtt_bool("/can/warn_high_discharge_current", warn_high_discharge_current_) && ok;
+            ok = publish_mqtt_bool("/can/warn_high_charge_current", warn_high_charge_current_) && ok;
+            ok = publish_mqtt_bool("/can/warn_comms_fail", warn_comms_fail_) && ok;
 
             snprintf(payload, sizeof(payload), "%d", module_count_);
-            publish_topic("/can/module_count", payload);
+            ok = publish_grouped(ok, "/can/module_count", payload);
             snprintf(payload, sizeof(payload), "%d", status_byte7_);
-            publish_topic("/can/status_byte7", payload);
+            ok = publish_grouped(ok, "/can/status_byte7", payload);
 
             std::string summary = compute_alarm_summary();
-            publish_topic("/can/alarm_summary", summary.c_str());
+            ok = publish_grouped(ok, "/can/alarm_summary", summary.c_str());
 
-            last_decoded_state_ = current_state;
-            last_decoded_publish_ = now;
+            if (ok) {
+                last_decoded_state_ = current_state;
+                last_decoded_publish_ = now;
+            }
         }
     }
 
@@ -700,12 +719,19 @@ private:
     uint32_t last_decoded_publish_ = 0;
     uint32_t last_diag_publish_ = 0;
 
-    void publish_topic(const char* suffix, const char* value) {
-        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return;
+    // Commit-on-acceptance (gateway feedback P2, ported from the RS485
+    // handler's #53 contract): async pool semantics make false =
+    // refused/discarded, so callers must gate every hysteresis state
+    // advance and timestamp on the acceptance result - a rejected value
+    // retries on the next frame, never silently deferred to a heartbeat
+    // boundary (up to 60 s with no update, the reproduced failure).
+    bool publish_topic(const char* suffix, const char* value) {
+        if (!esphome::mqtt::global_mqtt_client || !esphome::mqtt::global_mqtt_client->is_connected()) return false;
         bc_pub_begin();
-        esphome::mqtt::global_mqtt_client->publish(can_prefix_ + suffix, std::string(value));
+        bool sent = esphome::mqtt::global_mqtt_client->publish(can_prefix_ + suffix, std::string(value));
         bc_pub_end();
         can_pacer_.pace();
+        return sent;
     }
 
     void reset_value_hysteresis() {
@@ -731,8 +757,17 @@ private:
         last_decoded_publish_ = 0;
     }
 
-    void publish_mqtt_bool(const char* suffix, bool value) {
-        publish_topic(suffix, value ? "1" : "0");
+    bool publish_mqtt_bool(const char* suffix, bool value) {
+        return publish_topic(suffix, value ? "1" : "0");
+    }
+
+    // Group-commit helper: publish AND fold the result into ok_so_far.
+    // The publish is always evaluated (left operand); the caller commits
+    // its whole group only when every member accepted - a partial group
+    // re-publishes idempotently on retry (retained values, duplicate
+    // landing harmless), a partial commit would strand the refused tail.
+    bool publish_grouped(bool ok_so_far, const char* suffix, const char* value) {
+        return publish_topic(suffix, value) && ok_so_far;
     }
 
     std::string compute_alarm_summary() {

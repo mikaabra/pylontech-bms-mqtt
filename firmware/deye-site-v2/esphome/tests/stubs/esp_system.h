@@ -14,3 +14,8 @@ enum esp_reset_reason_t {
 };
 inline int g_reset_reason = ESP_RST_POWERON;
 inline int esp_reset_reason() { return g_reset_reason; }
+
+// ESP-IDF heap query used by the CAN diagnostic publisher; the host tests
+// do not care about the value, only that it compiles and is stable.
+inline uint32_t g_free_heap = 123456;
+inline uint32_t esp_get_free_heap_size() { return g_free_heap; }

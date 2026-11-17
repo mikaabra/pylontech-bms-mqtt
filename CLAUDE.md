@@ -61,17 +61,19 @@ Desktop oracle tests run directly with clang, no esphome toolchain needed:
 
 ```bash
 cd firmware/deye-site-v2/esphome
-for t in test_breadcrumbs test_discovery_driver test_rs485_info_decode test_rs485_temp_decode test_bms_link_sniffer_core test_bms_link_sniffer_inject test_value_pacing; do
-  clang++ -std=gnu++20 -Wall -Wextra -I. -Itests/stubs -Iincludes tests/$t.cpp -o /tmp/$t && /tmp/$t
+for t in test_breadcrumbs test_discovery_driver test_rs485_info_decode test_rs485_temp_decode test_bms_link_sniffer_core test_bms_link_sniffer_inject test_bms_link_sniffer_read test_bms_link_sniffer_telecontrol test_pylontech_can test_pylontech_rs485_handler test_value_pacing; do
+  clang++ -std=gnu++20 -Wall -Wextra -I. -Itests/stubs -Iincludes -iquote ../../shared/esphome tests/$t.cpp -o /tmp/$t && /tmp/$t
 done
 ```
 
+- **`test_pylontech_can.cpp`** — CAN gateway handler oracle (pytest-style stub host for pylontech_can.h): commit-on-acceptance (a refused publish advances no hysteresis state/timestamp, so the next diagnostic pass re-sends it; gateway feedback round 2026-11-14) + half-invalid cell extremes publish nothing (no false delta-0.000 "balanced battery")
+- **`test_pylontech_rs485_handler.cpp`** — RS485 handler state-machine oracle through the stub UART (tests/stubs/esphome/components/uart/uart.h): one checksum-valid-but-unparseable alarm frame preserves the previous valid alarm set (emptying stack alarms is the 10-strike poll-alarm transition's exclusive privilege), and checksum-valid-but-unusable analog responses never mark the channel online (freshness/online live in the decoded branch only)
 - **`test_discovery_driver.cpp`** — the two-stream discovery driver: 15-tick convergence (36 CAN + 261 RS485 sites), starvation negative control (pins the pre-#44 semantics at 132 ticks / 2,637 publishes), pool-rejection resume, reconnect + short-gap cursor rewind, yaml-exact button blast. Models stream sizes, not real payloads — the on-device retained-config count (285) is the real-stream proof.
 - **`test_breadcrumbs.cpp`** — breadcrumb stage marks, snapshot/report gating, result-controllable stub MQTT client
-- **`test_rs485_info_decode.cpp`** / **`test_rs485_temp_decode.cpp`** — RS485 INFO + temperature decoders
+- **`test_rs485_info_decode.cpp`** / **`test_rs485_temp_decode.cpp`** — RS485 INFO + temperature decoders (fixtures shared via `tests/fixtures/pylontech_frame_fixtures.h`)
 - **`test_value_pacing.cpp`** — issue #53 pacing oracle: pool-only admission (the 29-slot pool is the only gate, concurrent-drain sim), fixed slot occurrences (change types included), commit-on-acceptance retry, pass stops at the first client refusal, storm fairness + bounded cell recovery, flap resilience (slots immovable through 30 s flaps; reconnect catch-up burst bounded by the pass stop; post-flap steady passes fit the pool), slow-drain shaping
 
-NOTE: do NOT add `-I../../shared/esphome` to these compiles — on macOS's case-insensitive filesystem it shadows the SDK's own `<Availability.h>` and corrupts the libc headers. The shared headers resolve via relative includes from the test files.
+NOTE: do NOT replace `-iquote ../../shared/esphome` with `-I../../shared/esphome` — on macOS's case-insensitive filesystem a `-I` path containing `availability.h` shadows the SDK's own `<Availability.h>` and corrupts the libc headers (twice-burned). `-iquote` only affects `"..."` includes, so the shared headers resolve for the handler suites while angle-bracket SDK lookups stay clean. The handler oracles (`test_pylontech_can`, `test_pylontech_rs485_handler`) compile the REAL headers with the host stub umbrella at `tests/stubs/esphome.h`; device builds never see that file.
 
 ## Architecture
 

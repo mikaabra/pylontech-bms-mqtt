@@ -28,6 +28,7 @@ inline uint32_t millis() { return g_ms; }
 #define ESP_LOGE(tag, ...) BC_CAPTURE_LOG_("ERROR", tag, __VA_ARGS__)
 #define ESP_LOGW(tag, ...) BC_CAPTURE_LOG_("WARN", tag, __VA_ARGS__)
 #define ESP_LOGI(tag, ...) BC_CAPTURE_LOG_("INFO", tag, __VA_ARGS__)
+#define ESP_LOGD(tag, ...) BC_CAPTURE_LOG_("DEBUG", tag, __VA_ARGS__)
 
 namespace esphome {
 // ESPHome's App is a global OBJECT, not a type; publish paths call
